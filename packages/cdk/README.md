@@ -4,7 +4,7 @@ This package contains the AWS CDK infrastructure definitions for the fdnix hybri
 
 ## Architecture Overview
 
-The infrastructure consists of four main stacks, a certificate stack, and a set of constructs for building docker images and lambda layers.
+The infrastructure consists of four main stacks, a certificate stack, and a set of constructs for building Docker images and Lambda layers.
 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
 2.  **Database Stack** - S3 artifact storage + Lambda Layers for the DuckDB file and the DuckDB shared library.
@@ -29,7 +29,7 @@ graph TD
     subgraph "FdnixPipelineStack"
         sfn[Step Functions Pipeline]
         ecs[ECS Fargate]
-        ecr[ECR Repositories]
+        ecr[ECR Repository]
     end
 
     subgraph "FdnixSearchApiStack"
@@ -60,24 +60,17 @@ graph TD
 
 ## Data Pipeline Diagram
 
-The data pipeline is orchestrated by a Step Functions state machine that runs a series of ECS Fargate tasks.
+The data pipeline is orchestrated by a Step Functions state machine that runs a single ECS Fargate task. The unified container handles metadata, embeddings, and publishes the Lambda layer.
 
 ```mermaid
 graph TD
     subgraph "FdnixPipelineStack"
         direction LR
-        start((Start)) --> metadata_task{Metadata Task}
-        metadata_task --> embedding_task{Embedding Task}
-        embedding_task --> publish_task{Publish Layer Task}
-        publish_task --> done((End))
+        start((Start)) --> indexer_task{Indexer Task (metadata + embeddings + publish)}
+        indexer_task --> done((End))
 
-        subgraph "ECS Fargate Tasks"
-            metadata_task
-            embedding_task
-        end
-
-        subgraph "Lambda Function"
-            publish_task
+        subgraph "ECS Fargate Task"
+            indexer_task
         end
     end
 
@@ -87,10 +80,8 @@ graph TD
         db_layer[[Lambda Layer: DuckDB File]]
     end
 
-    metadata_task -- reads nixpkgs data --> s3_artifacts
-    embedding_task -- reads from, writes to --> s3_artifacts
-    publish_task -- reads from --> s3_artifacts
-    publish_task -- publishes to --> db_layer
+    indexer_task -- reads/writes --> s3_artifacts
+    indexer_task -- publishes to --> db_layer
 ```
 
 ## Search API Diagram
@@ -249,19 +240,17 @@ npm run synth
 **Resources:**
 
 -   `fdnix-processing-cluster` - ECS Fargate cluster.
--   `fdnix-metadata-generator` - ECR repository.
--   `fdnix-embedding-generator` - ECR repository.
--   `fdnix-publish-layer` - Lambda function for layer publishing.
+-   `fdnix-nixpkgs-indexer` - ECR repository (unified container).
 -   `fdnix-daily-pipeline` - Step Functions state machine.
 -   `fdnix-daily-pipeline-trigger` - EventBridge rule (daily at 2:00 AM UTC).
 
 **Key Features:**
 
--   Three-step orchestrated pipeline: metadata -> embeddings -> publish layer.
+-   Single-step pipeline: one ECS task runs metadata + embeddings and publishes the Lambda layer.
 -   Automated daily execution (2:00 AM UTC).
--   Containerized processing tasks for metadata generation and embedding.
--   Custom `DockerBuildConstruct` for building container images.
--   Automatic Lambda layer publishing from S3 artifacts.
+-   Unified container for the entire indexing flow.
+-   Custom `DockerBuildConstruct` for building the container image.
+-   Layer publishing performed inside the container (no separate Lambda).
 -   CloudWatch logging and monitoring.
 
 ### Search API Stack (`FdnixSearchApiStack`)

@@ -71,11 +71,13 @@ npm run synth
 ### Project Structure
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)
-  - `containers/` (`metadata-generator/`, `embedding-generator/`)
-  - `search-lambda/` (Lambda backend)
+  - `containers/` (unified `nixpkgs-indexer/` container for metadata + embeddings + optional layer publish)
+  - `search-lambda/` (C++ Lambda backend)
   - `frontend/` (SolidJS)
-- cdk commands must be run from cdk root
+- CDK commands must be run from the `packages/cdk` workspace
 - Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
+
+Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs both phases. The container can also publish the DuckDB artifact to the Lambda layer as part of the same ECS task. See `packages/containers/README.md`.
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
 
