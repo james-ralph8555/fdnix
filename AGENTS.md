@@ -55,4 +55,4 @@ Planned monorepo layout (see INIT.md):
 
 ## Architecture Overview
 
-fdnix performs hybrid search over nixpkgs: semantic vectors (Faiss in S3) + keyword relevance (OpenSearch). The API (Lambda) fuses results and hydrates from DynamoDB; a SolidJS static UI queries the API. See `INIT.md` for implementation details.
+fdnix performs hybrid search over nixpkgs: semantic vectors (Faiss in S3 bucket `fdnix-vec`) + keyword relevance (OpenSearch). The API (Lambda) fuses results and hydrates from DynamoDB; a SolidJS static UI queries the API. See `INIT.md` for implementation details.

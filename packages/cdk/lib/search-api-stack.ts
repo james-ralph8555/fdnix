@@ -40,14 +40,6 @@ export class FdnixSearchApiStack extends Stack {
     databaseStack.packagesTable.grantReadData(this.lambdaExecutionRole);
     databaseStack.vectorIndexBucket.grantRead(this.lambdaExecutionRole);
 
-    // Grant OpenSearch access
-    this.lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'aoss:APIAccessAll',
-      ],
-      resources: [databaseStack.searchCollection.attrArn],
-    }));
 
     // Grant Bedrock access for query embeddings
     this.lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
@@ -83,7 +75,6 @@ export class FdnixSearchApiStack extends Stack {
       environment: {
         DYNAMODB_TABLE: databaseStack.packagesTable.tableName,
         S3_BUCKET: databaseStack.vectorIndexBucket.bucketName,
-        OPENSEARCH_ENDPOINT: databaseStack.searchCollection.attrCollectionEndpoint,
         AWS_REGION: this.region,
         BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
         VECTOR_INDEX_KEY: 'faiss-index/packages.index',
@@ -127,24 +118,12 @@ export class FdnixSearchApiStack extends Stack {
       methodResponses: [
         {
           statusCode: '200',
-          responseHeaders: {
-            'Content-Type': true,
-            'Access-Control-Allow-Origin': true,
-          },
         },
         {
           statusCode: '400',
-          responseHeaders: {
-            'Content-Type': true,
-            'Access-Control-Allow-Origin': true,
-          },
         },
         {
           statusCode: '500',
-          responseHeaders: {
-            'Content-Type': true,
-            'Access-Control-Allow-Origin': true,
-          },
         },
       ],
     });
@@ -173,10 +152,6 @@ export class FdnixSearchApiStack extends Stack {
       methodResponses: [
         {
           statusCode: '200',
-          responseHeaders: {
-            'Content-Type': true,
-            'Access-Control-Allow-Origin': true,
-          },
         },
       ],
     });

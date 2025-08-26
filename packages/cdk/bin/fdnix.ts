@@ -90,11 +90,6 @@ new cdk.CfnOutput(databaseStack, 'VectorIndexBucketName', {
   exportName: 'FdnixVectorIndexBucketName',
 });
 
-new cdk.CfnOutput(databaseStack, 'SearchCollectionEndpoint', {
-  value: databaseStack.searchCollection.attrCollectionEndpoint,
-  description: 'Endpoint URL for the OpenSearch Serverless collection',
-  exportName: 'FdnixSearchCollectionEndpoint',
-});
 
 new cdk.CfnOutput(pipelineStack, 'MetadataRepositoryUri', {
   value: pipelineStack.metadataRepository.repositoryUri,

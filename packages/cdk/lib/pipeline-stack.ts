@@ -75,12 +75,6 @@ export class FdnixPipelineStack extends Stack {
     databaseStack.packagesTable.grantReadWriteData(fargateTaskRole);
     databaseStack.vectorIndexBucket.grantReadWrite(fargateTaskRole);
 
-    // Grant OpenSearch access
-    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['aoss:APIAccessAll'],
-      resources: [databaseStack.searchCollection.attrArn],
-    }));
 
     // Grant Bedrock access
     fargateTaskRole.addToPolicy(new iam.PolicyStatement({
@@ -141,7 +135,6 @@ export class FdnixPipelineStack extends Stack {
       environment: {
         DYNAMODB_TABLE: databaseStack.packagesTable.tableName,
         S3_BUCKET: databaseStack.vectorIndexBucket.bucketName,
-        OPENSEARCH_ENDPOINT: databaseStack.searchCollection.attrCollectionEndpoint,
         AWS_REGION: this.region,
         BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
       },

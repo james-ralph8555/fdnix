@@ -13,7 +13,7 @@ The project is designed as a monorepo with the following planned structure:
 - **Backend**: AWS Lambda search API with API Gateway
 - **Data Pipeline**: Daily automated indexing using AWS Fargate containers
 - **Infrastructure**: AWS CDK for Infrastructure as Code
-- **Data Stores**: DynamoDB (metadata), S3 (Faiss vector index), OpenSearch Serverless (keyword search)
+- **Data Stores**: DynamoDB (metadata), S3 (Faiss vector index; bucket `fdnix-vec`), OpenSearch Serverless (keyword search)
 
 ## Key Components
 

@@ -10,12 +10,17 @@
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
     "lint": "npm run lint --workspaces",
-    "deploy": "npm run deploy --workspace=packages/cdk",
-    "destroy": "npm run destroy --workspace=packages/cdk"
+    "cdk": "cd packages/cdk && npm install && npx cdk",
+    "deploy": "npm run cdk deploy --all",
+    "destroy": "npm run cdk destroy --all",
+    "diff": "npm run cdk diff",
+    "synth": "npm run cdk synth",
+    "bootstrap": "npm run cdk bootstrap"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "aws-cdk": "^2.100.0"
   },
   "engines": {
     "node": ">=18.0.0",

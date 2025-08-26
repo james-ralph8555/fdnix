@@ -36,7 +36,7 @@ Note: If you’re looking for the implementation details and deployment plan, se
 
 - Frontend (SolidJS SSG) provides a fast, static UI.
 - API (AWS Lambda via API Gateway) accepts your query and performs a hybrid search:
-  - Vector search: Embeds your query and searches a Faiss index stored in S3.
+  - Vector search: Embeds your query and searches a Faiss index stored in S3 bucket `fdnix-vec`.
   - Keyword search: Queries an OpenSearch Serverless index for textual relevance.
   - Fusion + hydrate: Combines and ranks results, then fetches full metadata from DynamoDB.
 - A daily data pipeline refreshes metadata, embeddings, and indexes.
@@ -51,16 +51,34 @@ Note: If you’re looking for the implementation details and deployment plan, se
 - Feedback: File issues with feature ideas or rough edges you hit while searching.
 - Code: Contributions are welcome once the initial scaffolding lands. The project uses a monorepo with workspaces for infrastructure, data processing containers, the search API, and the frontend.
 
-## Development (Heads‑Up)
+## Development & Deployment
 
-While the code is being scaffolded, the following is the expected layout and tooling:
+### Quick Start
+```bash
+# Install dependencies
+npm install
 
+# Bootstrap CDK (one-time setup)
+npm run bootstrap
+
+# Deploy all infrastructure
+npm run deploy
+
+# View deployment diff
+npm run diff
+
+# Generate CloudFormation templates
+npm run synth
+```
+
+### Project Structure
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)
   - `containers/` (`metadata-generator/`, `embedding-generator/`)
   - `search-lambda/` (Node.js Lambda)
   - `frontend/` (SolidJS)
-- Deployment uses AWS CDK; the frontend is served via S3 + CloudFront.
+- All CDK commands can be run from the repository root
+- Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
 

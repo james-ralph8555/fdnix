@@ -1,19 +1,19 @@
 {
-  "app": "npx ts-node --prefer-ts-exts bin/fdnix.ts",
+  "app": "cd packages/cdk && npx ts-node --prefer-ts-exts bin/fdnix.ts",
   "watch": {
     "include": [
-      "**"
+      "packages/cdk/**"
     ],
     "exclude": [
-      "README.md",
-      "cdk*.json",
-      "**/*.d.ts",
-      "**/*.js",
-      "tsconfig.json",
-      "package*.json",
-      "yarn.lock",
-      "node_modules",
-      "test"
+      "packages/cdk/README.md",
+      "packages/cdk/cdk*.json",
+      "packages/cdk/**/*.d.ts",
+      "packages/cdk/**/*.js",
+      "packages/cdk/tsconfig.json",
+      "packages/cdk/package*.json",
+      "packages/cdk/yarn.lock",
+      "packages/cdk/node_modules",
+      "packages/cdk/test"
     ]
   },
   "context": {

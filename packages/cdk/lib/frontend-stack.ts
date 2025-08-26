@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, Duration } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, Duration, Size } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
@@ -17,7 +17,7 @@ export interface FdnixFrontendStackProps extends StackProps {
 export class FdnixFrontendStack extends Stack {
   public readonly hostingBucket: s3.Bucket;
   public readonly distribution: cloudfront.Distribution;
-  public readonly oac: cloudfront.OriginAccessControl;
+  public readonly oac: cloudfront.S3OriginAccessControl;
 
   constructor(scope: Construct, id: string, props: FdnixFrontendStackProps) {
     super(scope, id, props);
@@ -38,14 +38,9 @@ export class FdnixFrontendStack extends Stack {
     });
 
     // Origin Access Control for CloudFront
-    this.oac = new cloudfront.OriginAccessControl(this, 'OriginAccessControl', {
+    this.oac = new cloudfront.S3OriginAccessControl(this, 'OriginAccessControl', {
       originAccessControlName: 'fdnix-oac',
       description: 'Origin Access Control for fdnix frontend',
-      originAccessControlOriginType: cloudfront.OriginAccessControlOriginType.S3,
-      signing: {
-        signingBehavior: cloudfront.SigningBehavior.ALWAYS,
-        signingProtocol: cloudfront.SigningProtocol.SIGV4,
-      },
     });
 
     // SSL Certificate (if domain is provided)
@@ -81,7 +76,6 @@ export class FdnixFrontendStack extends Stack {
     };
 
     this.distribution = new cloudfront.Distribution(this, 'CloudFrontDistribution', {
-      distributionName: 'fdnix-cdn',
       comment: 'CloudFront distribution for fdnix frontend',
       defaultBehavior,
       additionalBehaviors: {
@@ -140,7 +134,7 @@ export class FdnixFrontendStack extends Stack {
       distribution: this.distribution,
       distributionPaths: ['/*'],
       memoryLimit: 512,
-      ephemeralStorageSize: 1024,
+      ephemeralStorageSize: Size.mebibytes(1024),
     });
 
     // Cache invalidation function for future CI/CD integration
