@@ -9,53 +9,55 @@ The infrastructure consists of four main stacks, a certificate stack, and a set 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
 2.  **Database Stack** - S3 artifact storage + Lambda Layers for the DuckDB file (minified) and the DuckDB shared library.
 3.  **Pipeline Stack** - Data processing pipeline that builds the DuckDB file and publishes the Lambda layer.
-4.  **Search API Stack** - A C++ Lambda-based search API using the DuckDB layers and Google Gemini for embeddings.
+4.  **Search API Stack** - A C++ Lambda-based search API using the DuckDB layers and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
 5.  **Frontend Stack** - Static site hosting with CloudFront (no CDK-managed custom domain).
 
 ## Architecture Diagram
 
 ```mermaid
 graph TD
-    subgraph "FdnixCertificateStack"
-        cert[ACM Certificate]
+    %% Top-level stacks
+    subgraph FdnixCertificateStack
+        cert["ACM Certificate"]
     end
 
-    subgraph "FdnixDatabaseStack"
-    s3_artifacts[(S3 Artifacts)]
-        db_layer[[Lambda Layer: DuckDB File (minified)]]
-        db_lib_layer[[Lambda Layer: DuckDB Library]]
+    subgraph FdnixDatabaseStack
+        s3_artifacts["S3 Artifacts"]
+        db_layer["Lambda Layer - DuckDB file (minified)"]
+        db_lib_layer["Lambda Layer - DuckDB library"]
     end
 
-    subgraph "FdnixPipelineStack"
-        sfn[Step Functions Pipeline]
-        ecs[ECS Fargate]
-        ecr[ECR Repository]
+    subgraph FdnixPipelineStack
+        sfn["Step Functions Pipeline"]
+        ecs["ECS Fargate"]
+        ecr["ECR Repository"]
     end
 
-    subgraph "FdnixSearchApiStack"
-        api[API Gateway]
-        lambda[C++ Lambda]
-        gemini[Google Gemini API]
+    subgraph FdnixSearchApiStack
+        api["API Gateway"]
+        lambda["C++ Lambda"]
+        bedrock["AWS Bedrock Runtime"]
     end
 
-    subgraph "FdnixFrontendStack"
-        cf[CloudFront]
-        s3_hosting[(S3 Hosting)]
+    subgraph FdnixFrontendStack
+        cf["CloudFront"]
+        s3_hosting["S3 Hosting"]
     end
 
-    user[(Users)] --> cf
+    user["Users"] --> cf
     cf --> s3_hosting
     cf --> api
     api --> lambda
     lambda --> db_layer
     lambda --> db_lib_layer
-    lambda --> gemini
+    lambda --> bedrock
 
     sfn --> ecs
     ecs --> s3_artifacts
     sfn --> db_layer
 
-    cert --> cf
+    %% No CDK-managed custom domain: certificate provisioned separately
+    %% (no direct connection from cert to CloudFront in CDK)
 ```
 
 ## Data Pipeline Diagram
@@ -93,7 +95,7 @@ graph TD
     subgraph "FdnixSearchApiStack"
         direction LR
         api[API Gateway] --> lambda[C++ Lambda]
-        lambda --> gemini[Google Gemini Embeddings]
+        lambda --> bedrock[AWS Bedrock Embeddings]
     end
 
     subgraph "FdnixDatabaseStack"
@@ -150,11 +152,10 @@ npm install
 
 Embeddings configuration:
 
--   Runtime (API, Google Gemini):
-    -   `GEMINI_API_KEY` - API key for runtime query embeddings (store in SSM/Secrets Manager).
-    -   `GEMINI_MODEL_ID` - Embedding model id (default: `gemini-embedding-001`).
-    -   `GEMINI_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
-    -   `GEMINI_TASK_TYPE` - Embedding task type (default: `SEMANTIC_SIMILARITY`).
+-   Runtime (API, AWS Bedrock real-time):
+    -   `AWS_REGION` - Region for Bedrock Runtime (Lambda default region is used if not set).
+    -   `BEDROCK_MODEL_ID` - Embedding model id (default: `amazon.titan-embed-text-v2:0`).
+    -   `BEDROCK_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
 
 -   Pipeline (AWS Bedrock batch, Amazon Titan Embeddings):
     -   `BEDROCK_MODEL_ID` (default: `amazon.titan-embed-text-v2:0`)
@@ -293,7 +294,7 @@ npm run synth
 
 -   Hybrid search using DuckDB VSS (semantic) + FTS (keyword) from a single file.
 -   Direct DuckDB queries (no external databases).
- -   Real-time query embeddings via Google Gemini (REST API).
+ -   Real-time query embeddings via AWS Bedrock Runtime (Amazon Titan Embeddings).
 -   CORS enabled for frontend integration.
 -   Rate limiting and usage plans (100 req/sec, 10K/day).
 -   Health check endpoint.

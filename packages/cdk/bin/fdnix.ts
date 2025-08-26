@@ -74,12 +74,10 @@ const certificateStack = new FdnixCertificateStack(app, stackId('CertificateStac
   domainName,
 });
 
-// Frontend Stack - Static site hosting with custom domain and SSL certificate
+// Frontend Stack - Static site hosting
 const frontendStack = new FdnixFrontendStack(app, stackId('FrontendStack'), {
   env,
   searchApiStack,
-  domainName,
-  certificateArn: certificateStack.certificate.certificateArn,
   description: 'Frontend hosting for fdnix search interface',
   tags: {
     Project: 'fdnix',

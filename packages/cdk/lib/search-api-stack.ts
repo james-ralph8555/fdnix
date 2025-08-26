@@ -29,8 +29,16 @@ export class FdnixSearchApiStack extends Stack {
       ],
     });
 
-    // No longer need Bedrock permissions as we're using Google Gemini API
-    // Google Gemini API key will be provided via secrets manager or environment variable
+    // Bedrock permissions for real-time embedding generation
+    const bedrockModelId = 'amazon.titan-embed-text-v2:0';
+    const bedrockModelArn = `arn:aws:bedrock:${Stack.of(this).region}::foundation-model/${bedrockModelId}`;
+    this.lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
+      actions: [
+        'bedrock:InvokeModel',
+        'bedrock:InvokeModelWithResponseStream',
+      ],
+      resources: [bedrockModelArn],
+    }));
 
     // Lambda function for hybrid search API
     // Implemented in C++ using the custom runtime (PROVIDED_AL2023).
@@ -46,10 +54,8 @@ export class FdnixSearchApiStack extends Stack {
       layers: [databaseStack.databaseLayer, databaseStack.duckdbLibraryLayer],
       environment: {
         DUCKDB_PATH: '/opt/fdnix/fdnix.duckdb',
-        GEMINI_MODEL_ID: 'gemini-embedding-001',
-        GEMINI_OUTPUT_DIMENSIONS: '256',
-        GEMINI_TASK_TYPE: 'SEMANTIC_SIMILARITY',
-        // TODO: Add GOOGLE_GEMINI_API_KEY from AWS Secrets Manager
+        BEDROCK_MODEL_ID: bedrockModelId,
+        BEDROCK_OUTPUT_DIMENSIONS: '256',
       },
     });
 

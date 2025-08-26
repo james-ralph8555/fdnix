@@ -53,7 +53,7 @@ graph TD
     subgraph "Backend API"
         K --> L{Search Lambda (C++)};
         L --> M[[Lambda Layer: fdnix-db]];
-        L --> N[Google Gemini API];
+        L --> N[AWS Bedrock Runtime];
         M --> O[(DuckDB file: /opt/fdnix/fdnix.duckdb)];
     end
 
@@ -66,7 +66,7 @@ graph TD
 | API | Amazon API Gateway (REST API) |
 | Infrastructure as Code | AWS CDK (TypeScript) |
 | Primary Data Store | DuckDB file in a Lambda Layer (read-only) |
-| Vector Embeddings | AWS Bedrock (Amazon Titan) for pipeline; Google Gemini for runtime |
+| Vector Embeddings | AWS Bedrock (Amazon Titan) for both pipeline (batch) and runtime (real-time) |
 | Vector Storage | DuckDB VSS index within the database file |
 | Traditional Search | DuckDB FTS index within the database file |
 | Data Processing | AWS Fargate |
@@ -122,7 +122,7 @@ Phase 1: Foundation & Infrastructure (CDK) ✅ **COMPLETED**
 
             ✅ pipeline-stack.ts: ECS Fargate cluster, ECR repositories, task definitions, and EventBridge daily trigger for data processing pipeline
 
-            ✅ search-api-stack.ts: C++ Lambda function with custom runtime, API Gateway, and DuckDB layer attachment with Gemini configuration (no Bedrock permissions)
+            ✅ search-api-stack.ts: C++ Lambda function with custom runtime, API Gateway, and DuckDB layer attachment with Bedrock permissions for real-time embeddings
 
             ✅ frontend-stack.ts: S3 static hosting and CloudFront distribution with custom domain support
 
@@ -194,7 +194,7 @@ Phase 3: Backend Search API
 
     Tasks:
 
-        Initialize Lambda Project (search-lambda): Scaffold a C++ Lambda targeting the custom runtime (`provided.al2023`). Package the compiled binary as `bootstrap` for deployment. Link to DuckDB (C API/C++ API) to query the database file bundled in the Lambda Layer. Use a minimal HTTP client to call the Google Gemini Embeddings API for runtime query embeddings (API key in `x-goog-api-key`).
+        Initialize Lambda Project (search-lambda): Scaffold a C++ Lambda targeting the custom runtime (`provided.al2023`). Package the compiled binary as `bootstrap` for deployment. Link to DuckDB (C API/C++ API) to query the database file bundled in the Lambda Layer. Use AWS SDK for C++ Bedrock Runtime to generate query embeddings in real time.
 
         Implement API Handler:
 
@@ -206,7 +206,7 @@ Phase 3: Backend Search API
 
             Vector Search (VSS):
 
-                Call Google Gemini to generate an embedding for the user's search term.
+                Call AWS Bedrock Runtime to generate an embedding for the user's search term.
 
                 Query the DuckDB VSS index in `/opt/fdnix/fdnix.duckdb` using the embedding to retrieve top-K similar package IDs.
 

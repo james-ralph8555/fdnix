@@ -21,19 +21,32 @@ find_package(PkgConfig REQUIRED)
 find_package(ZLIB REQUIRED)
 
 # Find AWS SDK for C++ (for HTTP client utilities)
-find_package(AWSSDK REQUIRED COMPONENTS core)
+find_package(AWSSDK REQUIRED COMPONENTS core bedrock-runtime)
 
 # Find AWS Lambda Runtime
 find_package(aws-lambda-runtime REQUIRED)
 
+# Find DuckDB
+find_library(DUCKDB_LIBRARY
+    NAMES duckdb libduckdb
+    PATHS /usr/local/lib
+    REQUIRED
+)
+find_path(DUCKDB_INCLUDE_DIR
+    NAMES duckdb.hpp
+    PATHS /usr/local/include
+    REQUIRED
+)
+
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(${DUCKDB_INCLUDE_DIR})
 
 # Source files
 set(SOURCES
     src/main.cpp
     src/duckdb_client.cpp
-    src/gemini_client.cpp
+    src/bedrock_client.cpp
 )
 
 # Create the Lambda executable
@@ -48,7 +61,8 @@ target_link_libraries(${PROJECT_NAME}
     ${AWSSDK_LINK_LIBRARIES}
     ${CURL_LIBRARIES}
     ZLIB::ZLIB
-    dl  # For DuckDB dynamic loading
+    ${DUCKDB_LIBRARY}
+    dl  # For dynamic loading
 )
 
 # Install the bootstrap binary

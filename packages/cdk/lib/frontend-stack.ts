@@ -1,18 +1,15 @@
-import { Stack, StackProps, RemovalPolicy, Duration, Size } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, Duration, Size, CfnOutput } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as certificatemanager from 'aws-cdk-lib/aws-certificatemanager';
 import * as path from 'path';
 import { FdnixSearchApiStack } from './search-api-stack';
 
 export interface FdnixFrontendStackProps extends StackProps {
   searchApiStack: FdnixSearchApiStack;
-  domainName?: string;
-  certificateArn?: string;
 }
 
 export class FdnixFrontendStack extends Stack {
@@ -23,7 +20,7 @@ export class FdnixFrontendStack extends Stack {
   constructor(scope: Construct, id: string, props: FdnixFrontendStackProps) {
     super(scope, id, props);
 
-    const { searchApiStack, domainName, certificateArn } = props;
+    const { searchApiStack } = props;
 
     // S3 bucket for static site hosting (CDK-managed for idempotency)
     this.hostingBucket = new s3.Bucket(this, 'FrontendHostingBucket', {
@@ -40,7 +37,7 @@ export class FdnixFrontendStack extends Stack {
       description: 'Origin Access Control for fdnix frontend',
     });
 
-    // Certificate logic removed - custom domain configuration disabled
+    // No custom domain configured here (managed manually post-deploy)
 
     // CloudFront distribution
     const defaultBehavior: cloudfront.BehaviorOptions = {
@@ -58,7 +55,8 @@ export class FdnixFrontendStack extends Stack {
       origin: new origins.RestApiOrigin(searchApiStack.api),
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
-      originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_S3_ORIGIN,
+      // Forward common CORS headers/querystrings for API origin
+      originRequestPolicy: cloudfront.OriginRequestPolicy.CORS_CUSTOM_ORIGIN,
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
     };
 
@@ -83,25 +81,14 @@ export class FdnixFrontendStack extends Stack {
           ttl: Duration.minutes(5),
         },
       ],
-      domainNames: undefined,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
       enabled: true,
     });
 
-    // Bucket policy to allow CloudFront access via OAC
-    this.hostingBucket.addToResourcePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      principals: [new iam.ServicePrincipal('cloudfront.amazonaws.com')],
-      actions: ['s3:GetObject'],
-      resources: [`${this.hostingBucket.bucketArn}/*`],
-      conditions: {
-        StringEquals: {
-          'AWS:SourceArn': `arn:aws:cloudfront::${this.account}:distribution/${this.distribution.distributionId}`,
-        },
-      },
-    }));
+    // No explicit bucket policy needed: S3BucketOrigin.withOriginAccessControl
+    // attaches least-privilege policies for the distribution automatically.
 
     // DNS is managed by Cloudflare
     // After deployment, configure Cloudflare DNS to point to the CloudFront distribution:
@@ -139,5 +126,24 @@ export class FdnixFrontendStack extends Stack {
         `arn:aws:cloudfront::${this.account}:distribution/${this.distribution.distributionId}`,
       ],
     }));
+
+    // Outputs
+    new CfnOutput(this, 'FrontendBucketName', {
+      value: this.hostingBucket.bucketName,
+      description: 'Name of the S3 bucket hosting the frontend',
+      exportName: 'FdnixFrontendBucketName',
+    });
+
+    new CfnOutput(this, 'FrontendDistributionId', {
+      value: this.distribution.distributionId,
+      description: 'CloudFront distribution ID for the frontend',
+      exportName: 'FdnixFrontendDistributionId',
+    });
+
+    new CfnOutput(this, 'FrontendDistributionDomainName', {
+      value: this.distribution.domainName,
+      description: 'CloudFront distribution domain name',
+      exportName: 'FdnixFrontendDistributionDomainName',
+    });
   }
 }

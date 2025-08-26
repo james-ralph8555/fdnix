@@ -14,7 +14,10 @@ RUN dnf update -y && \
         git \
         wget \
         tar \
-        gzip && \
+        gzip \
+        python3 \
+        python3-pip \
+        python3-devel && \
     dnf clean all
 
 # Build stage
@@ -50,6 +53,17 @@ RUN git clone --depth 1 https://github.com/awslabs/aws-lambda-cpp.git && \
     ninja -C build -j$(nproc) && \
     ninja -C build install && \
     rm -rf /build/aws-lambda-cpp
+
+# Build DuckDB from source for ARM64
+RUN git clone https://github.com/duckdb/duckdb.git && \
+    cd duckdb && \
+    CORE_EXTENSIONS='autocomplete;httpfs;icu;json;tpch' GEN=ninja make && \
+    cp build/release/src/libduckdb.so /usr/local/lib/ && \
+    cp src/include/duckdb.hpp /usr/local/include/ && \
+    cp src/include/duckdb.h /usr/local/include/ && \
+    cp -r src/include/duckdb /usr/local/include/ && \
+    ldconfig && \
+    rm -rf /build/duckdb
 
 # Copy source code
 COPY . /build/lambda

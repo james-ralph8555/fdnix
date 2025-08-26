@@ -7,13 +7,13 @@
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/core/utils/memory/stl/AWSString.h>
 #include "duckdb_client.hpp"
-#include "gemini_client.hpp"
+#include "bedrock_client.hpp"
 
 using namespace aws::lambda_runtime;
 
 // Global clients (initialized once)
 static std::unique_ptr<fdnix::DuckDBClient> g_duckdb_client;
-static std::unique_ptr<fdnix::GeminiClient> g_gemini_client;
+static std::unique_ptr<fdnix::BedrockClient> g_bedrock_client;
 
 invocation_response handler(invocation_request const& request)
 {
@@ -44,9 +44,9 @@ invocation_response handler(invocation_request const& request)
         }
         
         // Handle search request
-        if (!query_param.empty() && g_duckdb_client && g_gemini_client) {
+        if (!query_param.empty() && g_duckdb_client && g_bedrock_client) {
             // Generate embedding for the query
-            auto query_embedding = g_gemini_client->generate_embedding(query_param);
+            auto query_embedding = g_bedrock_client->generate_embedding(query_param);
             
             if (!query_embedding.empty()) {
                 // Perform hybrid search
@@ -119,8 +119,8 @@ invocation_response handler(invocation_request const& request)
         // Environment variables check
         const char* duckdb_path = std::getenv("DUCKDB_PATH");
         const char* duckdb_lib_path = std::getenv("DUCKDB_LIB_PATH");
-        const char* gemini_key = std::getenv("GOOGLE_GEMINI_API_KEY");
-        const char* gemini_model = std::getenv("GEMINI_MODEL_ID");
+        const char* bedrock_model = std::getenv("BEDROCK_MODEL_ID");
+        const char* aws_region = std::getenv("AWS_REGION");
         
         if (duckdb_path) {
             response_body.WithString("duckdb_path", duckdb_path);
@@ -128,19 +128,22 @@ invocation_response handler(invocation_request const& request)
         if (duckdb_lib_path) {
             response_body.WithString("duckdb_lib_path", duckdb_lib_path);
         }
-        if (gemini_key && gemini_model) {
-            response_body.WithString("gemini_model_id", gemini_model);
+        if (bedrock_model) {
+            response_body.WithString("bedrock_model_id", bedrock_model);
+        }
+        if (aws_region) {
+            response_body.WithString("aws_region", aws_region);
         }
         
         // Add client status
         response_body.WithBool("duckdb_initialized", g_duckdb_client != nullptr);
-        response_body.WithBool("gemini_initialized", g_gemini_client != nullptr);
+        response_body.WithBool("bedrock_initialized", g_bedrock_client != nullptr);
         
         if (g_duckdb_client) {
             response_body.WithBool("duckdb_healthy", g_duckdb_client->health_check());
         }
-        if (g_gemini_client) {
-            response_body.WithBool("gemini_healthy", g_gemini_client->health_check());
+        if (g_bedrock_client) {
+            response_body.WithBool("bedrock_healthy", g_bedrock_client->health_check());
         }
         
         // Create API Gateway response
@@ -185,9 +188,9 @@ int main()
     // Initialize global clients
     try {
         const char* duckdb_path = std::getenv("DUCKDB_PATH");
-        const char* gemini_key = std::getenv("GOOGLE_GEMINI_API_KEY");
-        const char* gemini_model = std::getenv("GEMINI_MODEL_ID");
-        
+        const char* bedrock_model = std::getenv("BEDROCK_MODEL_ID");
+        const char* aws_region = std::getenv("AWS_REGION");
+
         if (duckdb_path) {
             std::cout << "Initializing DuckDB client with path: " << duckdb_path << std::endl;
             g_duckdb_client = std::make_unique<fdnix::DuckDBClient>(duckdb_path);
@@ -198,13 +201,14 @@ int main()
         } else {
             std::cerr << "DUCKDB_PATH environment variable not set" << std::endl;
         }
-        
-        if (gemini_key) {
-            std::cout << "Initializing Gemini client with model: " << (gemini_model ? gemini_model : "default") << std::endl;
-            g_gemini_client = std::make_unique<fdnix::GeminiClient>(gemini_key, gemini_model ? gemini_model : "gemini-embedding-001");
-        } else {
-            std::cerr << "GOOGLE_GEMINI_API_KEY environment variable not set" << std::endl;
-        }
+        std::cout << "Initializing Bedrock client with model: "
+                  << (bedrock_model ? bedrock_model : "amazon.titan-embed-text-v2:0")
+                  << ", region: " << (aws_region ? aws_region : "us-east-1")
+                  << std::endl;
+        g_bedrock_client = std::make_unique<fdnix::BedrockClient>(
+            aws_region ? std::string(aws_region) : std::string("us-east-1"),
+            bedrock_model ? std::string(bedrock_model) : std::string("amazon.titan-embed-text-v2:0")
+        );
         
     } catch (const std::exception& e) {
         std::cerr << "Error initializing clients: " << e.what() << std::endl;
@@ -217,7 +221,7 @@ int main()
     
     // Cleanup clients
     g_duckdb_client.reset();
-    g_gemini_client.reset();
+    g_bedrock_client.reset();
     
     // Cleanup AWS SDK
     Aws::ShutdownAPI(options);

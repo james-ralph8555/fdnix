@@ -5,8 +5,8 @@ Planned C++ implementation of the fdnix hybrid search Lambda.
 - Runtime: AWS Lambda custom runtime (`provided.al2023`).
 - Packaging: Compile to a binary named `bootstrap` and zip for upload.
 - Query Engine: DuckDB opened read-only from a Lambda Layer (see below).
-- Embeddings: Google Gemini Embeddings API (HTTP) with API key auth.
-- Libraries: DuckDB (C/C++ API), minimal HTTP client for outbound requests.
+- Embeddings: AWS Bedrock Runtime (Amazon Titan Embeddings) for real-time query embeddings.
+- Libraries: DuckDB (C/C++ API), AWS SDK for C++ (core, bedrock-runtime), AWS Lambda C++ runtime.
 
 Status: C++ implementation in progress. The repo provides a Dockerfile and build script to produce the `bootstrap` binary expected by the CDK.
 
@@ -22,7 +22,7 @@ Status: C++ implementation in progress. The repo provides a Dockerfile and build
 ## Request Handling
 
 - `GET /v1/search?q=<query>`
-  - Embed `q` using Google Gemini Embeddings API (e.g., `gemini-embedding-001`) with 256 dimensions.
+  - Embed `q` using AWS Bedrock Runtime (e.g., `amazon.titan-embed-text-v2:0`) with 256 dimensions.
   - Run two queries against `/opt/fdnix/fdnix.duckdb`:
     - VSS: nearest neighbors over `embeddings.vector` by the query embedding
     - FTS: BM25 over the FTS index from `packages_fts_source`
@@ -31,18 +31,11 @@ Status: C++ implementation in progress. The repo provides a Dockerfile and build
 
 ## Configuration
 
-Environment variables used for embeddings:
+Environment variables used for embeddings (real-time via Bedrock):
 
-- `GEMINI_API_KEY`: API key for Gemini requests (required).
-- `GEMINI_MODEL_ID`: Embedding model id (default `gemini-embedding-001`).
-- `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default `256`).
-- `GEMINI_TASK_TYPE`: Embedding task type (default `SEMANTIC_SIMILARITY`).
-
-Rate limits (matched to the data pipeline defaults):
-
-- `GEMINI_MAX_CONCURRENT_REQUESTS` (default `10`)
-- `GEMINI_REQUESTS_PER_MINUTE` (default `3000`)
-- `GEMINI_TOKENS_PER_MINUTE` (default `1000000`)
+- `AWS_REGION`: AWS region for Bedrock Runtime (defaults to Lambda region).
+- `BEDROCK_MODEL_ID`: Embedding model id (default `amazon.titan-embed-text-v2:0`).
+- `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default `256`).
 
 ## Build
 

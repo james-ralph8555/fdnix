@@ -109,8 +109,7 @@ export class FdnixDatabaseStack extends Stack {
       }),
     );
 
-    // No longer need Bedrock permissions as we're using Google Gemini API
-    // Google Gemini API key will be provided via secrets manager or environment variable
+    // Note: Bedrock permissions are granted in the Search API stack to the Lambda execution role
 
     // Outputs
     new CfnOutput(this, 'ArtifactsBucketName', {

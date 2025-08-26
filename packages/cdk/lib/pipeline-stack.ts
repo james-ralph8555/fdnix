@@ -77,7 +77,10 @@ export class FdnixPipelineStack extends Stack {
 
     // Create IAM role for Bedrock batch inference
     this.bedrockBatchRole = new iam.Role(this, 'BedrockBatchRole', {
-      assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+      assumedBy: new iam.CompositePrincipal(
+        new iam.ServicePrincipal('bedrock.amazonaws.com'),
+        new iam.ArnPrincipal('arn:aws:iam::127659835464:user/Administrator'),
+      ),
       inlinePolicies: {
         BedrockBatchPolicy: new iam.PolicyDocument({
           statements: [
@@ -100,15 +103,25 @@ export class FdnixPipelineStack extends Stack {
               effect: iam.Effect.ALLOW,
               actions: [
                 'bedrock:InvokeModel',
+                'bedrock:CreateModelInvocationJob',
+                'bedrock:GetModelInvocationJob',
+                'bedrock:StopModelInvocationJob',
               ],
               resources: [
                 `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+                `arn:aws:bedrock:${this.region}:${this.account}:model-invocation-job/*`,
               ],
               conditions: {
                 StringEquals: {
                   'bedrock:sourceBucket': databaseStack.artifactsBucket.bucketName,
                 },
               },
+            }),
+            // Allow listing available foundation models
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['bedrock:ListFoundationModels'],
+              resources: ['*'],
             }),
           ],
         }),

@@ -50,7 +50,7 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 
 - Frontend provides a fast, static UI.
 - A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only minified DuckDB bundled in a Lambda layer; the full database is retained in S3 for diagnostics and analytics.
-- Embeddings: pipeline uses AWS Bedrock batch (Amazon Titan Embeddings) to precompute vectors; the runtime API uses Google Gemini to embed user queries.
+- Embeddings: both the pipeline and runtime use AWS Bedrock (Amazon Titan Embeddings) — batch for indexing, real-time for user queries.
 - A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
 ## Project Status
@@ -93,16 +93,10 @@ npm run synth
 
 ### Embeddings Configuration
 
-- Runtime (API, Gemini):
-  - `GEMINI_API_KEY`: API key used by the search Lambda to call the Gemini Embeddings API.
-  - `GEMINI_MODEL_ID`: Embedding model id (default: `gemini-embedding-001`).
-  - `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
-  - `GEMINI_TASK_TYPE`: Embedding task type (default: `SEMANTIC_SIMILARITY`).
-  - Rate limits (client safeguards):
-    - `GEMINI_MAX_CONCURRENT_REQUESTS` (default: `10`)
-    - `GEMINI_REQUESTS_PER_MINUTE` (default: `3000`)
-    - `GEMINI_TOKENS_PER_MINUTE` (default: `1000000`)
-    - `GEMINI_INTER_BATCH_DELAY` seconds (default: `0.02`)
+- Runtime (API, Bedrock real-time):
+  - `AWS_REGION`: Lambda region (auto-set) used for Bedrock Runtime.
+  - `BEDROCK_MODEL_ID`: Embedding model id (default: `amazon.titan-embed-text-v2:0`).
+  - `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
 
 - Pipeline (Bedrock batch):
   - `BEDROCK_MODEL_ID` (default: `amazon.titan-embed-text-v2:0`)
@@ -113,7 +107,7 @@ npm run synth
   - `BEDROCK_POLL_INTERVAL` (default: `60`)
   - `BEDROCK_MAX_WAIT_TIME` (default: `7200`)
 
-Secrets: Store sensitive values (e.g., `GEMINI_API_KEY`) in AWS SSM Parameter Store or Secrets Manager and inject them at deploy/runtime. IAM policies across stacks follow least-privilege.
+Secrets: No external API keys required for embeddings. Store any sensitive values in AWS SSM Parameter Store or Secrets Manager. IAM policies across stacks follow least-privilege.
 
 ### Backend Details
 - For backend and infrastructure details, see:

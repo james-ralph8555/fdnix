@@ -4,30 +4,20 @@ set -euo pipefail
 # Build script for fdnix C++ Lambda function
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BUILD_DIR="${PROJECT_DIR}/build"
 DIST_DIR="${PROJECT_DIR}/dist"
 
 echo "Building fdnix C++ Lambda function..."
 
-# Create build directory
-mkdir -p "${BUILD_DIR}"
+# Create dist directory
 mkdir -p "${DIST_DIR}"
 
-# Configure CMake
-echo "Configuring CMake..."
-cmake -B"${BUILD_DIR}" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_PREFIX_PATH=/usr/local \
-    -GNinja \
-    "${PROJECT_DIR}"
+# Build Docker image with builder target
+echo "Building Docker image with builder target..."
+docker build --target builder -t fdnix-lambda-builder .
 
-# Build the project
-echo "Building with Ninja..."
-ninja -C "${BUILD_DIR}" -j$(nproc)
-
-# Copy bootstrap to dist directory
-echo "Copying bootstrap to dist directory..."
-cp "${BUILD_DIR}/bootstrap" "${DIST_DIR}/bootstrap"
+# Extract the built bootstrap binary from the Docker image
+echo "Extracting bootstrap binary from Docker image..."
+docker run --rm -v "${DIST_DIR}:/output" fdnix-lambda-builder sh -c "cp /build/lambda/build/bootstrap /output/bootstrap"
 
 # Ensure bootstrap is executable
 chmod +x "${DIST_DIR}/bootstrap"
