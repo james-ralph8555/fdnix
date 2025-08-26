@@ -1,22 +1,15 @@
 # Use a single stage based on the requested nixos/nix image version
-FROM nixos/nix:2.18.1
+FROM nixos/nix:2.31.0
 
 # Set working directory
 WORKDIR /app
 
-# Install all system and Python dependencies using Nix in a single layer.
-# This provides Python, uv, Git, a compiler, and the required Python packages.
-# Using '-iA' installs from the nixpkgs attribute path.
-RUN nix-env -iA \
-    nixpkgs.git \
-    nixpkgs.gcc \
-    nixpkgs.python311 \
-    nixpkgs.uv \
-    nixpkgs.python311Packages.boto3 \
-    nixpkgs.python311Packages.botocore \
-    nixpkgs.python311Packages.requests \
-    nixpkgs.python311Packages.duckdb \
-    nixpkgs.python311Packages.numpy
+# Copy the Nix environment definition into the container
+COPY environment.nix /tmp/environment.nix
+
+# Install all dependencies from the Nix file.
+# We also remove the file in the same layer to keep the final image clean.
+RUN nix-env -if /tmp/environment.nix && rm /tmp/environment.nix
 
 # OCI labels
 LABEL org.opencontainers.image.title="fdnix nixpkgs-indexer"
@@ -25,17 +18,6 @@ LABEL org.opencontainers.image.description="Indexes nixpkgs metadata and embeddi
 # Copy application source code.
 # We do this before creating the user to set ownership correctly in the next step.
 COPY src/ ./src/
-
-# Note: We no longer copy pyproject.toml and run `uv pip install`,
-# because Nix has already installed the dependencies declaratively from nixpkgs.
-
-# Create a non-root user for better security.
-# The nixos/nix image is minimal but includes `useradd`.
-RUN useradd --create-home --shell /bin/bash appuser && \
-    chown -R appuser:appuser /app
-
-# Switch to the non-root user
-USER appuser
 
 # Configure the environment for the application
 ENV PYTHONPATH=/app

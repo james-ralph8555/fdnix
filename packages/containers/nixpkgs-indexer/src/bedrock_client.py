@@ -69,7 +69,8 @@ class BedrockClient:
         body = {
             "texts": [text],
             "input_type": "search_document",
-            "truncate": "END"
+            "truncate": "END",
+            "embedding_types": ["float"]
         }
         
         try:
@@ -123,7 +124,9 @@ class BedrockClient:
             test_text = "test"
             body = {
                 "texts": [test_text],
-                "input_type": "search_document"
+                "input_type": "search_document",
+                "truncate": "END",
+                "embedding_types": ["float"]
             }
             
             response = self.client.invoke_model(

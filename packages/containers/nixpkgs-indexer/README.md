@@ -22,14 +22,24 @@ This container indexes nixpkgs by combining metadata extraction and embedding ge
 - `ARTIFACTS_BUCKET`: S3 bucket for artifact upload
 - `DUCKDB_KEY`: S3 key for DuckDB artifact
 - `DUCKDB_PATH`: Path to DuckDB file for embedding phase (defaults to OUTPUT_PATH)
+  
+FTS tuning (metadata phase):
+- `FTS_STOPWORDS`: Stopwords language (default: `english`)
+- `FTS_STEMMER`: Stemmer language (default: `english`, set empty to disable)
+- `FTS_INDEX_NAME`: Index name (default: `packages_fts_idx`)
+
+VSS tuning (embedding phase):
+- `VSS_HNSW_M`: HNSW M (default: `16`)
+- `VSS_EF_CONSTRUCTION`: HNSW ef_construction (default: `200`)
+- `VSS_EF_SEARCH`: ef_search session setting (default: `40`)
+ - Persistence: on-disk HNSW index persistence is enabled by executing `SET hnsw_enable_experimental_persistence = true` inside DuckDB.
 
 ## Processing Modes
 
 ### "metadata" mode
-1. Clones nixpkgs repository.
-2. Extracts package metadata using `nix-env -qaP --json`, then cleans and normalizes fields.
-3. Creates DuckDB with `packages` and `packages_fts_source` tables, and builds an FTS index (DuckDB `fts` extension).
-4. Optionally uploads the DuckDB artifact to S3 when `ARTIFACTS_BUCKET` and `DUCKDB_KEY` are set.
+1. Extracts package metadata from the nixpkgs channel using `nix-env -qaP --json`, then cleans and normalizes fields (no git clone).
+2. Creates DuckDB with `packages` and `packages_fts_source` tables, and builds an FTS index (DuckDB `fts` extension).
+3. Optionally uploads the DuckDB artifact to S3 when `ARTIFACTS_BUCKET` and `DUCKDB_KEY` are set.
 
 ### "embedding" mode
 1. Reads existing DuckDB file (downloads from S3 when `ARTIFACTS_BUCKET`/`DUCKDB_KEY` are provided and the local file is missing).
@@ -79,6 +89,6 @@ Notes:
 
 ## Image & Dependencies
 
-- Base: `nixos/nix:2.18.1`; dependencies installed via Nix (`nix-env`)
-- Installed deps: `python311`, `duckdb`, `boto3`, `numpy`, `requests`, `git`
+- Base: `nixos/nix:2.31.0`; dependencies installed via Nix (`nix-env`)
+- Installed deps: `python313`, `duckdb`, `boto3`, `numpy`, `requests`
 - Entry: `python src/index.py`; runs as non-root user

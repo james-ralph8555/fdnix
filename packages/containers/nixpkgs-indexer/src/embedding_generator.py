@@ -26,6 +26,10 @@ class EmbeddingGenerator:
         self.artifacts_bucket = os.environ.get('ARTIFACTS_BUCKET', '').strip()
         self.duckdb_key = os.environ.get('DUCKDB_KEY', '').strip()
         self.embedding_dim: int | None = None
+        # VSS index parameters (override via env)
+        self.vss_hnsw_m = int(os.environ.get('VSS_HNSW_M', '16'))
+        self.vss_ef_construction = int(os.environ.get('VSS_EF_CONSTRUCTION', '200'))
+        self.vss_ef_search = int(os.environ.get('VSS_EF_SEARCH', '40'))
 
     def validate_environment(self):
         """Validate required environment variables"""
@@ -47,13 +51,38 @@ class EmbeddingGenerator:
         logger.info(f"Opening DuckDB at {self.duckdb_path}")
         con = duckdb.connect(self.duckdb_path)
         # Ensure VSS extension is available
-        con.execute("INSTALL vss; LOAD vss;")
+        try:
+            con.execute("INSTALL vss; LOAD vss;")
+        except Exception as e:
+            error_msg = f"Could not install/load DuckDB vss extension: {e}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
+        # Enable experimental persistence for HNSW indexes for on-disk DBs
+        try:
+            con.execute("SET hnsw_enable_experimental_persistence = true;")
+        except Exception:
+            # Some versions might guard this flag differently; ignore if unsupported
+            pass
+        # Best-effort: set runtime VSS parameters (ignored if unsupported)
+        try:
+            con.execute(f"SET vss.ef_search={int(self.vss_ef_search)};")
+        except Exception:
+            pass
         # Create embeddings table if not present
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS embeddings (
                 package_id TEXT PRIMARY KEY,
                 vector FLOAT[]
+            );
+            """
+        )
+        # Simple key/value meta table for index metadata (e.g., embedding_dim)
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS fdnix_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
             );
             """
         )
@@ -123,8 +152,44 @@ class EmbeddingGenerator:
         if not dim:
             logger.warning("Skipping VSS index creation: no embeddings present to infer dimension")
             return
-        logger.info(f"Creating VSS index on embeddings.vector with dim={dim} (idempotent)")
-        con.execute(f"CREATE INDEX IF NOT EXISTS embeddings_vss_idx ON embeddings(vector) USING vss (dim={dim});")
+        # Compare with last known dim; if different, rebuild index
+        try:
+            prev_dim_row = con.execute("SELECT value FROM fdnix_meta WHERE key='embedding_dim'").fetchone()
+            prev_dim = int(prev_dim_row[0]) if prev_dim_row and prev_dim_row[0] is not None else None
+        except Exception:
+            prev_dim = None
+
+        # Try creating/updating index with HNSW params
+        logger.info(f"Ensuring VSS index (dim={dim}, M={self.vss_hnsw_m}, ef_construction={self.vss_ef_construction})")
+        try:
+            con.execute(
+                """
+                CREATE INDEX IF NOT EXISTS embeddings_vss_idx
+                ON embeddings(vector)
+                USING vss (dim={}, hnsw_m={}, hnsw_ef_construction={});
+                """.format(dim, self.vss_hnsw_m, self.vss_ef_construction)
+            )
+        except Exception as e:
+            logger.warning(f"VSS index ensure failed: {e}. Attempting drop/recreate...")
+            try:
+                con.execute("DROP INDEX IF EXISTS embeddings_vss_idx;")
+                con.execute(
+                    """
+                    CREATE INDEX embeddings_vss_idx
+                    ON embeddings(vector)
+                    USING vss (dim={}, hnsw_m={}, hnsw_ef_construction={});
+                    """.format(dim, self.vss_hnsw_m, self.vss_ef_construction)
+                )
+            except Exception as inner:
+                error_msg = f"Failed to rebuild VSS index: {inner}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg) from inner
+
+        # Persist current dim into meta table
+        try:
+            con.execute("INSERT OR REPLACE INTO fdnix_meta (key, value) VALUES ('embedding_dim', ?)", [str(dim)])
+        except Exception:
+            pass
 
     def create_embedding_text(self, package: Dict[str, Any]) -> str:
         """Create a text representation of the package for embedding"""
@@ -139,9 +204,18 @@ class EmbeddingGenerator:
         if package.get('mainProgram'):
             parts.append(f"Main Program: {package['mainProgram']}")
         
-        # Description - prefer longDescription for richer content, fallback to description
-        description_text = package.get('longDescription', '') or package.get('description', '')
-        if description_text:
+        # Description - concatenate both description and longDescription for richer content
+        description = package.get('description', '').strip()
+        long_description = package.get('longDescription', '').strip()
+        
+        description_parts = []
+        if description:
+            description_parts.append(description)
+        if long_description and long_description != description:
+            description_parts.append(long_description)
+        
+        if description_parts:
+            description_text = '. '.join(description_parts)
             parts.append(f"Description: {description_text}")
         
         # Homepage URL

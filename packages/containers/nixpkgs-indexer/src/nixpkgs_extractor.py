@@ -1,10 +1,8 @@
 import json
 import logging
-import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -13,43 +11,19 @@ logger = logging.getLogger("fdnix.nixpkgs-extractor")
 
 class NixpkgsExtractor:
     def __init__(self) -> None:
-        self.nixpkgs_path = Path("/tmp/nixpkgs")
         self.max_retries = 3
         self.retry_delay_sec = 5
 
     def extract_all_packages(self) -> List[Dict[str, Any]]:
-        logger.info("Cloning nixpkgs repository...")
-        self._clone_nixpkgs()
-
         logger.info("Extracting package metadata using nix-env...")
         raw = self._extract_raw_package_data()
 
         logger.info("Processing and cleaning package data...")
         return self._process_package_data(raw)
 
-    def _clone_nixpkgs(self) -> None:
-        if self.nixpkgs_path.exists():
-            shutil.rmtree(self.nixpkgs_path, ignore_errors=True)
-
-        cmd = [
-            "git",
-            "clone",
-            "--depth",
-            "1",
-            "https://github.com/NixOS/nixpkgs.git",
-            str(self.nixpkgs_path),
-        ]
-        logger.info("Running: %s", " ".join(cmd))
-        try:
-            subprocess.run(cmd, check=True, timeout=300, capture_output=False)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to clone nixpkgs: {e}") from e
-
     def _extract_raw_package_data(self) -> Dict[str, Any]:
         cmd = [
             "nix-env",
-            "-f",
-            str(self.nixpkgs_path),
             "-qaP",
             "--json",
             "--meta",

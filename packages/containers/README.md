@@ -30,8 +30,11 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
   - `ARTIFACTS_BUCKET`: S3 bucket for `.duckdb` artifacts (e.g., `fdnix-artifacts`).
   - `DUCKDB_KEY`: S3 key for the artifact (e.g., `snapshots/fdnix.duckdb`).
   - `PROCESSING_MODE`: `metadata` | `embedding` | `both` (default: `both`).
+  - FTS (optional tuning): `FTS_STOPWORDS` (default `english`), `FTS_STEMMER` (default `english`), `FTS_INDEX_NAME` (default `packages_fts_idx`).
 - Embeddings:
   - `BEDROCK_MODEL_ID`: Bedrock model id (e.g., `cohere.embed-english-v3`). If not set, defaults to `cohere.embed-english-v3`.
+  - VSS (optional tuning): `VSS_HNSW_M` (default `16`), `VSS_EF_CONSTRUCTION` (default `200`), `VSS_EF_SEARCH` (default `40`).
+  - VSS persistence: Enabled by executing `SET hnsw_enable_experimental_persistence = true` in DuckDB.
 - Local paths (optional):
   - `OUTPUT_PATH`: Local DuckDB path (default: `/out/fdnix.duckdb`).
   - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to `OUTPUT_PATH`).
@@ -75,7 +78,7 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
 ## Phase Details
 
 - Metadata phase:
-  - Clones `nixpkgs` and extracts package metadata via `nix-env -qaP --json`.
+  - Extracts package metadata from the nixpkgs channel via `nix-env -qaP --json` (no git clone).
   - Cleans and normalizes fields (ids, names, attrs, descriptions, maintainers, etc.).
   - Writes `packages` and `packages_fts_source` tables to DuckDB.
   - Builds full‑text search index using DuckDB `fts` extension.

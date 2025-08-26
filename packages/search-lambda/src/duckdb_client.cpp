@@ -47,9 +47,10 @@ namespace fdnix {
                 return false;
             }
             
-            // TODO: Load FTS and VSS extensions
-            // connection_->execute("LOAD fts;");
-            // connection_->execute("LOAD vss;");
+            // TODO: Load FTS and VSS extensions in the actual connection
+            // Example:
+            // connection_->execute("INSTALL fts; LOAD fts;");
+            // connection_->execute("INSTALL vss; LOAD vss;");
             
             std::cout << "DuckDB client initialized successfully" << std::endl;
             return true;
@@ -109,8 +110,14 @@ namespace fdnix {
         SearchResults results;
         results.search_type = "vector";
         
-        // TODO: Implement actual vector search using DuckDB VSS
-        // Placeholder implementation
+        // TODO: Implement actual vector search using DuckDB VSS once the
+        // real DuckDB C++ API is wired. The intended SQL is:
+        // SELECT e.package_id, d.distance
+        // FROM vss_search('embeddings', 'vector', $query_vec::FLOAT[], k:=$limit) AS d
+        // JOIN embeddings e ON e.rowid = d.rowid
+        // ORDER BY d.distance ASC
+        // LIMIT $limit;
+        // Placeholder results below for now.
         for (int i = 0; i < std::min(limit, 5); ++i) {
             Package pkg;
             pkg.name = "vector-result-" + std::to_string(i);
@@ -131,8 +138,16 @@ namespace fdnix {
         SearchResults results;
         results.search_type = "fts";
         
-        // TODO: Implement actual FTS search using DuckDB FTS
-        // Placeholder implementation
+        // TODO: Implement actual FTS search using DuckDB FTS once the
+        // real DuckDB C++ API is wired. The intended SQL is:
+        // SELECT p.packageName, p.version, p.description, p.homepage, p.license,
+        //        p.attributePath, bm25
+        // FROM packages p
+        // JOIN packages_fts_source f ON f.package_id = p.package_id
+        // WHERE match_bm25(f.text, $query)
+        // ORDER BY bm25 DESC
+        // LIMIT $limit;
+        // Placeholder results below for now.
         for (int i = 0; i < std::min(limit, 5); ++i) {
             Package pkg;
             pkg.name = "fts-result-" + std::to_string(i);

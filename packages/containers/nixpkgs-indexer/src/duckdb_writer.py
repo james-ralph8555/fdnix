@@ -145,15 +145,41 @@ class DuckDBWriter:
         )
 
     def _build_fts(self, conn: duckdb.DuckDBPyConnection) -> None:
+        """Create and persist FTS index using PRAGMA create_fts_index.
+
+        Environment overrides (optional):
+        - FTS_STOPWORDS: stopwords language (e.g. 'english')
+        - FTS_STEMMER: stemmer language (e.g. 'english' or empty to disable)
+        """
+        stopwords = os.environ.get("FTS_STOPWORDS", "english").strip() or "english"
+        stemmer = os.environ.get("FTS_STEMMER", "english").strip()
+
         try:
             conn.execute("INSTALL fts;")
             conn.execute("LOAD fts;")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS packages_fts_idx ON packages_fts_source USING fts(text);"
-            )
-            logger.info("FTS index created/verified.")
         except Exception as e:
-            logger.warning("Could not install/load DuckDB fts extension: %s", e)
+            error_msg = f"Could not install/load DuckDB fts extension: {e}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
+
+        # Build PRAGMA with options; PRAGMA create_fts_index persists within DB
+        try:
+            if stemmer:
+                pragma = (
+                    "PRAGMA create_fts_index('packages_fts_source', 'text', "
+                    f"stopwords='{stopwords}', stemmer='{stemmer}', strip_accents=true);"
+                )
+            else:
+                pragma = (
+                    "PRAGMA create_fts_index('packages_fts_source', 'text', "
+                    f"stopwords='{stopwords}', strip_accents=true);"
+                )
+            conn.execute(pragma)
+            logger.info("FTS index created via PRAGMA (stopwords=%s, stemmer=%s)", stopwords, stemmer or "<none>")
+        except Exception as e:
+            error_msg = f"Failed to create FTS index via PRAGMA: {e}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
 
     def _package_id(self, p: Dict[str, Any]) -> str:
         # Prefer attributePath, fallback to name@version
@@ -204,7 +230,7 @@ class DuckDBWriter:
             p.get("homepage") or "",
             maintainers_txt,
             license_txt,
-            " ".join(p.get("platforms") or []),
+            " ".join(str(platform) for platform in (p.get("platforms") or [])),
         ]
         return " \n".join(str(x) for x in fields if x)
 
