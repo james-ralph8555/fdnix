@@ -77,6 +77,15 @@ npm run synth
 pnpm --filter search-lambda build
 ```
 
+### Rust Lambda Best Practices
+- Build on Amazon Linux 2023: Compile the `bootstrap` in an AL2023 environment to match Lambda’s glibc.
+  - Example using Docker (bind-mount repo):
+    - `docker run --rm -it -v "$PWD":/workspace -w /workspace/packages/search-lambda public.ecr.aws/amazonlinux/amazonlinux:2023 bash -lc "dnf -y install gcc gcc-c++ unzip tar gzip make && curl https://sh.rustup.rs -sSf | sh -s -- -y && source $HOME/.cargo/env && ./build.sh"`
+- Or build static with MUSL: Target `x86_64-unknown-linux-musl` for a fully static binary. Ensure all deps support `musl` (prefer `rustls` over OpenSSL to avoid system libs).
+- Strip and optimize: Keep binary small for faster cold starts. Use release mode, LTO, and strip symbols.
+  - Example: `strip packages/search-lambda/dist/bootstrap` (if not already stripped).
+- Verify artifact: Ensure `packages/search-lambda/dist/bootstrap` exists and is executable before deploying.
+
 ### Project Structure
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)

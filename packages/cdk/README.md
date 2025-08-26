@@ -118,12 +118,19 @@ Before deploying, ensure you have:
 ### Deploy All Stacks
 
 ```bash
+# Build the Rust Lambda bootstrap first (required for API)
+pnpm --filter search-lambda build
+
+# Then deploy stacks
 npm run deploy
 ```
 
 ### Deploy Individual Stacks
 
 ```bash
+# Ensure the Rust Lambda is built before deploying the API stack
+pnpm --filter search-lambda build
+
 npx cdk deploy FdnixDatabaseStack
 npx cdk deploy FdnixPipelineStack
 npx cdk deploy FdnixSearchApiStack
@@ -139,6 +146,9 @@ npm run diff
 ### Synthesize CloudFormation Templates
 
 ```bash
+# Building the Lambda is not strictly required for synth, but recommended
+pnpm --filter search-lambda build
+
 npm run synth
 ```
 
