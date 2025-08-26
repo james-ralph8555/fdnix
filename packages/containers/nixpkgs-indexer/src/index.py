@@ -15,6 +15,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+# Enable debug logging specifically for bedrock_client
+logging.getLogger("bedrock_client").setLevel(logging.DEBUG)
 logger = logging.getLogger("fdnix.nixpkgs-indexer")
 
 
@@ -88,8 +90,13 @@ async def main() -> int:
             if not os.environ.get("DUCKDB_PATH"):
                 os.environ["DUCKDB_PATH"] = output_path
             
+            # Check for force rebuild flag
+            force_rebuild = _truthy(os.environ.get("FORCE_REBUILD_EMBEDDINGS"))
+            if force_rebuild:
+                logger.info("Force rebuild enabled - will regenerate all embeddings")
+            
             generator = EmbeddingGenerator()
-            await generator.run()
+            await generator.run(force_rebuild=force_rebuild)
             logger.info("Embedding generation completed successfully!")
         
         # Phase 3: Publish DuckDB layer (if requested)

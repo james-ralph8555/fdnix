@@ -69,7 +69,8 @@ class DuckDBWriter:
               position TEXT,
               outputsToInstall TEXT,
               lastUpdated TEXT,
-              hasEmbedding BOOLEAN
+              hasEmbedding BOOLEAN,
+              content_hash HUGEINT
             );
             """
         )
@@ -95,6 +96,9 @@ class DuckDBWriter:
 
         for p in packages:
             pkg_id = self._package_id(p)
+            fts_text = self._fts_text(p)
+            content_hash = self._generate_content_hash(conn, fts_text)
+            
             rows.append(
                 (
                     pkg_id,
@@ -119,10 +123,11 @@ class DuckDBWriter:
                     else None,
                     p.get("lastUpdated") or "",
                     bool(p.get("hasEmbedding", False)),
+                    content_hash,
                 )
             )
 
-            fts_rows.append((pkg_id, self._fts_text(p)))
+            fts_rows.append((pkg_id, fts_text))
 
         logger.info("Inserting %d rows into packages...", len(rows))
         conn.executemany(
@@ -131,8 +136,8 @@ class DuckDBWriter:
               package_id, packageName, version, attributePath, description, longDescription,
               homepage, license, platforms, maintainers, broken, unfree, available,
               insecure, unsupported, mainProgram, position, outputsToInstall,
-              lastUpdated, hasEmbedding
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+              lastUpdated, hasEmbedding, content_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
             rows,
         )
@@ -233,6 +238,11 @@ class DuckDBWriter:
             " ".join(str(platform) for platform in (p.get("platforms") or [])),
         ]
         return " \n".join(str(x) for x in fields if x)
+
+    def _generate_content_hash(self, conn: duckdb.DuckDBPyConnection, fts_text: str) -> int:
+        """Generate MD5 numeric hash of the FTS text content for change detection."""
+        result = conn.execute("SELECT md5_number(?)", [fts_text]).fetchone()
+        return result[0] if result else 0
 
     def _upload_to_s3(self) -> None:
         if not (boto3 and self.region and self.s3_bucket and self.s3_key):

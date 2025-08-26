@@ -7,6 +7,7 @@ import json
 from typing import List, Dict, Any, Tuple
 import duckdb
 import boto3
+from botocore.exceptions import ClientError
 from bedrock_client import BedrockClient
 
 logger = logging.getLogger(__name__)
@@ -86,24 +87,44 @@ class EmbeddingGenerator:
             );
             """
         )
+        # Table to track content hashes and their embeddings for incremental updates
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embeddings_content_hashes (
+                content_hash HUGEINT PRIMARY KEY,
+                vector FLOAT[]
+            );
+            """
+        )
         return con
 
-    def fetch_packages_to_embed(self, con: duckdb.DuckDBPyConnection, limit: int | None = None) -> List[Dict[str, Any]]:
-        # Select candidates, preferring usable packages
-        sql = (
+    def fetch_packages_to_embed(self, con: duckdb.DuckDBPyConnection, limit: int | None = None, force_rebuild: bool = False) -> List[Dict[str, Any]]:
+        # Select all candidates - process all data regardless of broken/insecure/unsupported status
+        base_select = (
             "SELECT packageName, version, attributePath, description, longDescription, homepage, mainProgram, "
             "license, maintainers, platforms, COALESCE(hasEmbedding, FALSE) AS hasEmbedding, "
             "COALESCE(available, TRUE) AS available, COALESCE(broken, FALSE) AS broken, "
-            "COALESCE(insecure, FALSE) AS insecure, COALESCE(unsupported, FALSE) AS unsupported "
-            "FROM packages "
-            "WHERE COALESCE(hasEmbedding, FALSE) = FALSE "
-            "AND COALESCE(available, TRUE) = TRUE "
-            "AND COALESCE(broken, FALSE) = FALSE "
-            "AND COALESCE(insecure, FALSE) = FALSE "
-            "AND COALESCE(unsupported, FALSE) = FALSE"
+            "COALESCE(insecure, FALSE) AS insecure, COALESCE(unsupported, FALSE) AS unsupported, "
+            "content_hash "
+            "FROM packages"
         )
+        
+        if force_rebuild:
+            # Force rebuild: process all packages regardless of hasEmbedding status
+            sql = base_select
+        else:
+            # Incremental: process packages that need embeddings OR have changed content
+            sql = (
+                base_select + " WHERE ("
+                "COALESCE(hasEmbedding, FALSE) = FALSE OR "
+                "(content_hash IS NOT NULL AND content_hash NOT IN "
+                "(SELECT content_hash FROM embeddings_content_hashes WHERE content_hash IS NOT NULL))"
+                ")"
+            )
+            
         if limit:
             sql += f" LIMIT {int(limit)}"
+            
         try:
             res = con.execute(sql)
             rows = res.fetchall()
@@ -291,96 +312,288 @@ class EmbeddingGenerator:
         
         return ', '.join(maintainer_names)
 
-    async def process_packages_batch(self, packages: List[Dict[str, Any]]) -> int:
-        """Process a batch of packages to generate embeddings"""
+    async def process_packages_batch(self, packages: List[Dict[str, Any]]) -> Tuple[int, int]:
+        """Process a batch of packages to generate embeddings.
+        
+        Returns: (processed_count, reused_count) 
+        """
         logger.info(f"Processing batch of {len(packages)} packages...")
         
-        # Create embedding texts
-        texts = []
+        # Separate packages that can reuse embeddings vs need new ones
+        packages_need_embedding = []
+        packages_can_reuse = []
         package_keys: List[Tuple[str, str]] = []
         
         for package in packages:
-            text = self.create_embedding_text(package)
-            texts.append(text)
             package_keys.append((package['packageName'], package['version']))
+            content_hash = package.get('content_hash')
+            
+            if content_hash:
+                # Check if we have an existing embedding for this content hash
+                try:
+                    existing_vector = self._duckdb_con.execute(
+                        "SELECT vector FROM embeddings_content_hashes WHERE content_hash = ?",
+                        [content_hash]
+                    ).fetchone()
+                    
+                    if existing_vector and existing_vector[0]:
+                        packages_can_reuse.append((package, existing_vector[0]))
+                        continue
+                except Exception:
+                    pass  # Fall through to generate new embedding
+            
+            packages_need_embedding.append(package)
         
-        try:
-            # Generate embeddings using Bedrock
-            logger.info(f"Generating embeddings for {len(texts)} texts...")
-            embeddings = await self.bedrock_client.generate_embeddings_batch(texts)
-            
-            if len(embeddings) != len(texts):
-                logger.error(f"Mismatch in embeddings count: expected {len(texts)}, got {len(embeddings)}")
-                return 0
-            
-            # Remember embedding dimension for VSS index creation later
-            if embeddings and not self.embedding_dim:
-                self.embedding_dim = len(embeddings[0]) if embeddings[0] else None
-
-            # Prepare rows for insertion
+        reused_count = len(packages_can_reuse)
+        processed_count = 0
+        
+        # Process packages that can reuse embeddings
+        if packages_can_reuse:
+            logger.info(f"Reusing embeddings for {reused_count} packages with unchanged content...")
             vector_rows: List[Tuple[str, list]] = []
-            for (pkg_name, ver), vec in zip(package_keys, embeddings):
-                pkg_id = f"{pkg_name}#{ver}"
-                vector_rows.append((pkg_id, vec))
-
-            # Insert into DuckDB and mark packages
+            reuse_keys: List[Tuple[str, str]] = []
+            
+            for package, vector in packages_can_reuse:
+                pkg_id = f"{package['packageName']}#{package['version']}"
+                vector_rows.append((pkg_id, vector))
+                reuse_keys.append((package['packageName'], package['version']))
+            
             con = self._duckdb_con
             con.execute("BEGIN TRANSACTION;")
             try:
                 self.insert_embeddings(con, vector_rows)
-                self.mark_packages_embedded(con, package_keys)
+                self.mark_packages_embedded(con, reuse_keys)
                 con.execute("COMMIT;")
+                processed_count += reused_count
             except Exception:
                 con.execute("ROLLBACK;")
                 raise
+        
+        # Process packages that need new embeddings
+        if packages_need_embedding:
+            texts = []
+            new_package_keys: List[Tuple[str, str]] = []
+            content_hashes = []
             
-            logger.info(f"Successfully processed batch of {len(packages)} packages")
-            return len(packages)
+            for package in packages_need_embedding:
+                text = self.create_embedding_text(package)
+                texts.append(text)
+                new_package_keys.append((package['packageName'], package['version']))
+                content_hashes.append(package.get('content_hash'))
             
-        except Exception as error:
-            logger.error(f"Error processing batch: {str(error)}")
-            return 0
+            try:
+                # Generate embeddings using Bedrock
+                logger.info(f"Generating embeddings for {len(texts)} new/changed texts...")
+                embeddings = await self.bedrock_client.generate_embeddings_batch(texts)
+                
+                if len(embeddings) != len(texts):
+                    logger.error(f"Mismatch in embeddings count: expected {len(texts)}, got {len(embeddings)}")
+                    return processed_count, reused_count
+                
+                # Remember embedding dimension for VSS index creation later
+                if embeddings and not self.embedding_dim:
+                    self.embedding_dim = len(embeddings[0]) if embeddings[0] else None
 
-    async def run(self):
+                # Prepare rows for insertion
+                vector_rows: List[Tuple[str, list]] = []
+                hash_rows: List[Tuple[str, list]] = []
+                
+                for i, ((pkg_name, ver), vec, content_hash) in enumerate(zip(new_package_keys, embeddings, content_hashes)):
+                    pkg_id = f"{pkg_name}#{ver}"
+                    vector_rows.append((pkg_id, vec))
+                    if content_hash:
+                        hash_rows.append((content_hash, vec))
+
+                # Insert into DuckDB and mark packages
+                con = self._duckdb_con
+                con.execute("BEGIN TRANSACTION;")
+                try:
+                    self.insert_embeddings(con, vector_rows)
+                    self.mark_packages_embedded(con, new_package_keys)
+                    # Store content hash -> embedding mappings for future reuse
+                    if hash_rows:
+                        con.executemany(
+                            "INSERT OR REPLACE INTO embeddings_content_hashes (content_hash, vector) VALUES (?, ?)",
+                            hash_rows
+                        )
+                    con.execute("COMMIT;")
+                    processed_count += len(packages_need_embedding)
+                except Exception:
+                    con.execute("ROLLBACK;")
+                    raise
+                
+            except Exception as error:
+                logger.error(f"Error processing batch: {str(error)}")
+                return processed_count, reused_count
+        
+        logger.info(f"Successfully processed batch: {len(packages_need_embedding)} new, {reused_count} reused")
+        return processed_count, reused_count
+
+    async def run(self, force_rebuild: bool = False):
         """Main execution function"""
         logger.info("Starting fdnix embedding generation process...")
         
         try:
+            # Test Bedrock access first
+            logger.info("Validating Bedrock model access...")
+            if not self.bedrock_client.validate_model_access():
+                raise RuntimeError("Cannot access Bedrock model. Check credentials and model permissions.")
+            logger.info("Bedrock model access validated successfully")
+            
             # Connect to DuckDB
             self._duckdb_con = self.connect_duckdb()
-            # Load candidates
-            candidates = self.fetch_packages_to_embed(self._duckdb_con)
+            
+            # Try to load previous artifact for incremental updates (unless force rebuild)
+            if not force_rebuild:
+                prev_artifact_path = self.duckdb_path + ".previous"
+                if self._maybe_download_previous_artifact():
+                    self._load_previous_embeddings_and_hashes(prev_artifact_path)
+                    # Clean up temporary file
+                    try:
+                        import os
+                        os.remove(prev_artifact_path)
+                    except Exception:
+                        pass
+            
+            # Load candidates (this now uses content hash comparison for incremental updates)
+            candidates = self.fetch_packages_to_embed(self._duckdb_con, force_rebuild=force_rebuild)
             total_packages = len(candidates)
+            
             if total_packages == 0:
-                logger.info("No packages need embeddings (hasEmbedding=true for all). Nothing to do.")
+                logger.info("No packages need embeddings (all up to date). Nothing to do.")
                 # Still consider uploading if requested
                 self._maybe_upload_artifact()
                 return
             
             # Process packages in batches
-            processed_count = 0
+            total_processed = 0
+            total_reused = 0
             failed_count = 0
             
             for i in range(0, total_packages, self.batch_size):
                 batch = candidates[i:i + self.batch_size]
-                logger.info(f"Processing batch {i//self.batch_size + 1}/{(total_packages + self.batch_size - 1)//self.batch_size}")
+                batch_num = i//self.batch_size + 1
+                total_batches = (total_packages + self.batch_size - 1)//self.batch_size
+                logger.info(f"Processing batch {batch_num}/{total_batches}")
                 
-                batch_processed = await self.process_packages_batch(batch)
-                processed_count += batch_processed
-                failed_count += len(batch) - batch_processed
-                
-                logger.info(f"Progress: {processed_count}/{total_packages} processed, {failed_count} failed")
+                try:
+                    batch_processed, batch_reused = await self.process_packages_batch(batch)
+                    total_processed += batch_processed
+                    total_reused += batch_reused
+                    
+                    logger.info(f"Progress: {total_processed}/{total_packages} total, "
+                               f"{batch_processed - batch_reused} new embeddings, "
+                               f"{total_reused} reused from cache")
+                except Exception as e:
+                    logger.error(f"Failed to process batch {batch_num}: {e}")
+                    failed_count += len(batch)
+            
             # Build or update VSS index in DuckDB
             self.ensure_vss_index(self._duckdb_con)
 
             # Upload final artifact to S3 if configured
             self._maybe_upload_artifact()
 
-            logger.info(f"Embedding generation completed! Processed: {processed_count}, Failed: {failed_count}")
+            new_embeddings = total_processed - total_reused
+            logger.info(f"Embedding generation completed! "
+                       f"Total: {total_processed}, New: {new_embeddings}, "
+                       f"Reused: {total_reused}, Failed: {failed_count}")
             
         except Exception as error:
             logger.error(f"Fatal error during embedding generation: {str(error)}")
             raise error
+
+    def _maybe_download_previous_artifact(self) -> bool:
+        """Download previous DuckDB artifact from S3 if available for incremental updates.
+        
+        Returns True if previous artifact was downloaded, False otherwise.
+        """
+        if not self.artifacts_bucket or not self.duckdb_key:
+            logger.info("Artifact download not configured (ARTIFACTS_BUCKET/DUCKDB_KEY missing). Skipping download.")
+            return False
+            
+        # Use a temporary path for the previous artifact
+        prev_artifact_path = self.duckdb_path + ".previous"
+        
+        try:
+            s3 = boto3.client('s3', region_name=os.environ['AWS_REGION'])
+            logger.info(f"Attempting to download previous artifact from s3://{self.artifacts_bucket}/{self.duckdb_key}")
+            
+            # Check if object exists first
+            try:
+                s3.head_object(Bucket=self.artifacts_bucket, Key=self.duckdb_key)
+            except ClientError as e:
+                if e.response['Error']['Code'] == '404':
+                    logger.info(f"No previous artifact exists at s3://{self.artifacts_bucket}/{self.duckdb_key}. Starting fresh build.")
+                    return False
+                else:
+                    logger.info(f"Could not check for previous artifact: {e}. Starting fresh build.")
+                    return False
+            except Exception as e:
+                logger.info(f"Could not check for previous artifact: {e}. Starting fresh build.")
+                return False
+            
+            # Download the file
+            s3.download_file(self.artifacts_bucket, self.duckdb_key, prev_artifact_path)
+            logger.info(f"Successfully downloaded previous artifact to {prev_artifact_path}")
+            return True
+        except Exception as e:
+            logger.info(f"Failed to download previous artifact: {e}. Starting fresh build.")
+            return False
+
+    def _load_previous_embeddings_and_hashes(self, prev_artifact_path: str) -> None:
+        """Load embeddings and content hashes from previous artifact into current DB."""
+        try:
+            logger.info("Loading embeddings and content hashes from previous artifact...")
+            with duckdb.connect(prev_artifact_path, read_only=True) as prev_con:
+                # Load VSS extension in previous connection
+                try:
+                    prev_con.execute("INSTALL vss; LOAD vss;")
+                except Exception:
+                    pass  # May not be available in previous versions
+                
+                # Copy existing embeddings to current DB (if embeddings table exists)
+                try:
+                    embeddings_data = prev_con.execute(
+                        "SELECT package_id, vector FROM embeddings WHERE vector IS NOT NULL"
+                    ).fetchall()
+                    
+                    if embeddings_data:
+                        logger.info(f"Copying {len(embeddings_data)} existing embeddings...")
+                        self._duckdb_con.executemany(
+                            "INSERT OR REPLACE INTO embeddings (package_id, vector) VALUES (?, ?)",
+                            embeddings_data
+                        )
+                    else:
+                        logger.info("No existing embeddings found in previous artifact")
+                except duckdb.CatalogException as e:
+                    logger.info(f"No embeddings table found in previous artifact: {e}")
+                except Exception as e:
+                    logger.warning(f"Could not load embeddings from previous artifact: {e}")
+                
+                # Copy content hashes and their embeddings
+                try:
+                    # Try to get content hashes from packages table (new schema)
+                    hash_data = prev_con.execute(
+                        "SELECT p.content_hash, e.vector FROM packages p "
+                        "JOIN embeddings e ON p.package_id = e.package_id "
+                        "WHERE p.content_hash IS NOT NULL AND e.vector IS NOT NULL"
+                    ).fetchall()
+                    
+                    if hash_data:
+                        logger.info(f"Copying {len(hash_data)} content hash mappings...")
+                        self._duckdb_con.executemany(
+                            "INSERT OR REPLACE INTO embeddings_content_hashes (content_hash, vector) VALUES (?, ?)",
+                            hash_data
+                        )
+                    else:
+                        logger.info("No content hashes found in previous artifact (old schema)")
+                        
+                except Exception as e:
+                    logger.info(f"Could not load content hashes from previous artifact: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Failed to load previous embeddings: {e}")
 
     def _maybe_upload_artifact(self) -> None:
         if not self.artifacts_bucket or not self.duckdb_key:

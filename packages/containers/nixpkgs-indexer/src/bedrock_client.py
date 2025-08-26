@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 from botocore.exceptions import ClientError, BotoCoreError
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class BedrockClient:
     def __init__(self, model_id: str, region: str):
@@ -41,11 +42,13 @@ class BedrockClient:
                 embedding = await self._generate_single_embedding_with_retry(text)
                 embeddings.append(embedding)
             except Exception as error:
-                logger.error(f"Failed to generate embedding for text {i}: {str(error)}")
+                logger.error(f"Failed to generate embedding for text {i}: {type(error).__name__}: {str(error)}")
+                logger.error(f"Text content: {text[:100]}...")  # Log first 100 chars of problematic text
                 # Add empty embedding to maintain array consistency
                 embeddings.append([])
         
-        logger.info(f"Successfully generated {sum(1 for e in embeddings if e)} embeddings out of {len(texts)}")
+        successful_count = sum(1 for e in embeddings if e)
+        logger.info(f"Successfully generated {successful_count}/{len(texts)} embeddings")
         return embeddings
 
     async def _generate_single_embedding_with_retry(self, text: str) -> List[float]:
@@ -58,7 +61,7 @@ class BedrockClient:
                     raise error
                 
                 delay = self.base_delay * (2 ** attempt)
-                logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {str(error)}")
+                logger.warning(f"Attempt {attempt + 1} failed, retrying in {delay}s: {type(error).__name__}: {str(error)}")
                 await asyncio.sleep(delay)
         
         return []  # Should not reach here
@@ -86,11 +89,65 @@ class BedrockClient:
             # Parse the response
             response_body = json.loads(response['body'].read())
             
-            # Extract embeddings from response
+            # Debug: Log response structure to understand the KeyError
+            logger.debug(f"Bedrock response structure: {list(response_body.keys()) if isinstance(response_body, dict) else type(response_body)}")
+            
+            # Extract embeddings from response based on Cohere's structure
             if 'embeddings' in response_body and response_body['embeddings']:
-                return response_body['embeddings'][0]
+                embeddings_data = response_body['embeddings']
+                
+                # Handle case where embeddings is a dict with 'float' key containing the embedding arrays
+                if isinstance(embeddings_data, dict) and 'float' in embeddings_data:
+                    embedding_arrays = embeddings_data['float']
+                    if isinstance(embedding_arrays, list) and len(embedding_arrays) > 0:
+                        # Get the first embedding (for our single text input)
+                        first_embedding = embedding_arrays[0]
+                        if isinstance(first_embedding, list) and len(first_embedding) > 0:
+                            logger.debug(f"Successfully extracted embedding with dimension {len(first_embedding)}")
+                            return first_embedding
+                        else:
+                            logger.error(f"Invalid first embedding: {type(first_embedding)}, content: {first_embedding}")
+                            return []
+                    else:
+                        logger.error(f"Invalid float embedding arrays: {type(embedding_arrays)}, content: {embedding_arrays}")
+                        return []
+                
+                # Handle case where embeddings is a list of embedding objects
+                elif isinstance(embeddings_data, list) and len(embeddings_data) > 0:
+                    # First element should be the embedding array for our single text input
+                    embedding = embeddings_data[0]
+                    # Handle the case where embedding is wrapped in a dict with 'float' key
+                    if isinstance(embedding, dict) and 'float' in embedding:
+                        embedding_values = embedding['float']
+                        # embedding_values might be a list of lists (batch response)
+                        if isinstance(embedding_values, list) and len(embedding_values) > 0:
+                            # If it's a nested list, take the first element
+                            if isinstance(embedding_values[0], list):
+                                actual_embedding = embedding_values[0]
+                            else:
+                                actual_embedding = embedding_values
+                            
+                            if isinstance(actual_embedding, list) and len(actual_embedding) > 0:
+                                logger.debug(f"Successfully extracted embedding with dimension {len(actual_embedding)}")
+                                return actual_embedding
+                            else:
+                                logger.error(f"Invalid extracted embedding: {type(actual_embedding)}, length: {len(actual_embedding) if isinstance(actual_embedding, list) else 'N/A'}")
+                                return []
+                        else:
+                            logger.error(f"Invalid float embedding format: {type(embedding_values)}, length: {len(embedding_values) if isinstance(embedding_values, list) else 'N/A'}")
+                            return []
+                    elif isinstance(embedding, list) and len(embedding) > 0:
+                        logger.debug(f"Successfully extracted embedding with dimension {len(embedding)}")
+                        return embedding
+                    else:
+                        logger.error(f"Invalid embedding format - expected list or dict with 'float' key: {type(embedding)}, content: {embedding}")
+                        return []
+                else:
+                    logger.error(f"Invalid embeddings format - expected list or dict with 'float' key: {type(embeddings_data)}, content: {embeddings_data}")
+                    return []
             else:
-                logger.error(f"No embeddings found in response: {response_body}")
+                logger.error(f"No embeddings found in response. Response keys: {list(response_body.keys()) if isinstance(response_body, dict) else 'Not a dict'}")
+                logger.error(f"Full response: {response_body}")
                 return []
                 
         except ClientError as error:
@@ -113,8 +170,14 @@ class BedrockClient:
         except BotoCoreError as error:
             logger.error(f"BotoCore error: {str(error)}")
             raise error
+        except (KeyError, IndexError, TypeError) as error:
+            logger.error(f"Response parsing error: {type(error).__name__}: {str(error)}")
+            logger.error(f"This suggests the response structure is different than expected")
+            logger.error(f"Error details: {repr(error)}")
+            raise error
         except Exception as error:
-            logger.error(f"Unexpected error generating embedding: {str(error)}")
+            logger.error(f"Unexpected error generating embedding: {type(error).__name__}: {str(error)}")
+            logger.error(f"Error details: {repr(error)}")
             raise error
 
     def validate_model_access(self) -> bool:

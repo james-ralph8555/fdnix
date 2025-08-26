@@ -62,8 +62,8 @@ const searchApiStack = new FdnixSearchApiStack(app, stackId('SearchApiStack'), {
   },
 });
 
-// Always create a separate Certificate Stack (validation can take time; does not block frontend)
-new FdnixCertificateStack(app, stackId('CertificateStack'), {
+// Certificate Stack - ACM certificate for custom domain (us-east-1)
+const certificateStack = new FdnixCertificateStack(app, stackId('CertificateStack'), {
   env,
   description: 'ACM certificate for fdnix frontend custom domain',
   tags: {
@@ -74,12 +74,12 @@ new FdnixCertificateStack(app, stackId('CertificateStack'), {
   domainName,
 });
 
-// Frontend Stack - Static site hosting (does not require certificate)
+// Frontend Stack - Static site hosting with custom domain and SSL certificate
 const frontendStack = new FdnixFrontendStack(app, stackId('FrontendStack'), {
   env,
   searchApiStack,
   domainName,
-  // Intentionally not wiring the cert into CloudFront until issued
+  certificateArn: certificateStack.certificate.certificateArn,
   description: 'Frontend hosting for fdnix search interface',
   tags: {
     Project: 'fdnix',
@@ -92,6 +92,7 @@ const frontendStack = new FdnixFrontendStack(app, stackId('FrontendStack'), {
 pipelineStack.addDependency(databaseStack);
 searchApiStack.addDependency(databaseStack);
 frontendStack.addDependency(searchApiStack);
+frontendStack.addDependency(certificateStack);
 
 // Cross-stack outputs are handled within each individual stack
 
