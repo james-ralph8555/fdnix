@@ -101,7 +101,7 @@ Phase 1: Foundation & Infrastructure (CDK) ✅ **COMPLETED**
 
     Implemented:
 
-        ✅ Monorepo: pnpm workspace configured in the root directory
+        ✅ Monorepo: npm workspaces configured in the root directory
 
         ✅ CDK App: Full TypeScript CDK application in packages/cdk
 

@@ -47,11 +47,17 @@ Note: If you’re looking for the implementation details and deployment plan, se
 
 ### Quick Start
 ```bash
-# Install dependencies
+# Install dependencies (repo root)
 npm install
 
+# Build the search Lambda bootstrap (required before API deploy)
+(cd packages/search-lambda && npm run build)
+
+# Run CDK commands from the CDK folder
+cd packages/cdk
+
 # Bootstrap CDK (one-time setup)
-npm run bootstrap
+npx cdk bootstrap
 
 # Deploy all infrastructure
 npm run deploy

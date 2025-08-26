@@ -53,5 +53,5 @@ Current status: A minimal Node.js handler may be deployed as a temporary stub to
 
 ## Deploy Flow
 
-- Build: `pnpm --filter search-lambda build`
-- Deploy: `pnpm --filter cdk cdk deploy`
+- Build (from repo root): `(cd packages/search-lambda && npm run build)`
+- Deploy (from CDK folder): `(cd packages/cdk && npm run deploy)`

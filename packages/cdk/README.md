@@ -66,7 +66,7 @@ The data pipeline is orchestrated by a Step Functions state machine that runs a 
 graph TD
     subgraph "FdnixPipelineStack"
         direction LR
-        start((Start)) --> indexer_task{Indexer Task (metadata + embeddings + publish)}
+        start((Start)) --> indexer_task[Indexer Task]
         indexer_task --> done((End))
 
         subgraph "ECS Fargate Task"
@@ -122,7 +122,7 @@ CloudFormation and CDK are designed for idempotent deployments. Re-running the s
 -   **Stable construct IDs**: Do not rename construct IDs of deployed resources; CDK maps them to CloudFormation Logical IDs.
 -   **Avoid hardcoded physical names**: Let CDK generate names (S3 buckets, DynamoDB tables). If a fixed name is required, ensure it is unique and constant per environment.
 -   **No dynamic name drift**: Avoid timestamps/random suffixes in names inside code. Use stack name or context for determinism.
--   **Review changes**: Run `npm run diff` (or `cdk diff`) to inspect change sets before deploy.
+-   **Review changes**: Run `npm run diff` (or `npx cdk diff`) to inspect change sets before deploy.
 -   **Detect/resolve drift**: Use CloudFormation drift detection to find resources changed outside CDK; resolve by reverting manual edits or updating code.
     -   Example:
         -   `aws cloudformation detect-stack-drift --stack-name FdnixDatabaseStack`
@@ -133,6 +133,8 @@ CloudFormation and CDK are designed for idempotent deployments. Re-running the s
 Tip: Use `npm run diff` regularly during development to validate idempotency and avoid unintended replacements.
 
 ## Installation
+
+From this folder (`packages/cdk`):
 
 ```bash
 npm install
@@ -170,11 +172,13 @@ Before deploying, ensure you have:
 
 ### Deploy All Stacks
 
+From this folder (`packages/cdk`):
+
 ```bash
 # Build the C++ Lambda bootstrap first (required for API)
-pnpm --filter search-lambda build
+(cd ../search-lambda && npm run build)
 
-# Then deploy stacks
+# Then deploy all stacks
 npm run deploy
 ```
 
@@ -182,7 +186,7 @@ npm run deploy
 
 ```bash
 # Ensure the C++ Lambda is built before deploying the API stack
-pnpm --filter search-lambda build
+(cd ../search-lambda && npm run build)
 
 npx cdk deploy FdnixCertificateStack
 npx cdk deploy FdnixDatabaseStack
@@ -201,7 +205,7 @@ npm run diff
 
 ```bash
 # Building the Lambda is not strictly required for synth, but recommended
-pnpm --filter search-lambda build
+(cd ../search-lambda && npm run build)
 
 npm run synth
 ```
@@ -357,9 +361,9 @@ npm run destroy
 
 ### Common Issues
 
-1.  **Bootstrap Required**: Ensure CDK is bootstraucceeded in your account.
+1.  **Bootstrap Required**: Ensure CDK is bootstrapped in your account.
 2.  **Permission Denied**: Verify IAM permissions for CDK deployment.
-3.  **C++ Lambda Build**: Ensure `pnpm --filter search-lambda build` completes successfully.
+3.  **C++ Lambda Build**: Ensure `(cd ../search-lambda && npm run build)` completes successfully.
 4.  **Container Images**: ECR repositories need container images pushed before ECS tasks can run.
 5.  **Custom Domain**: Ensure DNS records are properly configured in your DNS provider.
 

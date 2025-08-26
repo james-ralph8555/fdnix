@@ -15,12 +15,12 @@ Planned monorepo layout (see INIT.md):
 
 ## Build, Test, and Development Commands
 
-- Install workspaces: `pnpm -w install` (or `npm install` as fallback).
-- Frontend dev: `pnpm --filter frontend dev` (Vite dev server).
-- Frontend build: `pnpm --filter frontend build` (outputs `dist/`).
-- CDK synth/deploy: `pnpm --filter cdk cdk synth` / `pnpm --filter cdk cdk deploy`.
-- Lambda build/test: `pnpm --filter search-lambda build` / `pnpm --filter search-lambda test`.
-- Containers: `docker build -t fdnix/metadata-generator packages/containers/metadata-generator` (similarly for `embedding-generator`).
+- Install dependencies (from repo root): `npm install`.
+- Frontend dev: `(cd packages/frontend && npm run dev)` (Vite dev server).
+- Frontend build: `(cd packages/frontend && npm run build)` (outputs `dist/`).
+- CDK synth/deploy: run from `packages/cdk`: `npx cdk synth` / `npx cdk deploy`.
+- Lambda build/test: `(cd packages/search-lambda && npm run build)` / `(cd packages/search-lambda && npm run test)`.
+- Containers: `docker build -t fdnix/nixpkgs-indexer packages/containers/nixpkgs-indexer`.
 
 ## Coding Style & Naming Conventions
 
@@ -32,7 +32,7 @@ Planned monorepo layout (see INIT.md):
 
 - Frontend: Vitest + Testing Library; name tests `*.test.ts(x)` next to sources.
 - Lambda: Jest; name tests `*.test.ts` under `src/` or `__tests__/`.
-- Run all tests: `pnpm -w test`. Target a minimum of smoke tests per package.
+- Run all tests (from repo root): `npm run test`. Target a minimum of smoke tests per package.
 
 ## Commit & Pull Request Guidelines
 
