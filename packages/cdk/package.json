@@ -8,10 +8,18 @@
     "watch": "tsc -w",
     "test": "jest",
     "deploy": "cdk deploy --all",
+    "deploy:containers": "cdk deploy FdnixPipelineStack --require-approval never",
     "destroy": "cdk destroy --all",
     "diff": "cdk diff",
     "synth": "cdk synth",
-    "bootstrap": "cdk bootstrap"
+    "bootstrap": "cdk bootstrap",
+    "build-containers": "npm run build-metadata && npm run build-embedding",
+    "build-metadata": "cd ../containers/metadata-generator && docker build -t fdnix-metadata-generator .",
+    "build-embedding": "cd ../containers/embedding-generator && docker build -t fdnix-embedding-generator .",
+    "push-containers": "npm run push-metadata && npm run push-embedding",
+    "push-metadata": "npm run push-container -- metadata-generator",
+    "push-embedding": "npm run push-container -- embedding-generator",
+    "push-container": "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com && docker tag fdnix-$1 $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com/fdnix-$1:latest && docker push $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com/fdnix-$1:latest"
   },
   "devDependencies": {
     "@types/jest": "^29.5.0",

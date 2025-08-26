@@ -54,18 +54,26 @@ export class FdnixSearchApiStack extends Stack {
     }));
 
     // Lambda Layer for dependencies (Faiss, AWS SDK, etc.)
+    // Note: Final implementation is planned in Rust (custom runtime, provided.al2023).
+    // This layer and Node.js runtime are temporary scaffolding to keep API wiring in place.
     const dependenciesLayer = new lambda.LayerVersion(this, 'SearchDependenciesLayer', {
       layerVersionName: 'fdnix-search-dependencies',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/layer')),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
+      compatibleRuntimes: [
+        lambda.Runtime.NODEJS_22_X,
+        // Prepare for Rust custom runtime compatibility
+        lambda.Runtime.PROVIDED_AL2023,
+      ],
       description: 'Dependencies for fdnix search API including Faiss bindings',
     });
 
     // Lambda function for hybrid search API
+    // Implemented in Rust using the custom runtime (PROVIDED_AL2023).
+    // The build places a `bootstrap` binary in `packages/search-lambda/dist`.
     this.searchFunction = new lambda.Function(this, 'SearchFunction', {
       functionName: 'fdnix-search-api',
-      runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
+      runtime: lambda.Runtime.PROVIDED_AL2023,
+      handler: 'bootstrap',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/dist')),
       timeout: Duration.seconds(30),
       memorySize: 1024,

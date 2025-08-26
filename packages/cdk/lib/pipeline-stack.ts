@@ -9,7 +9,9 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctionsTasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as path from 'path';
 import { FdnixDatabaseStack } from './database-stack';
+import { DockerBuildConstruct } from './docker-build-construct';
 
 export interface FdnixPipelineStackProps extends StackProps {
   databaseStack: FdnixDatabaseStack;
@@ -22,6 +24,8 @@ export class FdnixPipelineStack extends Stack {
   public readonly metadataTaskDefinition: ecs.FargateTaskDefinition;
   public readonly embeddingTaskDefinition: ecs.FargateTaskDefinition;
   public readonly pipelineStateMachine: stepfunctions.StateMachine;
+  public readonly metadataDockerBuild: DockerBuildConstruct;
+  public readonly embeddingDockerBuild: DockerBuildConstruct;
 
   constructor(scope: Construct, id: string, props: FdnixPipelineStackProps) {
     super(scope, id, props);
@@ -55,6 +59,23 @@ export class FdnixPipelineStack extends Stack {
       lifecycleRules: [{
         maxImageCount: 10,
       }],
+    });
+
+    // Docker build constructs for automated container building
+    const containersPath = path.join(__dirname, '../../containers');
+    
+    this.metadataDockerBuild = new DockerBuildConstruct(this, 'MetadataDockerBuild', {
+      repository: this.metadataRepository,
+      dockerfilePath: path.join(containersPath, 'metadata-generator/Dockerfile'),
+      contextPath: path.join(containersPath, 'metadata-generator'),
+      imageName: 'metadata-generator',
+    });
+
+    this.embeddingDockerBuild = new DockerBuildConstruct(this, 'EmbeddingDockerBuild', {
+      repository: this.embeddingRepository,
+      dockerfilePath: path.join(containersPath, 'embedding-generator/Dockerfile'),
+      contextPath: path.join(containersPath, 'embedding-generator'),
+      imageName: 'embedding-generator',
     });
 
     // IAM roles for Fargate tasks
@@ -107,7 +128,7 @@ export class FdnixPipelineStack extends Stack {
     });
 
     const metadataContainer = this.metadataTaskDefinition.addContainer('MetadataContainer', {
-      image: ecs.ContainerImage.fromEcrRepository(this.metadataRepository),
+      image: ecs.ContainerImage.fromDockerImageAsset(this.metadataDockerBuild.dockerImageAsset),
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'metadata',
         logGroup: metadataLogGroup,
@@ -127,7 +148,7 @@ export class FdnixPipelineStack extends Stack {
     });
 
     const embeddingContainer = this.embeddingTaskDefinition.addContainer('EmbeddingContainer', {
-      image: ecs.ContainerImage.fromEcrRepository(this.embeddingRepository),
+      image: ecs.ContainerImage.fromDockerImageAsset(this.embeddingDockerBuild.dockerImageAsset),
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'embedding',
         logGroup: embeddingLogGroup,

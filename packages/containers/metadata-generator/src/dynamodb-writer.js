@@ -109,12 +109,20 @@ class DynamoDBWriter {
       version: pkg.version,
       attributePath: pkg.attributePath || '',
       description: pkg.description || '',
+      longDescription: pkg.longDescription || '',
       homepage: pkg.homepage || '',
-      license: pkg.license || '',
+      license: pkg.license || null,
       platforms: pkg.platforms || [],
       maintainers: pkg.maintainers || [],
       broken: Boolean(pkg.broken),
       unfree: Boolean(pkg.unfree),
+      // Enhanced metadata fields
+      available: pkg.available !== undefined ? Boolean(pkg.available) : true,
+      insecure: Boolean(pkg.insecure),
+      unsupported: Boolean(pkg.unsupported),
+      mainProgram: pkg.mainProgram || '',
+      position: pkg.position || '',
+      outputsToInstall: pkg.outputsToInstall || [],
       lastUpdated: pkg.lastUpdated,
       hasEmbedding: Boolean(pkg.hasEmbedding)
     };

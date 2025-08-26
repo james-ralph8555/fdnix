@@ -47,7 +47,8 @@ class NixpkgsExtractor {
       const nixEnvProcess = spawn('nix-env', [
         '-f', this.nixpkgsPath,
         '-qaP',
-        '--json'
+        '--json',
+        '--meta'
       ], {
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 1800000, // 30 minute timeout for large extraction
@@ -100,17 +101,29 @@ class NixpkgsExtractor {
           continue;
         }
 
+        // Access meta object for enhanced metadata
+        const meta = packageInfo.meta || {};
+
         const processedPackage = {
           packageName,
           version,
           attributePath: packagePath,
-          description: this.sanitizeString(packageInfo.description || ''),
-          homepage: this.sanitizeString(packageInfo.homepage || ''),
-          license: this.extractLicenseInfo(packageInfo.license),
-          platforms: this.extractPlatforms(packageInfo.platforms),
-          maintainers: this.extractMaintainers(packageInfo.maintainers),
-          broken: packageInfo.broken || false,
-          unfree: packageInfo.unfree || false,
+          // Use meta fields when available, fallback to top-level
+          description: this.sanitizeString(meta.description || packageInfo.description || ''),
+          longDescription: this.sanitizeString(meta.longDescription || ''),
+          homepage: this.sanitizeString(meta.homepage || packageInfo.homepage || ''),
+          license: this.extractLicenseInfo(meta.license || packageInfo.license),
+          platforms: this.extractPlatforms(meta.platforms || packageInfo.platforms),
+          maintainers: this.extractMaintainers(meta.maintainers || packageInfo.maintainers),
+          broken: meta.broken || packageInfo.broken || false,
+          unfree: meta.unfree || packageInfo.unfree || false,
+          // New metadata fields from --meta flag
+          available: meta.available !== undefined ? meta.available : true,
+          insecure: meta.insecure || false,
+          unsupported: meta.unsupported || false,
+          mainProgram: this.sanitizeString(meta.mainProgram || ''),
+          position: this.sanitizeString(meta.position || ''),
+          outputsToInstall: Array.isArray(meta.outputsToInstall) ? meta.outputsToInstall : [],
           lastUpdated: currentTimestamp,
           hasEmbedding: false // Will be updated by embedding generator
         };
@@ -148,22 +161,49 @@ class NixpkgsExtractor {
   }
 
   extractLicenseInfo(license) {
-    if (!license) return '';
+    if (!license) return null;
     
-    if (typeof license === 'string') return this.sanitizeString(license);
+    if (typeof license === 'string') return { type: 'string', value: this.sanitizeString(license) };
     
     if (Array.isArray(license)) {
-      return license
-        .map(l => typeof l === 'object' ? (l.spdxId || l.fullName || '') : String(l))
-        .filter(Boolean)
-        .join(', ');
+      return {
+        type: 'array',
+        licenses: license
+          .map(l => this.extractSingleLicense(l))
+          .filter(Boolean)
+      };
     }
     
     if (typeof license === 'object') {
-      return license.spdxId || license.fullName || '';
+      return {
+        type: 'object',
+        ...this.extractSingleLicense(license)
+      };
     }
     
-    return String(license).substring(0, 500);
+    return { type: 'string', value: String(license).substring(0, 500) };
+  }
+
+  extractSingleLicense(license) {
+    if (!license) return null;
+    
+    if (typeof license === 'string') {
+      return { shortName: license, fullName: '', spdxId: '', url: '', free: null, redistributable: null };
+    }
+    
+    if (typeof license === 'object') {
+      return {
+        shortName: this.sanitizeString(license.shortName || ''),
+        fullName: this.sanitizeString(license.fullName || ''),
+        spdxId: this.sanitizeString(license.spdxId || ''),
+        url: this.sanitizeString(license.url || ''),
+        free: typeof license.free === 'boolean' ? license.free : null,
+        redistributable: typeof license.redistributable === 'boolean' ? license.redistributable : null,
+        deprecated: typeof license.deprecated === 'boolean' ? license.deprecated : null
+      };
+    }
+    
+    return { shortName: String(license), fullName: '', spdxId: '', url: '', free: null, redistributable: null };
   }
 
   extractPlatforms(platforms) {
@@ -181,8 +221,19 @@ class NixpkgsExtractor {
     
     if (Array.isArray(maintainers)) {
       return maintainers
-        .map(m => typeof m === 'object' ? (m.name || m.email || '') : String(m))
-        .filter(Boolean)
+        .map(m => {
+          if (typeof m === 'object' && m !== null) {
+            // Enhanced maintainer object with name, email, github, githubId
+            return {
+              name: this.sanitizeString(m.name || ''),
+              email: this.sanitizeString(m.email || ''),
+              github: this.sanitizeString(m.github || ''),
+              githubId: typeof m.githubId === 'number' ? m.githubId : null
+            };
+          }
+          return { name: String(m), email: '', github: '', githubId: null };
+        })
+        .filter(m => m.name || m.email || m.github)
         .slice(0, 10); // Limit to first 10 maintainers
     }
     

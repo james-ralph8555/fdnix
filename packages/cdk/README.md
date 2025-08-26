@@ -75,6 +75,7 @@ Data Pipeline (fdnix-pipeline-stack)
 ## Prerequisites
 
 - Node.js 18+ and npm
+- Rust toolchain (stable) for building the Lambda `bootstrap`
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI installed (`npm install -g aws-cdk`)
 - Docker (for container builds in later phases)
@@ -184,6 +185,7 @@ npm run synth
 - CORS enabled for frontend integration
 - Rate limiting and usage plans
 - Health check endpoint
+ - Implemented in Rust using the AWS Lambda custom runtime (`provided.al2023`); during scaffolding a Node.js stub may be deployed to keep wiring in place
 
 **API Endpoints:**
 - `GET /v1/search?q=<query>` - Main search endpoint

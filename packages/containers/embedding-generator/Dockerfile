@@ -4,15 +4,20 @@ FROM python:3.11-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies and uv
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
-    && rm -rf /var/lib/apt/lists/*
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Add uv to PATH
+ENV PATH="/root/.cargo/bin:$PATH"
+
+# Copy pyproject.toml and install Python dependencies with uv
+COPY pyproject.toml .
+RUN uv sync --frozen
 
 # Copy application source
 COPY src/ ./src/
@@ -28,5 +33,11 @@ USER appuser
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Command to run the application
-CMD ["python", "src/index.py"]
+# Set default environment variables (can be overridden by CDK)
+ENV DYNAMODB_TABLE=fdnix-packages
+ENV S3_BUCKET=fdnix-vec
+ENV AWS_REGION=us-east-1
+ENV BEDROCK_MODEL_ID=cohere.embed-english-v3
+
+# Command to run the application using uv
+CMD ["uv", "run", "python", "src/index.py"]

@@ -35,7 +35,7 @@ Note: If you’re looking for the implementation details and deployment plan, se
 ## How It Works (High‑Level)
 
 - Frontend (SolidJS SSG) provides a fast, static UI.
-- API (AWS Lambda via API Gateway) accepts your query and performs a hybrid search:
+- API (AWS Lambda via API Gateway) is implemented in Rust (custom runtime) and performs a hybrid search:
   - Vector search: Embeds your query and searches a Faiss index stored in S3 bucket `fdnix-vec`.
   - Keyword search: Queries an OpenSearch Serverless index for textual relevance.
   - Fusion + hydrate: Combines and ranks results, then fetches full metadata from DynamoDB.
@@ -71,16 +71,26 @@ npm run diff
 npm run synth
 ```
 
+### Build the Rust Lambda
+```bash
+# Build the custom runtime bootstrap (skips if cargo not installed)
+pnpm --filter search-lambda build
+```
+
 ### Project Structure
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)
   - `containers/` (`metadata-generator/`, `embedding-generator/`)
-  - `search-lambda/` (Node.js Lambda)
+  - `search-lambda/` (Rust Lambda — custom runtime)
   - `frontend/` (SolidJS)
 - All CDK commands can be run from the repository root
 - Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
+
+### Backend Implementation Note
+
+- The search API Lambda will be written in Rust and deployed using the AWS Lambda custom runtime (`provided.al2023`). During early scaffolding, a minimal Node.js handler exists only as a stub to keep the CDK wiring and API Gateway in place. The stub will be replaced by a compiled Rust binary packaged as `bootstrap`.
 
 ## Custom Domain (Cloudflare)
 

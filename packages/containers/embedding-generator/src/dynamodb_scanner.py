@@ -19,15 +19,27 @@ class DynamoDBScanner:
         
         logger.info(f"Initialized DynamoDB scanner for table {table_name} in region {region}")
 
-    async def scan_packages_without_embeddings(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    async def scan_packages_without_embeddings(self, limit: Optional[int] = None, exclude_problematic: bool = True) -> List[Dict[str, Any]]:
         """Scan DynamoDB for packages that don't have embeddings yet"""
         logger.info("Scanning for packages without embeddings...")
         
         packages = []
         try:
+            # Base filter for packages without embeddings
+            filter_expression = Attr('hasEmbedding').eq(False) | Attr('hasEmbedding').not_exists()
+            
+            # Optionally exclude problematic packages
+            if exclude_problematic:
+                filter_expression = filter_expression & (
+                    Attr('available').eq(True) & 
+                    Attr('broken').eq(False) & 
+                    Attr('insecure').eq(False) &
+                    Attr('unsupported').eq(False)
+                )
+            
             scan_kwargs = {
-                'FilterExpression': Attr('hasEmbedding').eq(False) | Attr('hasEmbedding').not_exists(),
-                'ProjectionExpression': 'packageName, version, description, homepage, license, platforms, maintainers, attributePath'
+                'FilterExpression': filter_expression,
+                'ProjectionExpression': 'packageName, version, description, longDescription, homepage, license, platforms, maintainers, attributePath, mainProgram, available, broken, insecure, unsupported'
             }
             
             # Use paginator for large scans

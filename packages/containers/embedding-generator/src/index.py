@@ -60,23 +60,28 @@ class EmbeddingGenerator:
         if package.get('version'):
             parts.append(f"Version: {package['version']}")
         
-        # Description - most important for semantic search
-        if package.get('description'):
-            parts.append(f"Description: {package['description']}")
+        # Main program for better searchability
+        if package.get('mainProgram'):
+            parts.append(f"Main Program: {package['mainProgram']}")
+        
+        # Description - prefer longDescription for richer content, fallback to description
+        description_text = package.get('longDescription', '') or package.get('description', '')
+        if description_text:
+            parts.append(f"Description: {description_text}")
         
         # Homepage URL
         if package.get('homepage'):
             parts.append(f"Homepage: {package['homepage']}")
         
-        # License information
-        if package.get('license'):
-            parts.append(f"License: {package['license']}")
+        # License information - handle enhanced license structure
+        license_info = self.format_license_for_embedding(package.get('license'))
+        if license_info:
+            parts.append(f"License: {license_info}")
         
-        # Maintainers
-        if package.get('maintainers') and isinstance(package['maintainers'], list):
-            maintainers = [str(m) for m in package['maintainers'][:3]]  # Limit to first 3
-            if maintainers:
-                parts.append(f"Maintainers: {', '.join(maintainers)}")
+        # Maintainers - handle enhanced maintainer structure
+        maintainer_info = self.format_maintainers_for_embedding(package.get('maintainers', []))
+        if maintainer_info:
+            parts.append(f"Maintainers: {maintainer_info}")
         
         # Platforms
         if package.get('platforms') and isinstance(package['platforms'], list):
@@ -95,6 +100,47 @@ class EmbeddingGenerator:
             text = text[:self.max_text_length - 3] + '...'
         
         return text
+
+    def format_license_for_embedding(self, license_data) -> str:
+        """Format license data for embedding text"""
+        if not license_data:
+            return ""
+        
+        if isinstance(license_data, str):
+            return license_data
+        
+        if isinstance(license_data, dict):
+            if license_data.get('type') == 'string':
+                return license_data.get('value', '')
+            elif license_data.get('type') == 'object':
+                # Prefer spdxId, then shortName, then fullName
+                return license_data.get('spdxId') or license_data.get('shortName') or license_data.get('fullName', '')
+            elif license_data.get('type') == 'array':
+                licenses = license_data.get('licenses', [])
+                license_names = []
+                for lic in licenses[:3]:  # Limit to first 3 licenses
+                    name = lic.get('spdxId') or lic.get('shortName') or lic.get('fullName', '')
+                    if name:
+                        license_names.append(name)
+                return ', '.join(license_names)
+        
+        return str(license_data)[:100]  # Fallback with length limit
+
+    def format_maintainers_for_embedding(self, maintainers) -> str:
+        """Format maintainer data for embedding text"""
+        if not maintainers or not isinstance(maintainers, list):
+            return ""
+        
+        maintainer_names = []
+        for maintainer in maintainers[:3]:  # Limit to first 3 maintainers
+            if isinstance(maintainer, dict):
+                name = maintainer.get('name', '') or maintainer.get('email', '') or maintainer.get('github', '')
+                if name:
+                    maintainer_names.append(name)
+            elif isinstance(maintainer, str):
+                maintainer_names.append(maintainer)
+        
+        return ', '.join(maintainer_names)
 
     async def process_packages_batch(self, packages: List[Dict[str, Any]]) -> int:
         """Process a batch of packages to generate embeddings"""

@@ -58,7 +58,7 @@ SolidJS (with SSG)
 Backend
 	
 
-AWS Lambda (Node.js)
+AWS Lambda (Rust, custom runtime)
 
 API
 	
@@ -132,7 +132,7 @@ The project will be organized as follows:
 │   ├── frontend/             # SolidJS application
 │   │   ├── src/
 │   │   └── package.json
-│   └── search-lambda/        # Source code for the backend search API
+│   └── search-lambda/        # Rust source/binary for the backend search API
 │       ├── src/
 │       └── package.json
 ├── .gitignore
@@ -204,7 +204,7 @@ Phase 3: Backend Search API
 
     Tasks:
 
-        Initialize Lambda Project (search-lambda): Set up a Node.js project with dependencies for AWS SDK, Faiss-node, and OpenSearch.
+        Initialize Lambda Project (search-lambda): Scaffold a Rust Lambda targeting the custom runtime (`provided.al2023`). Use the AWS Rust SDK and a suitable HTTP framework (e.g., `lambda_http`). Package the compiled binary as `bootstrap` for deployment. Plan for native deps (Faiss bindings or alternative vector search strategy).
 
         Implement API Handler:
 

@@ -39,5 +39,9 @@ RUN chown -R nodejs:nodejs /app
 # Switch to non-root user
 USER nodejs
 
+# Set default environment variables (can be overridden by CDK)
+ENV DYNAMODB_TABLE=fdnix-packages
+ENV AWS_REGION=us-east-1
+
 # Command to run the application
 CMD ["node", "src/index.js"]
