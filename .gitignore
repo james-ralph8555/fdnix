@@ -13,6 +13,9 @@ build/
 cdk.out/
 cdk.context.json
 
+# CDK package-specific outputs
+packages/cdk/**/*.js
+
 # TypeScript
 *.d.ts
 *.js.map

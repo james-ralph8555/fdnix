@@ -5,6 +5,7 @@ import { FdnixDatabaseStack } from '../lib/database-stack';
 import { FdnixPipelineStack } from '../lib/pipeline-stack';
 import { FdnixSearchApiStack } from '../lib/search-api-stack';
 import { FdnixFrontendStack } from '../lib/frontend-stack';
+import { FdnixCertificateStack } from '../lib/certificate-stack';
 
 const app = new cdk.App();
 
@@ -58,11 +59,25 @@ const searchApiStack = new FdnixSearchApiStack(app, `${stackPrefix}SearchApiStac
   },
 });
 
-// Frontend Stack - Static site hosting
+// Always create a separate Certificate Stack (validation can take time; does not block frontend)
+new FdnixCertificateStack(app, `${stackPrefix}CertificateStack`, {
+  env,
+  description: 'ACM certificate for fdnix frontend custom domain',
+  stackName: 'fdnix-certificate-stack',
+  tags: {
+    Project: 'fdnix',
+    Component: 'certificate',
+    Environment: 'production',
+  },
+  domainName,
+});
+
+// Frontend Stack - Static site hosting (does not require certificate)
 const frontendStack = new FdnixFrontendStack(app, `${stackPrefix}FrontendStack`, {
   env,
   searchApiStack,
   domainName,
+  // Intentionally not wiring the cert into CloudFront until issued
   description: 'Frontend hosting for fdnix search interface',
   stackName: 'fdnix-frontend-stack',
   tags: {
@@ -144,6 +159,7 @@ new cdk.CfnOutput(frontendStack, 'CloudflareSetupInstructions', {
   description: 'DNS configuration instructions for Cloudflare',
   exportName: 'FdnixCloudflareInstructions',
 });
+
 
 // Application-level tags
 cdk.Tags.of(app).add('Project', 'fdnix');

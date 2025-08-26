@@ -12,6 +12,7 @@ import { FdnixSearchApiStack } from './search-api-stack';
 export interface FdnixFrontendStackProps extends StackProps {
   searchApiStack: FdnixSearchApiStack;
   domainName?: string;
+  certificateArn?: string;
 }
 
 export class FdnixFrontendStack extends Stack {
@@ -22,7 +23,7 @@ export class FdnixFrontendStack extends Stack {
   constructor(scope: Construct, id: string, props: FdnixFrontendStackProps) {
     super(scope, id, props);
 
-    const { searchApiStack, domainName } = props;
+    const { searchApiStack, domainName, certificateArn } = props;
 
     // S3 bucket for static site hosting
     this.hostingBucket = new s3.Bucket(this, 'FrontendHostingBucket', {
@@ -43,16 +44,10 @@ export class FdnixFrontendStack extends Stack {
       description: 'Origin Access Control for fdnix frontend',
     });
 
-    // SSL Certificate (if domain is provided)
-    // For fdnix.com, create certificate for CloudFront (must be in us-east-1)
-    let certificate: certificatemanager.Certificate | undefined;
-    if (domainName) {
-      certificate = new certificatemanager.Certificate(this, 'SslCertificate', {
-        domainName,
-        subjectAlternativeNames: [`www.${domainName}`],
-        certificateName: 'fdnix-ssl-certificate',
-        validation: certificatemanager.CertificateValidation.fromDns(),
-      });
+    // Optional certificate: only attach if an issued ACM cert ARN is provided
+    let certificate: certificatemanager.ICertificate | undefined;
+    if (certificateArn) {
+      certificate = certificatemanager.Certificate.fromCertificateArn(this, 'ImportedCert', certificateArn);
     }
 
     // CloudFront distribution
@@ -96,13 +91,12 @@ export class FdnixFrontendStack extends Stack {
           ttl: Duration.minutes(5),
         },
       ],
-      domainNames: domainName ? [domainName, `www.${domainName}`] : undefined,
+      domainNames: domainName && certificate ? [domainName, `www.${domainName}`] : undefined,
       certificate,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
       enabled: true,
-      geoRestriction: cloudfront.GeoRestriction.allowlist('US', 'CA', 'EU', 'GB'),
     });
 
     // Bucket policy to allow CloudFront access via OAC

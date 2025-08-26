@@ -101,7 +101,7 @@ export class FdnixPipelineStack extends Stack {
     this.metadataTaskDefinition = new ecs.FargateTaskDefinition(this, 'MetadataTaskDefinition', {
       family: 'fdnix-metadata-task',
       cpu: 1024,
-      memoryLimitMiB: 3008,
+      memoryLimitMiB: 3072,
       executionRole: fargateExecutionRole,
       taskRole: fargateTaskRole,
     });

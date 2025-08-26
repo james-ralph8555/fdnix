@@ -57,14 +57,14 @@ export class FdnixSearchApiStack extends Stack {
     const dependenciesLayer = new lambda.LayerVersion(this, 'SearchDependenciesLayer', {
       layerVersionName: 'fdnix-search-dependencies',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/layer')),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_18_X],
+      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
       description: 'Dependencies for fdnix search API including Faiss bindings',
     });
 
     // Lambda function for hybrid search API
     this.searchFunction = new lambda.Function(this, 'SearchFunction', {
       functionName: 'fdnix-search-api',
-      runtime: lambda.Runtime.NODEJS_18_X,
+      runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/dist')),
       timeout: Duration.seconds(30),
@@ -75,7 +75,6 @@ export class FdnixSearchApiStack extends Stack {
       environment: {
         DYNAMODB_TABLE: databaseStack.packagesTable.tableName,
         S3_BUCKET: databaseStack.vectorIndexBucket.bucketName,
-        AWS_REGION: this.region,
         BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
         VECTOR_INDEX_KEY: 'faiss-index/packages.index',
         VECTOR_MAPPING_KEY: 'faiss-index/package-mapping.json',

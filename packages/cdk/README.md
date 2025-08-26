@@ -198,7 +198,7 @@ npm run synth
 
 **Key Features:**
 - Global CDN with edge caching
-- SSL/TLS termination with ACM certificate
+- SSL/TLS termination with ACM certificate (optional; separate stack)
 - Custom domain support (fdnix.com, www.fdnix.com)
 - SPA routing support (404 → index.html)
 - API proxying through CloudFront
@@ -292,14 +292,14 @@ After deployment, configure Cloudflare to point your domain to CloudFront and co
    - **CNAME (flattened) for apex**: Name `@` (fdnix.com) → target the CloudFront domain. Cloudflare will apply CNAME flattening at the apex. Enable proxy (orange cloud) if desired.
    - **CNAME for www**: Name `www` → target the CloudFront domain. Enable proxy (orange cloud) if desired.
 3. **ACM certificate (us-east-1)**:
-   - The frontend stack requests an ACM certificate in `us-east-1` when `FDNIX_DOMAIN_NAME` is set.
-   - In the AWS Console (ACM, region `us-east-1`), open the certificate and copy the provided DNS validation CNAME records.
+   - The dedicated `fdnix-certificate-stack` is created automatically.
+   - Open the certificate in ACM and copy the DNS validation CNAMEs.
    - Add those CNAME validation records in your Cloudflare zone. Validation usually completes within minutes.
 4. **Cloudflare SSL/TLS mode**: Set to "Full (strict)".
 
 Notes:
 - CloudFront only accepts ACM certificates in `us-east-1`. The CDK bin defaults to `us-east-1` to satisfy this.
-- If you prefer to pre-provision a certificate, create it in `us-east-1`, validate via Cloudflare DNS, and wire it into the stack (future option).
+- The frontend stack does not depend on the certificate. You can deploy the frontend immediately; the certificate may remain in Pending validation without blocking.
 
 ## Next Steps
 
