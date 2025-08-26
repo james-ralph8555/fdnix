@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "synth": "cdk synth",
+    "diff": "cdk diff --all",
     "bootstrap": "cdk bootstrap",
     "deploy": "cdk deploy --all",
     "cleanup:list-stacks": "aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE DELETE_FAILED --query 'StackSummaries[?starts_with(StackName, `Fdnix`)].{Name:StackName,Status:StackStatus,Created:CreationTime}' --output table",

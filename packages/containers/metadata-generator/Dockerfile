@@ -1,47 +1,56 @@
-# Multi-stage build to combine NixOS with Node.js for AWS SDK
+# Stage 1: bring in Nix to enable nix-env during extraction
 FROM nixos/nix:2.18.1 AS nix-stage
-
-# Install git in the Nix stage 
 RUN nix-env -i git
 
-# Stage 2: Node.js runtime for AWS SDK
-FROM node:18-alpine AS runtime
+# Stage 2: Python runtime matching embedding-generator
+FROM python:3.11-slim AS runtime
 
-# Install git and other necessary tools
-RUN apk add --no-cache git bash
+# Set working directory
+WORKDIR /app
 
-# Copy Nix from the first stage
+# Install system deps and uv (match embedding-generator pattern)
+RUN apt-get update && apt-get install -y \
+    git \
+    bash \
+    curl \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Add uv to PATH
+ENV PATH="/root/.local/bin:$PATH"
+
+# Copy Nix store/basics from the nix stage
 COPY --from=nix-stage /nix /nix
 COPY --from=nix-stage /etc/passwd /etc/passwd
 COPY --from=nix-stage /etc/group /etc/group
 
-# Set up Nix environment
+# Set up Nix environment for nix-env
 ENV PATH="/nix/var/nix/profiles/default/bin:$PATH"
 ENV NIX_PATH="nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
 
-# Create app directory
-WORKDIR /app
-
-# Copy package.json and install dependencies
-COPY package*.json ./
-RUN npm install --only=production
+# Copy Python project metadata and install runtime deps via uv
+COPY pyproject.toml ./
+RUN uv pip install --system boto3 botocore requests
 
 # Copy application source
 COPY src/ ./src/
 
 # Create non-root user for security
-RUN addgroup -g 1001 -S nodejs && \
-    adduser -S nodejs -u 1001 -G nodejs
-
-# Change ownership of the app directory
-RUN chown -R nodejs:nodejs /app
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app
 
 # Switch to non-root user
-USER nodejs
+USER appuser
 
-# Set default environment variables (can be overridden by CDK)
+# Environment
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+
+# Required env (overridden by CDK)
 ENV DYNAMODB_TABLE=fdnix-packages
 ENV AWS_REGION=us-east-1
 
-# Command to run the application
-CMD ["node", "src/index.js"]
+# Entry point
+CMD ["uv", "run", "python", "src/index.py"]

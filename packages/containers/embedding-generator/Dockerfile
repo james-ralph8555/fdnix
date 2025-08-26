@@ -34,10 +34,11 @@ ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
 # Set default environment variables (can be overridden by CDK)
-ENV DYNAMODB_TABLE=fdnix-packages
-ENV S3_BUCKET=fdnix-vec
 ENV AWS_REGION=us-east-1
 ENV BEDROCK_MODEL_ID=cohere.embed-english-v3
+# Optional: local file-based I/O until DuckDB integration
+ENV PACKAGES_INPUT=""
+ENV EMBEDDINGS_OUTPUT="/tmp/embeddings.jsonl"
 
 # Command to run the application using uv
 CMD ["uv", "run", "python", "src/index.py"]

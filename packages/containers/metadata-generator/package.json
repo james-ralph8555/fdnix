@@ -2,17 +2,13 @@
   "name": "fdnix-metadata-generator",
   "version": "1.0.0",
   "description": "Metadata extraction container for fdnix - extracts package metadata from nixpkgs",
-  "main": "src/index.js",
+  "main": "src/index.py",
   "scripts": {
-    "start": "node src/index.js",
+    "start": "python src/index.py",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "dependencies": {
-    "@aws-sdk/client-dynamodb": "^3.470.0",
-    "@aws-sdk/lib-dynamodb": "^3.470.0"
-  },
   "engines": {
-    "node": ">=18.0.0"
+    "python": ">=3.11.0"
   },
   "author": "fdnix",
   "license": "MIT"

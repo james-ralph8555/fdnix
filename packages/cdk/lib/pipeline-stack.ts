@@ -203,6 +203,35 @@ export class FdnixPipelineStack extends Stack {
       assignPublicIp: true,
     });
 
+    // IAM role for the Lambda that publishes a new layer version
+    const publishLayerRole = new iam.Role(this, 'PublishLayerRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+      ],
+    });
+
+    // Allow this function to publish new versions of the DuckDB layer
+    publishLayerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'lambda:PublishLayerVersion',
+        'lambda:GetLayerVersion',
+        'lambda:ListLayerVersions',
+      ],
+      resources: [dbLayerUnversionedArn, databaseStack.databaseLayer.layerVersionArn],
+    }));
+
+    // Allow reading the DuckDB artifact from S3
+    publishLayerRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject', 's3:ListBucket'],
+      resources: [
+        databaseStack.artifactsBucket.bucketArn,
+        databaseStack.artifactsBucket.arnForObjects('*'),
+      ],
+    }));
+
     // Lambda function to publish layer from S3 artifact
     const publishLayerFunction = new lambda.Function(this, 'PublishLayerFunction', {
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -244,7 +273,7 @@ def handler(event, context):
         }
       `),
       timeout: Duration.minutes(5),
-      role: fargateTaskRole,
+      role: publishLayerRole,
     });
 
     const publishLayerTask = new stepfunctionsTasks.LambdaInvoke(this, 'PublishLayerTask', {

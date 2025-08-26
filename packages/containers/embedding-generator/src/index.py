@@ -6,8 +6,6 @@ import logging
 import json
 from typing import List, Dict, Any
 from bedrock_client import BedrockClient
-from s3_vector_client import S3VectorClient
-from dynamodb_scanner import DynamoDBScanner
 
 # Configure logging
 logging.basicConfig(
@@ -19,30 +17,20 @@ logger = logging.getLogger(__name__)
 class EmbeddingGenerator:
     def __init__(self):
         self.validate_environment()
-        
-        self.dynamodb_scanner = DynamoDBScanner(
-            table_name=os.environ['DYNAMODB_TABLE'],
-            region=os.environ['AWS_REGION']
-        )
-        
         self.bedrock_client = BedrockClient(
             model_id=os.environ['BEDROCK_MODEL_ID'],
             region=os.environ['AWS_REGION']
         )
         
-        self.s3_client = S3VectorClient(
-            bucket_name=os.environ['S3_BUCKET'],
-            region=os.environ['AWS_REGION']
-        )
-        
         self.batch_size = 50  # Process embeddings in batches
         self.max_text_length = 2000  # Limit text length for embedding
+        # Optional local file I/O (temporary until DuckDB integration lands)
+        self.packages_input = os.environ.get('PACKAGES_INPUT', '').strip()
+        self.embeddings_output = os.environ.get('EMBEDDINGS_OUTPUT', '/tmp/embeddings.jsonl').strip()
 
     def validate_environment(self):
         """Validate required environment variables"""
         required_vars = [
-            'DYNAMODB_TABLE',
-            'S3_BUCKET', 
             'AWS_REGION',
             'BEDROCK_MODEL_ID'
         ]
@@ -50,6 +38,29 @@ class EmbeddingGenerator:
         missing_vars = [var for var in required_vars if not os.environ.get(var)]
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
+    def load_packages_from_file(self) -> List[Dict[str, Any]]:
+        """Load packages from a JSONL file if provided via PACKAGES_INPUT."""
+        path = self.packages_input
+        if not path:
+            logger.info("No PACKAGES_INPUT provided; nothing to process.")
+            return []
+        if not os.path.exists(path):
+            logger.warning(f"PACKAGES_INPUT file not found: {path}")
+            return []
+        logger.info(f"Loading packages from {path} ...")
+        pkgs: List[Dict[str, Any]] = []
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    pkgs.append(json.loads(line))
+                except Exception as e:
+                    logger.warning(f"Skipping invalid JSON line: {e}")
+        logger.info(f"Loaded {len(pkgs)} packages from file")
+        return pkgs
 
     def create_embedding_text(self, package: Dict[str, Any]) -> str:
         """Create a text representation of the package for embedding"""
@@ -167,8 +178,7 @@ class EmbeddingGenerator:
                 logger.error(f"Mismatch in embeddings count: expected {len(texts)}, got {len(embeddings)}")
                 return 0
             
-            # Store vectors in S3
-            logger.info("Storing vectors in S3...")
+            # Prepare vector payloads (temporary file-based output)
             vector_data = []
             for i, (package_key, embedding, text) in enumerate(zip(package_keys, embeddings, texts)):
                 vector_data.append({
@@ -180,12 +190,12 @@ class EmbeddingGenerator:
                         'text': text[:500]  # Store first 500 chars for debugging
                     }
                 })
-            
-            await self.s3_client.store_vectors_batch(vector_data)
-            
-            # Update DynamoDB to mark packages as having embeddings
-            logger.info("Updating DynamoDB records...")
-            await self.dynamodb_scanner.mark_packages_with_embeddings(package_keys)
+            # Write to local JSONL as a temporary artifact
+            os.makedirs(os.path.dirname(self.embeddings_output), exist_ok=True)
+            with open(self.embeddings_output, 'a', encoding='utf-8') as out:
+                for item in vector_data:
+                    out.write(json.dumps(item) + "\n")
+            logger.info(f"Wrote {len(vector_data)} embeddings to {self.embeddings_output}")
             
             logger.info(f"Successfully processed batch of {len(packages)} packages")
             return len(packages)
@@ -199,15 +209,11 @@ class EmbeddingGenerator:
         logger.info("Starting fdnix embedding generation process...")
         
         try:
-            # Scan for packages without embeddings
-            logger.info("Scanning for packages without embeddings...")
-            packages_without_embeddings = await self.dynamodb_scanner.scan_packages_without_embeddings()
-            
-            total_packages = len(packages_without_embeddings)
-            logger.info(f"Found {total_packages} packages that need embeddings")
-            
+            # Temporary input path flow until DuckDB integration is added
+            packages = self.load_packages_from_file()
+            total_packages = len(packages)
             if total_packages == 0:
-                logger.info("No packages need embeddings. Exiting.")
+                logger.info("No input packages provided. Exiting.")
                 return
             
             # Process packages in batches
@@ -215,7 +221,7 @@ class EmbeddingGenerator:
             failed_count = 0
             
             for i in range(0, total_packages, self.batch_size):
-                batch = packages_without_embeddings[i:i + self.batch_size]
+                batch = packages[i:i + self.batch_size]
                 logger.info(f"Processing batch {i//self.batch_size + 1}/{(total_packages + self.batch_size - 1)//self.batch_size}")
                 
                 batch_processed = await self.process_packages_batch(batch)
@@ -224,9 +230,7 @@ class EmbeddingGenerator:
                 
                 logger.info(f"Progress: {processed_count}/{total_packages} processed, {failed_count} failed")
             
-            # Create or update the vector index
-            logger.info("Creating/updating vector index...")
-            await self.s3_client.create_or_update_index()
+            # No S3 index handling; this will move to DuckDB
             
             logger.info(f"Embedding generation completed! Processed: {processed_count}, Failed: {failed_count}")
             
