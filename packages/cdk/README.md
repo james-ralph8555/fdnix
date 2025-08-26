@@ -6,9 +6,9 @@ This package contains the AWS CDK infrastructure definitions for the fdnix hybri
 
 The infrastructure consists of four main stacks:
 
-1. **Database Stack** - Core data storage resources
-2. **Pipeline Stack** - Data processing pipeline
-3. **Search API Stack** - Lambda-based search API
+1. **Database Stack** - S3 artifact storage + Lambda Layer for DuckDB file
+2. **Pipeline Stack** - Data processing pipeline (builds the .duckdb and publishes the layer)
+3. **Search API Stack** - C++ Lambda-based search API using the DuckDB layer
 4. **Frontend Stack** - Static site hosting with CloudFront
 
 ## Architecture Diagram
@@ -17,15 +17,14 @@ The infrastructure consists of four main stacks:
 flowchart LR
   %% Stacks
   subgraph DB[fdnix-database-stack]
-    dynamo[(DynamoDB: fdnix-packages)]
-    vectors[S3: fdnix-vector-index]
-    os[(OpenSearch Serverless: fdnix-search)]
+    art[(S3: fdnix-artifacts)]
+    dblayer[[Lambda Layer: fdnix-db-layer]]
   end
 
   subgraph API[fdnix-search-api-stack]
     apigw[API Gateway: fdnix-search-api-gateway]
-    lambda[Lambda: fdnix-search-api]
-    layer[[Lambda Layer: fdnix-search-dependencies]]
+    lambda[Lambda (C++): fdnix-search-api]
+    bedrock[(Bedrock: embed query)]
   end
 
   subgraph FE[fdnix-frontend-stack]
@@ -37,18 +36,26 @@ flowchart LR
     ecs[ECS Fargate Cluster]
     ecr1[(ECR: fdnix-metadata-generator)]
     ecr2[(ECR: fdnix-embedding-generator)]
+    publishlambda[Lambda: fdnix-publish-layer]
     sfn[Step Functions: fdnix-daily-pipeline]
   end
 
   %% Data/API flows
   apigw --> lambda
-  lambda --> dynamo
-  lambda --> os
-  lambda --> vectors
+  lambda --> dblayer
+  lambda --> bedrock
+  dblayer -. /opt/fdnix/fdnix.duckdb .-> lambda
 
   %% Frontend access
   cf --> s3fe
   cf --> apigw
+
+  %% Pipeline -> DB layer
+  sfn --> ecs
+  ecs --> art
+  sfn --> publishlambda
+  publishlambda --> dblayer
+  art --> publishlambda
 
   %% External entry
   user[(Users)] --> cf
@@ -60,25 +67,43 @@ If Mermaid is unavailable, here is a compact textual view:
 Users -> CloudFront (fdnix-cdn)
          ├─ S3 (fdnix-frontend-hosting)
          └─ API Gateway (fdnix-search-api-gateway)
-                └─ Lambda (fdnix-search-api)
-                       ├─ DynamoDB (fdnix-packages)
-                       ├─ OpenSearch Serverless (fdnix-search)
-                       └─ S3 (fdnix-vector-index)
+                └─ Lambda (C++) (fdnix-search-api)
+                       ├─ Lambda Layer: fdnix-db-layer (.duckdb at /opt/fdnix/fdnix.duckdb)
+                       └─ Bedrock (runtime embedding)
 
 Data Pipeline (fdnix-pipeline-stack)
   ├─ ECS Fargate Cluster
   ├─ ECR: fdnix-metadata-generator
-  ├─ ECR: fdnix-embedding-generator
-  └─ Step Functions: fdnix-daily-pipeline
+  ├─ ECR: fdnix-embedding-generator  
+  ├─ Lambda: fdnix-publish-layer
+  ├─ Step Functions: fdnix-daily-pipeline (metadata → embeddings → publish layer)
+  └─ S3 artifacts → Lambda Layer publishing
 ```
 
 ## Prerequisites
 
 - Node.js 18+ and npm
-- Rust toolchain (stable) for building the Lambda `bootstrap`
+- C++ toolchain for building the Lambda `bootstrap`
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI installed (`npm install -g aws-cdk`)
 - Docker (for container builds in later phases)
+
+## Idempotent Deployments
+
+CloudFormation and CDK are designed for idempotent deployments. Re-running the same template should converge to the same state. Follow these practices to keep deploys predictable:
+
+- Stable construct IDs: Do not rename construct IDs of deployed resources; CDK maps them to CloudFormation Logical IDs.
+- Avoid hardcoded physical names: Let CDK generate names (S3 buckets, DynamoDB tables). If a fixed name is required, ensure it is unique and constant per environment.
+- No dynamic name drift: Avoid timestamps/random suffixes in names inside code. Use stack name or context for determinism.
+- Review changes: Run `npm run diff` (or `cdk diff`) to inspect change sets before deploy.
+- Detect/resolve drift: Use CloudFormation drift detection to find resources changed outside CDK; resolve by reverting manual edits or updating code.
+  - Example:
+    - `aws cloudformation detect-stack-drift --stack-name FdnixDatabaseStack`
+    - `aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id <id>`
+- Idempotent custom resources: If you add Lambda-backed custom resources, implement Create/Update/Delete to be safe on retries and re-runs.
+- Deterministic IAM: Keep policy documents stable; avoid non-deterministic statements that cause rewrites each deploy.
+
+Tip: Use `npm run diff` regularly during development to validate idempotency and avoid unintended replacements.
 
 ## Installation
 
@@ -104,13 +129,13 @@ Before deploying, ensure you have:
    ```
 
 2. Appropriate IAM permissions for creating:
-   - DynamoDB tables
    - S3 buckets
-   - Lambda functions
+   - Lambda functions and layers
    - API Gateway
    - CloudFront distributions
    - ECS clusters and task definitions
-   - OpenSearch Serverless collections
+   - Step Functions state machines
+   - EventBridge rules
    - IAM roles and policies
 
 ## Deployment
@@ -118,7 +143,7 @@ Before deploying, ensure you have:
 ### Deploy All Stacks
 
 ```bash
-# Build the Rust Lambda bootstrap first (required for API)
+# Build the C++ Lambda bootstrap first (required for API)
 pnpm --filter search-lambda build
 
 # Then deploy stacks
@@ -128,7 +153,7 @@ npm run deploy
 ### Deploy Individual Stacks
 
 ```bash
-# Ensure the Rust Lambda is built before deploying the API stack
+# Ensure the C++ Lambda is built before deploying the API stack
 pnpm --filter search-lambda build
 
 npx cdk deploy FdnixDatabaseStack
@@ -157,16 +182,15 @@ npm run synth
 ### Database Stack (`fdnix-database-stack`)
 
 **Resources:**
-- `fdnix-packages` - DynamoDB table for package metadata
-- `fdnix-vector-index` - S3 bucket for Faiss vector indices
-- `fdnix-search` - OpenSearch Serverless collection
-- `fdnix-database-access-role` - IAM role for database access
+- `fdnix-artifacts` - S3 bucket for pipeline artifacts (final `.duckdb` file)
+- `fdnix-db-layer` - Lambda Layer that packages the `.duckdb` file under `/opt/fdnix/fdnix.duckdb`
+- `fdnix-database-access-role` - IAM role for artifact access and layer publishing
 
 **Key Features:**
-- Point-in-time recovery enabled
-- Deletion protection on DynamoDB table
-- S3 versioning with lifecycle management
-- Encryption at rest for all storage
+- S3 versioning with lifecycle management (30-day retention)
+- Encryption at rest with S3-managed keys
+- Layer updates driven by the pipeline without code changes to the function
+- Bedrock permissions for embedding generation
 
 ### Pipeline Stack (`fdnix-pipeline-stack`)
 
@@ -174,28 +198,33 @@ npm run synth
 - `fdnix-processing-cluster` - ECS Fargate cluster
 - `fdnix-metadata-generator` - ECR repository
 - `fdnix-embedding-generator` - ECR repository
+- `fdnix-publish-layer` - Lambda function for layer publishing
 - `fdnix-daily-pipeline` - Step Functions state machine
-- `fdnix-daily-pipeline-trigger` - EventBridge rule (daily at 2:00 AM)
+- `fdnix-daily-pipeline-trigger` - EventBridge rule (daily at 2:00 AM UTC)
 
 **Key Features:**
-- Orchestrated data processing pipeline
-- Automated daily execution
-- Containerized processing tasks
+- Three-step orchestrated pipeline: metadata → embeddings → publish layer
+- Automated daily execution (2:00 AM UTC)
+- Right-sized containerized processing tasks (1GB metadata, 6GB embedding)
+- Automatic Lambda layer publishing from S3 artifacts
 - CloudWatch logging and monitoring
 
 ### Search API Stack (`fdnix-search-api-stack`)
 
 **Resources:**
-- `fdnix-search-api` - Lambda function for hybrid search
+- `fdnix-search-api` - C++ Lambda function for hybrid search
 - `fdnix-search-api-gateway` - API Gateway REST API
-- `fdnix-search-dependencies` - Lambda layer for dependencies
+- Lambda Layer attached from Database Stack (contains DuckDB file)
 
 **Key Features:**
-- Hybrid vector + keyword search
+- Hybrid search using DuckDB VSS (semantic) + FTS (keyword) from single file
+- Direct DuckDB queries (no external databases)
+- Real-time query embedding via Bedrock
 - CORS enabled for frontend integration
-- Rate limiting and usage plans
+- Rate limiting and usage plans (100 req/sec, 10K/day)
 - Health check endpoint
- - Implemented in Rust using the AWS Lambda custom runtime (`provided.al2023`); during scaffolding a Node.js stub may be deployed to keep wiring in place
+- Implemented in C++ using AWS Lambda custom runtime (`provided.al2023`)
+- DuckDB file accessed read-only at `/opt/fdnix/fdnix.duckdb`
 
 **API Endpoints:**
 - `GET /v1/search?q=<query>` - Main search endpoint
@@ -231,7 +260,7 @@ DatabaseStack
 
 Each stack exports key resource identifiers:
 
-- **Database**: Table names, bucket names, collection endpoints
+- **Database**: Artifacts bucket, layer ARN/version
 - **Pipeline**: Repository URIs, state machine ARN
 - **API**: API URL, function name
 - **Frontend**: Distribution ID, domain names, Cloudflare setup instructions
@@ -246,16 +275,16 @@ Each stack exports key resource identifiers:
 ## Security Features
 
 - All S3 buckets block public access
-- Encryption at rest for all storage services
+- Encryption at rest for all storage services (S3-managed keys)
 - IAM roles follow least privilege principle
-- OpenSearch Serverless with network policies
+- Lambda functions with minimal required permissions
 - CloudFront with security headers
 - API Gateway with throttling and usage plans
+- VPC isolation for ECS processing tasks
 
 ## Cost Optimization
 
 - Serverless-first architecture minimizes fixed costs
-- DynamoDB on-demand pricing
 - S3 lifecycle policies for old versions
 - CloudFront edge caching reduces origin requests
 - ECR lifecycle policies limit image storage
@@ -276,8 +305,9 @@ npm run destroy
 
 1. **Bootstrap Required**: Ensure CDK is bootstrapped in your account
 2. **Permission Denied**: Verify IAM permissions for CDK deployment
-3. **OpenSearch Policies**: OpenSearch Serverless policies can take time to propagate
-4. **Custom Domain**: Ensure DNS records are properly configured
+3. **C++ Lambda Build**: Ensure `pnpm --filter search-lambda build` completes successfully
+4. **Container Images**: ECR repositories need container images pushed before ECS tasks can run
+5. **Custom Domain**: Ensure DNS records are properly configured in Cloudflare
 
 ### Useful Commands
 

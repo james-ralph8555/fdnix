@@ -1,4 +1,4 @@
-import { Stack, StackProps, Duration } from 'aws-cdk-lib';
+import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
@@ -9,6 +9,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctionsTasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as path from 'path';
 import { FdnixDatabaseStack } from './database-stack';
 import { DockerBuildConstruct } from './docker-build-construct';
@@ -52,6 +53,7 @@ export class FdnixPipelineStack extends Stack {
       lifecycleRules: [{
         maxImageCount: 10,
       }],
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     this.embeddingRepository = new ecr.Repository(this, 'EmbeddingRepository', {
@@ -59,6 +61,7 @@ export class FdnixPipelineStack extends Stack {
       lifecycleRules: [{
         maxImageCount: 10,
       }],
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Docker build constructs for automated container building
@@ -93,8 +96,7 @@ export class FdnixPipelineStack extends Stack {
     });
 
     // Grant database access to task role
-    databaseStack.packagesTable.grantReadWriteData(fargateTaskRole);
-    databaseStack.vectorIndexBucket.grantReadWrite(fargateTaskRole);
+    databaseStack.artifactsBucket.grantReadWrite(fargateTaskRole);
 
 
     // Grant Bedrock access
@@ -107,15 +109,31 @@ export class FdnixPipelineStack extends Stack {
       ],
     }));
 
+    // Grant Lambda layer publishing permissions
+    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'lambda:PublishLayerVersion',
+        'lambda:GetLayerVersion',
+        'lambda:ListLayerVersions',
+      ],
+      resources: [
+        `arn:aws:lambda:${this.region}:${this.account}:layer:fdnix-db-layer:*`,
+      ],
+    }));
+
+
     // CloudWatch Log Groups
     const metadataLogGroup = new logs.LogGroup(this, 'MetadataLogGroup', {
       logGroupName: '/fdnix/metadata-generator',
       retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     const embeddingLogGroup = new logs.LogGroup(this, 'EmbeddingLogGroup', {
       logGroupName: '/fdnix/embedding-generator',
       retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Fargate Task Definitions
@@ -134,8 +152,9 @@ export class FdnixPipelineStack extends Stack {
         logGroup: metadataLogGroup,
       }),
       environment: {
-        DYNAMODB_TABLE: databaseStack.packagesTable.tableName,
         AWS_REGION: this.region,
+        ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
+        DUCKDB_KEY: 'snapshots/fdnix.duckdb',
       },
     });
 
@@ -154,10 +173,10 @@ export class FdnixPipelineStack extends Stack {
         logGroup: embeddingLogGroup,
       }),
       environment: {
-        DYNAMODB_TABLE: databaseStack.packagesTable.tableName,
-        S3_BUCKET: databaseStack.vectorIndexBucket.bucketName,
         AWS_REGION: this.region,
         BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
+        ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
+        DUCKDB_KEY: 'snapshots/fdnix.duckdb',
       },
     });
 
@@ -178,6 +197,57 @@ export class FdnixPipelineStack extends Stack {
       assignPublicIp: true,
     });
 
+    // Lambda function to publish layer from S3 artifact
+    const publishLayerFunction = new lambda.Function(this, 'PublishLayerFunction', {
+      functionName: 'fdnix-publish-layer',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.handler',
+      code: lambda.Code.fromInline(`
+import boto3
+import json
+
+def handler(event, context):
+    s3_client = boto3.client('s3')
+    lambda_client = boto3.client('lambda')
+    
+    bucket_name = event['bucket_name']
+    key = event['key']
+    
+    try:
+        # Publish new layer version
+        response = lambda_client.publish_layer_version(
+            LayerName='fdnix-db-layer',
+            Description='DuckDB database file for fdnix search API',
+            Content={
+                'S3Bucket': bucket_name,
+                'S3Key': key
+            },
+            CompatibleRuntimes=['provided.al2023']
+        )
+        
+        return {
+            'statusCode': 200,
+            'layerVersionArn': response['LayerVersionArn'],
+            'version': response['Version']
+        }
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'error': str(e)
+        }
+      `),
+      timeout: Duration.minutes(5),
+      role: fargateTaskRole,
+    });
+
+    const publishLayerTask = new stepfunctionsTasks.LambdaInvoke(this, 'PublishLayerTask', {
+      lambdaFunction: publishLayerFunction,
+      payload: stepfunctions.TaskInput.fromObject({
+        bucket_name: databaseStack.artifactsBucket.bucketName,
+        key: 'snapshots/fdnix.duckdb',
+      }),
+    });
+
     // Wait state between tasks
     const waitForProcessing = new stepfunctions.Wait(this, 'WaitForProcessing', {
       time: stepfunctions.WaitTime.duration(Duration.minutes(5)),
@@ -186,7 +256,8 @@ export class FdnixPipelineStack extends Stack {
     // Define the state machine
     const definition = metadataTask
       .next(waitForProcessing)
-      .next(embeddingTask);
+      .next(embeddingTask)
+      .next(publishLayerTask);
 
     this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
       stateMachineName: 'fdnix-daily-pipeline',

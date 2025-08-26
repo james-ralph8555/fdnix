@@ -1,22 +1,22 @@
 # fdnix Data Processing Containers
 
-Status: ✅ Phase 2 Complete — Data Processing Pipeline is ready to deploy.
+Status: Updated for DuckDB-in-Lambda-layer architecture.
 
 ## What’s Included
 
 - Metadata Generator
   - Complete nixpkgs extraction via `nix-env -qaP --json`
-  - Efficient batching for 120k+ packages
-  - Robust retries and validation
-  - DynamoDB write via AWS SDK v3
+  - Cleans and normalizes fields
+  - Writes structured tables into a DuckDB file
+  - Prepares FTS source and builds FTS index (`fts` extension)
 - Embedding Generator
   - AWS Bedrock with `cohere.embed-english-v3`
-  - S3 vector storage using compressed batch files (no OpenSearch)
-  - Vector index creation for search
-  - Scans only packages missing embeddings
+  - Generates per-package embeddings and writes into DuckDB
+  - Builds a vector similarity index using DuckDB `vss`
+  - Finalizes a single `.duckdb` artifact for query
 - Infrastructure Integration
   - CDK-aligned env vars and IAM
-  - Step Functions orchestration (metadata → embeddings)
+  - Step Functions orchestration (metadata → embeddings → publish layer)
   - Daily automation via EventBridge cron
   - Right-sized CPU/memory per task
 
@@ -24,10 +24,12 @@ Status: ✅ Phase 2 Complete — Data Processing Pipeline is ready to deploy.
 
 - Orchestration: Step Functions `fdnix-daily-pipeline` runs nightly (02:00 UTC) via EventBridge rule `fdnix-daily-pipeline-trigger`.
 - Sequence: ECS Fargate runs containers sequentially
-  1) Metadata Generator → (wait) → 2) Embedding Generator.
+  1) Metadata Generator → (produces intermediate .duckdb)
+  2) Embedding Generator → (adds embeddings, builds FTS/VSS) → uploads final `.duckdb` to S3 artifacts
+  3) Publish Layer → create new `fdnix-db-layer` version from artifact
 - Resources (from CDK):
-  - DynamoDB table: `fdnix-packages` (PK: `packageName`, SK: `version`)
-  - S3 bucket: `fdnix-vec` (vectors + index)
+  - Artifacts bucket: `fdnix-artifacts` (stores `.duckdb`)
+  - Lambda Layer: `fdnix-db-layer` (packages the `.duckdb` under `/opt/fdnix/fdnix.duckdb`)
   - Logs: `/fdnix/metadata-generator`, `/fdnix/embedding-generator`
   - ECR repos: `fdnix-metadata-generator`, `fdnix-embedding-generator`
 
@@ -35,12 +37,10 @@ Status: ✅ Phase 2 Complete — Data Processing Pipeline is ready to deploy.
 
 - Common:
   - `AWS_REGION`: AWS region used by clients.
-- Metadata Generator:
-  - `DYNAMODB_TABLE`: DynamoDB table (e.g., `fdnix-packages`).
+  - `ARTIFACTS_BUCKET`: S3 bucket for `.duckdb` artifacts (e.g., `fdnix-artifacts`).
+  - `DUCKDB_KEY`: S3 key for the artifact (e.g., `snapshots/fdnix.duckdb`).
 - Embedding Generator:
-  - `DYNAMODB_TABLE`: DynamoDB table (e.g., `fdnix-packages`).
-  - `S3_BUCKET`: S3 bucket for vectors/index (e.g., `fdnix-vec`).
-  - `BEDROCK_MODEL_ID`: Bedrock model id (CDK uses `cohere.embed-english-v3`).
+  - `BEDROCK_MODEL_ID`: Bedrock model id (e.g., `cohere.embed-english-v3`).
 
 ## Build (Local)
 
@@ -53,12 +53,12 @@ From repo root:
 
 ## Run (Local)
 
-- Metadata Generator:
-  - `docker run --rm -e DYNAMODB_TABLE=fdnix-packages -e AWS_REGION=us-east-1 fdnix/metadata-generator`
-- Embedding Generator:
-  - `docker run --rm -e DYNAMODB_TABLE=fdnix-packages -e S3_BUCKET=fdnix-vec -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 fdnix/embedding-generator`
+- Metadata Generator (produces local `fdnix.duckdb`):
+  - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 fdnix/metadata-generator`
+- Embedding Generator (consumes and updates `fdnix.duckdb`):
+  - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 fdnix/embedding-generator`
 
-Requires AWS credentials with access to DynamoDB, S3, and Bedrock (InvokeModel). Runtime is data/compute heavy.
+For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final artifact. Requires credentials with access to S3 and Bedrock (InvokeModel).
 
 ## Deployment Notes
 
@@ -70,12 +70,13 @@ Requires AWS credentials with access to DynamoDB, S3, and Bedrock (InvokeModel).
   - `docker tag fdnix/metadata-generator $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/fdnix-metadata-generator:latest`
   - `docker push $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/fdnix-metadata-generator:latest`
   - Repeat for `fdnix-embedding-generator`.
-- CDK wires env vars and IAM automatically; Step Functions triggers the nightly pipeline.
+- A final Step Functions task publishes/updates the Lambda Layer from the artifact.
 
 ## Outputs and Formats
 
-- DynamoDB items: package metadata records with `hasEmbedding` boolean.
-- S3 vectors: `vectors/batch_*.json.gz` with `{ vectors, count, dimension }`.
-- S3 index: `vector-index/index.json.gz` summarizing batch files, counts, and dimension.
+- DuckDB file: `fdnix.duckdb` containing tables:
+  - `packages(...)` (normalized metadata)
+  - `packages_fts_source(...)` and FTS index
+  - `embeddings(package_id, vector)` and VSS index
 
 See each container README for details and troubleshooting.

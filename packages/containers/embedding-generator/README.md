@@ -1,22 +1,22 @@
 # fdnix Embedding Generator
 
-Generates semantic embeddings for packages using AWS Bedrock and stores vectors in S3 with an index for search. Part of the Phase 2 ingestion pipeline.
+Generates semantic embeddings for packages using AWS Bedrock and writes them into a DuckDB file, building a vector index for search. Part of the Phase 2 ingestion pipeline.
 
 ## Features
 
 - Integrates with Bedrock `cohere.embed-english-v3` (configurable via env)
-- Scans DynamoDB for packages without embeddings; incremental by default
-- Writes vectors as compressed batches to S3 and builds an index file
-- Updates DynamoDB items to set `hasEmbedding = true`
+- Reads package rows from the DuckDB file produced by the metadata step
+- Writes embeddings into DuckDB and builds a VSS index (`vss` extension)
+- Outputs a single finalized `.duckdb` artifact for the API layer
 
 ## Environment
 
-- `DYNAMODB_TABLE` (required): Package metadata table (e.g., `fdnix-packages`).
-- `S3_BUCKET` (required): Bucket for vectors and index (e.g., `fdnix-vec`).
 - `AWS_REGION` (required): Region for all AWS clients.
-- `BEDROCK_MODEL_ID` (required): Bedrock model id (CDK uses `cohere.embed-english-v3`).
+- `BEDROCK_MODEL_ID` (required): Bedrock model id (e.g., `cohere.embed-english-v3`).
+- `ARTIFACTS_BUCKET` (optional): S3 bucket for the final DuckDB artifact.
+- `DUCKDB_KEY` (optional): S3 key for the artifact (e.g., `snapshots/fdnix.duckdb`).
 
-IAM: Read/Write to the table and bucket; Bedrock `bedrock:InvokeModel`; CloudWatch Logs `/fdnix/embedding-generator`.
+IAM: S3 read/write to the artifacts bucket; Bedrock `bedrock:InvokeModel`; CloudWatch Logs `/fdnix/embedding-generator`.
 
 ## Build
 
@@ -25,28 +25,26 @@ IAM: Read/Write to the table and bucket; Bedrock `bedrock:InvokeModel`; CloudWat
 ## Run
 
 - `docker run --rm \
-  -e DYNAMODB_TABLE=fdnix-packages \
-  -e S3_BUCKET=fdnix-vec \
   -e AWS_REGION=us-east-1 \
   -e BEDROCK_MODEL_ID=cohere.embed-english-v3 \
+  -v "$PWD":/out \
   fdnix/embedding-generator`
 
 Requires AWS credentials with access to DynamoDB, S3, and Bedrock (InvokeModel).
 
-## Storage Layout in S3
+## Artifact Layout
 
-- Vectors prefix: `vectors/`
-  - Files: `vectors/batch_{index}_{count}.json.gz`
-  - Content: `{ vectors: [{ id, vector: number[], metadata }], count, dimension }`
-- Index object: `vector-index/index.json.gz`
-  - Summarizes total vectors, dimension, and batch files with sizes
-  - Metadata headers on the S3 object mirror counts/dimensions
+- DuckDB file contains:
+  - `packages(...)` (copied from metadata phase)
+  - `embeddings(package_id, vector)`
+  - VSS index built over `embeddings.vector`
+  - FTS index retained for keyword search
 
 ## Operational Notes
 
-- Batch sizes: 50 packages per embedding batch; 100 vectors per S3 batch file
+- Batch sizes: tune to model throughput; recommends 64–128 per Bedrock call when supported
 - Text construction: name, version, description (+ trimmed fields) up to 2000 chars
-- Retries: exponential backoff on Bedrock calls and S3/DynamoDB operations
+- Retries: exponential backoff on Bedrock calls and S3 operations
 - Index: created/updated after embedding batches complete
 - ECS Sizing (CDK): `cpu=2048`, `memory=6144MiB`
 
@@ -56,4 +54,5 @@ Requires AWS credentials with access to DynamoDB, S3, and Bedrock (InvokeModel).
 - Common issues:
   - Bedrock throttling/permissions → ensure `bedrock:InvokeModel` and regional model access
   - Missing env vars → container exits with clear error
-  - S3/DynamoDB throttling → automatic retry/backoff; verify bucket/table policies and quotas
+  - S3 permissions → verify bucket policies and quotas
+  - DuckDB extensions not available → ensure `vss` and `fts` are present in the image

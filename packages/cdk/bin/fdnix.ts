@@ -25,7 +25,6 @@ const stackPrefix = 'Fdnix';
 const databaseStack = new FdnixDatabaseStack(app, `${stackPrefix}DatabaseStack`, {
   env,
   description: 'Database resources for fdnix hybrid search engine',
-  stackName: 'fdnix-database-stack',
   tags: {
     Project: 'fdnix',
     Component: 'database',
@@ -38,7 +37,6 @@ const pipelineStack = new FdnixPipelineStack(app, `${stackPrefix}PipelineStack`,
   env,
   databaseStack,
   description: 'Data processing pipeline for fdnix',
-  stackName: 'fdnix-pipeline-stack',
   tags: {
     Project: 'fdnix',
     Component: 'pipeline',
@@ -51,7 +49,6 @@ const searchApiStack = new FdnixSearchApiStack(app, `${stackPrefix}SearchApiStac
   env,
   databaseStack,
   description: 'Search API for fdnix hybrid search engine',
-  stackName: 'fdnix-search-api-stack',
   tags: {
     Project: 'fdnix',
     Component: 'api',
@@ -63,7 +60,6 @@ const searchApiStack = new FdnixSearchApiStack(app, `${stackPrefix}SearchApiStac
 new FdnixCertificateStack(app, `${stackPrefix}CertificateStack`, {
   env,
   description: 'ACM certificate for fdnix frontend custom domain',
-  stackName: 'fdnix-certificate-stack',
   tags: {
     Project: 'fdnix',
     Component: 'certificate',
@@ -79,7 +75,6 @@ const frontendStack = new FdnixFrontendStack(app, `${stackPrefix}FrontendStack`,
   domainName,
   // Intentionally not wiring the cert into CloudFront until issued
   description: 'Frontend hosting for fdnix search interface',
-  stackName: 'fdnix-frontend-stack',
   tags: {
     Project: 'fdnix',
     Component: 'frontend',
@@ -92,73 +87,7 @@ pipelineStack.addDependency(databaseStack);
 searchApiStack.addDependency(databaseStack);
 frontendStack.addDependency(searchApiStack);
 
-// Add cross-stack outputs
-new cdk.CfnOutput(databaseStack, 'PackagesTableName', {
-  value: databaseStack.packagesTable.tableName,
-  description: 'Name of the DynamoDB table storing package metadata',
-  exportName: 'FdnixPackagesTableName',
-});
-
-new cdk.CfnOutput(databaseStack, 'VectorIndexBucketName', {
-  value: databaseStack.vectorIndexBucket.bucketName,
-  description: 'Name of the S3 bucket storing vector indices',
-  exportName: 'FdnixVectorIndexBucketName',
-});
-
-
-new cdk.CfnOutput(pipelineStack, 'MetadataRepositoryUri', {
-  value: pipelineStack.metadataRepository.repositoryUri,
-  description: 'URI of the ECR repository for metadata generator',
-  exportName: 'FdnixMetadataRepositoryUri',
-});
-
-new cdk.CfnOutput(pipelineStack, 'EmbeddingRepositoryUri', {
-  value: pipelineStack.embeddingRepository.repositoryUri,
-  description: 'URI of the ECR repository for embedding generator',
-  exportName: 'FdnixEmbeddingRepositoryUri',
-});
-
-new cdk.CfnOutput(pipelineStack, 'PipelineStateMachineArn', {
-  value: pipelineStack.pipelineStateMachine.stateMachineArn,
-  description: 'ARN of the Step Functions state machine for the data pipeline',
-  exportName: 'FdnixPipelineStateMachineArn',
-});
-
-new cdk.CfnOutput(searchApiStack, 'SearchApiUrl', {
-  value: searchApiStack.api.url,
-  description: 'URL of the search API Gateway',
-  exportName: 'FdnixSearchApiUrl',
-});
-
-new cdk.CfnOutput(searchApiStack, 'SearchFunctionName', {
-  value: searchApiStack.searchFunction.functionName,
-  description: 'Name of the search Lambda function',
-  exportName: 'FdnixSearchFunctionName',
-});
-
-new cdk.CfnOutput(frontendStack, 'CloudFrontDistributionId', {
-  value: frontendStack.distribution.distributionId,
-  description: 'CloudFront distribution ID for the frontend',
-  exportName: 'FdnixCloudFrontDistributionId',
-});
-
-new cdk.CfnOutput(frontendStack, 'CloudFrontDomainName', {
-  value: frontendStack.distribution.distributionDomainName,
-  description: 'CloudFront distribution domain name',
-  exportName: 'FdnixCloudFrontDomainName',
-});
-
-new cdk.CfnOutput(frontendStack, 'CustomDomainName', {
-  value: domainName,
-  description: 'Custom domain name for the frontend (managed via Cloudflare)',
-  exportName: 'FdnixCustomDomainName',
-});
-
-new cdk.CfnOutput(frontendStack, 'CloudflareSetupInstructions', {
-  value: `Configure Cloudflare DNS: A record ${domainName} -> ${frontendStack.distribution.distributionDomainName}, CNAME record www.${domainName} -> ${frontendStack.distribution.distributionDomainName}`,
-  description: 'DNS configuration instructions for Cloudflare',
-  exportName: 'FdnixCloudflareInstructions',
-});
+// Cross-stack outputs are handled within each individual stack
 
 
 // Application-level tags

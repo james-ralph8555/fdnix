@@ -16,7 +16,7 @@ export interface FdnixFrontendStackProps extends StackProps {
 }
 
 export class FdnixFrontendStack extends Stack {
-  public readonly hostingBucket: s3.Bucket;
+  public readonly hostingBucket: s3.IBucket;
   public readonly distribution: cloudfront.Distribution;
   public readonly oac: cloudfront.S3OriginAccessControl;
 
@@ -25,18 +25,8 @@ export class FdnixFrontendStack extends Stack {
 
     const { searchApiStack, domainName, certificateArn } = props;
 
-    // S3 bucket for static site hosting
-    this.hostingBucket = new s3.Bucket(this, 'FrontendHostingBucket', {
-      bucketName: 'fdnix-frontend-hosting',
-      removalPolicy: RemovalPolicy.RETAIN,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      encryption: s3.BucketEncryption.S3_MANAGED,
-      versioned: true,
-      lifecycleRules: [{
-        id: 'delete-old-versions',
-        noncurrentVersionExpiration: Duration.days(30),
-      }],
-    });
+    // S3 bucket for static site hosting (import existing)
+    this.hostingBucket = s3.Bucket.fromBucketName(this, 'FrontendHostingBucket', 'fdnix-frontend-hosting');
 
     // Origin Access Control for CloudFront
     this.oac = new cloudfront.S3OriginAccessControl(this, 'OriginAccessControl', {

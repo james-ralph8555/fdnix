@@ -19,18 +19,31 @@
     "push-containers": "npm run push-metadata && npm run push-embedding",
     "push-metadata": "npm run push-container -- metadata-generator",
     "push-embedding": "npm run push-container -- embedding-generator",
-    "push-container": "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com && docker tag fdnix-$1 $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com/fdnix-$1:latest && docker push $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com/fdnix-$1:latest"
+    "push-container": "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com && docker tag fdnix-$1 $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com/fdnix-$1:latest && docker push $(aws sts get-caller-identity --query Account --output text).dkr.ecr.us-east-1.amazonaws.com/fdnix-$1:latest",
+    "drift:detect-all": "aws cloudformation detect-stack-drift --stack-name FdnixDatabaseStack && aws cloudformation detect-stack-drift --stack-name FdnixPipelineStack && aws cloudformation detect-stack-drift --stack-name FdnixSearchApiStack && aws cloudformation detect-stack-drift --stack-name FdnixFrontendStack && echo 'All drift detection initiated. Use drift:status with each detection ID to check results.'",
+    "drift:detect": "aws cloudformation detect-stack-drift --stack-name",
+    "drift:status": "aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id",
+    "cleanup:list-stacks": "aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE DELETE_FAILED --query 'StackSummaries[?starts_with(StackName, `Fdnix`)].{Name:StackName,Status:StackStatus,Created:CreationTime}' --output table",
+    "cleanup:orphaned-resources": "echo 'Check for orphaned resources not managed by CloudFormation:' && aws s3 ls | grep fdnix && aws dynamodb list-tables --query 'TableNames[?starts_with(@, `fdnix`)]' && aws ecr describe-repositories --query 'repositories[?starts_with(repositoryName, `fdnix`)].repositoryName'",
+    "cleanup:force-delete-stack": "aws cloudformation delete-stack --stack-name $1 && echo 'Monitor deletion with: aws cloudformation describe-stacks --stack-name $1'"
   },
   "devDependencies": {
     "@types/jest": "^29.5.0",
     "@types/node": "^20.19.11",
+    "aws-cdk": "^2.1026.0",
     "jest": "^29.5.0",
     "ts-jest": "^29.1.0",
-    "typescript": "^5.3.0",
-    "aws-cdk": "^2.1026.0"
+    "typescript": "^5.3.0"
   },
   "dependencies": {
-    "aws-cdk-lib": "^2.100.0",
+    "aws-cdk-lib": "^2.212.0",
     "constructs": "^10.3.0"
+  },
+  "cdk": {
+    "requireApproval": "never",
+    "context": {
+      "@aws-cdk/core:enableStackNameDuplicates": false,
+      "@aws-cdk/core:stackRelativeExports": false
+    }
   }
 }

@@ -1,4 +1,4 @@
-import { Stack, StackProps, Duration } from 'aws-cdk-lib';
+import { Stack, StackProps, Duration, CfnOutput } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
@@ -36,11 +36,6 @@ export class FdnixSearchApiStack extends Stack {
       ],
     });
 
-    // Grant database access
-    databaseStack.packagesTable.grantReadData(this.lambdaExecutionRole);
-    databaseStack.vectorIndexBucket.grantRead(this.lambdaExecutionRole);
-
-
     // Grant Bedrock access for query embeddings
     this.lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
@@ -53,22 +48,8 @@ export class FdnixSearchApiStack extends Stack {
       ],
     }));
 
-    // Lambda Layer for dependencies (Faiss, AWS SDK, etc.)
-    // Note: Final implementation is planned in Rust (custom runtime, provided.al2023).
-    // This layer and Node.js runtime are temporary scaffolding to keep API wiring in place.
-    const dependenciesLayer = new lambda.LayerVersion(this, 'SearchDependenciesLayer', {
-      layerVersionName: 'fdnix-search-dependencies',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/layer')),
-      compatibleRuntimes: [
-        lambda.Runtime.NODEJS_22_X,
-        // Prepare for Rust custom runtime compatibility
-        lambda.Runtime.PROVIDED_AL2023,
-      ],
-      description: 'Dependencies for fdnix search API including Faiss bindings',
-    });
-
     // Lambda function for hybrid search API
-    // Implemented in Rust using the custom runtime (PROVIDED_AL2023).
+    // Implemented in C++ using the custom runtime (PROVIDED_AL2023).
     // The build places a `bootstrap` binary in `packages/search-lambda/dist`.
     this.searchFunction = new lambda.Function(this, 'SearchFunction', {
       functionName: 'fdnix-search-api',
@@ -78,14 +59,12 @@ export class FdnixSearchApiStack extends Stack {
       timeout: Duration.seconds(30),
       memorySize: 1024,
       role: this.lambdaExecutionRole,
-      layers: [dependenciesLayer],
+      layers: [databaseStack.databaseLayer, databaseStack.duckdbLibraryLayer],
       logGroup,
       environment: {
-        DYNAMODB_TABLE: databaseStack.packagesTable.tableName,
-        S3_BUCKET: databaseStack.vectorIndexBucket.bucketName,
+        DUCKDB_PATH: '/opt/fdnix/fdnix.duckdb',
         BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
-        VECTOR_INDEX_KEY: 'faiss-index/packages.index',
-        VECTOR_MAPPING_KEY: 'faiss-index/package-mapping.json',
+        BEDROCK_REGION: this.region,
       },
     });
 
@@ -181,7 +160,23 @@ export class FdnixSearchApiStack extends Stack {
       stage: this.api.deploymentStage,
     });
 
-    // CloudWatch dashboard for monitoring
-    // Note: Dashboard creation would be added here if needed
+    // Outputs
+    new CfnOutput(this, 'ApiUrl', {
+      value: this.api.url,
+      description: 'URL of the Search API Gateway',
+      exportName: 'FdnixSearchApiUrl',
+    });
+
+    new CfnOutput(this, 'SearchFunctionName', {
+      value: this.searchFunction.functionName,
+      description: 'Name of the search Lambda function',
+      exportName: 'FdnixSearchFunctionName',
+    });
+
+    new CfnOutput(this, 'SearchFunctionArn', {
+      value: this.searchFunction.functionArn,
+      description: 'ARN of the search Lambda function',
+      exportName: 'FdnixSearchFunctionArn',
+    });
   }
 }

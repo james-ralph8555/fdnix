@@ -13,11 +13,11 @@ RUN apt-get update && apt-get install -y \
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Add uv to PATH
-ENV PATH="/root/.cargo/bin:$PATH"
+ENV PATH="/root/.local/bin:$PATH"
 
 # Copy pyproject.toml and install Python dependencies with uv
 COPY pyproject.toml .
-RUN uv sync --frozen
+RUN uv pip install --system boto3 botocore numpy requests
 
 # Copy application source
 COPY src/ ./src/
