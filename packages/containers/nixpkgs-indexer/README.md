@@ -63,9 +63,22 @@ The indexer produces the following schema:
 - `packages_fts_source` table: Full-text search content
 - `embeddings` table: Vector embeddings with VSS index
 
+## Build & Run
+
+- Build (from repo root):
+  - `docker build -t fdnix/nixpkgs-indexer packages/containers/nixpkgs-indexer`
+- Run (local output to current dir):
+  - Metadata only: `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
+  - Embeddings only: `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
+  - Both + upload to S3: `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+
+Notes:
+- Embedding mode requires `AWS_REGION`; `BEDROCK_MODEL_ID` defaults to `cohere.embed-english-v3` if not set.
+- S3 upload requires all of `ARTIFACTS_BUCKET`, `DUCKDB_KEY`, and `AWS_REGION`.
+- Default local artifact path is `/out/fdnix.duckdb`.
+
 ## Image & Dependencies
 
-- Base: Python 3.11 image with Nix tools for metadata extraction
-- Python deps: `boto3`, `duckdb`, `numpy`, `requests`
-- Runs as non-root user
-
+- Base: `nixos/nix:2.18.1`; dependencies installed via Nix (`nix-env`)
+- Installed deps: `python311`, `duckdb`, `boto3`, `numpy`, `requests`, `git`
+- Entry: `python src/index.py`; runs as non-root user

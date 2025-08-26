@@ -9,7 +9,7 @@ Status: Unified container architecture (metadata + embeddings in one).
   - Three modes: `metadata`, `embedding`, or `both` (default)
   - Outputs a single DuckDB artifact with FTS and VSS indexes
   - S3 integration for artifact upload/download
-  - Runs as non-root; minimal, pinned dependencies (Python 3.11 + Nix utils)
+  - Runs as non-root; dependencies installed via Nix on `nixos/nix:2.18.1` (Python 3.11, DuckDB, boto3, etc.)
 
 Deprecated: the separate `metadata-generator` and `embedding-generator` containers have been replaced by the unified processor.
 
@@ -31,7 +31,7 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
   - `DUCKDB_KEY`: S3 key for the artifact (e.g., `snapshots/fdnix.duckdb`).
   - `PROCESSING_MODE`: `metadata` | `embedding` | `both` (default: `both`).
 - Embeddings:
-  - `BEDROCK_MODEL_ID`: Bedrock model id (e.g., `cohere.embed-english-v3`).
+  - `BEDROCK_MODEL_ID`: Bedrock model id (e.g., `cohere.embed-english-v3`). If not set, defaults to `cohere.embed-english-v3`.
 - Local paths (optional):
   - `OUTPUT_PATH`: Local DuckDB path (default: `/out/fdnix.duckdb`).
   - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to `OUTPUT_PATH`).
@@ -52,7 +52,7 @@ From repo root:
 - Both phases and upload to S3:
   - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
-For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final artifact. Requires credentials with access to S3 and Bedrock (InvokeModel).
+For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final artifact. Requires credentials with access to S3 and Bedrock (InvokeModel). Embedding mode requires `AWS_REGION`.
 
 ## Deployment Notes
 
