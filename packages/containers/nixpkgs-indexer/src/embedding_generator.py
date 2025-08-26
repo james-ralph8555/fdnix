@@ -8,28 +8,26 @@ import asyncio
 from typing import List, Dict, Any, Tuple
 import duckdb
 from botocore.exceptions import ClientError
-from gemini_client import GeminiClient
+from bedrock_client import BedrockBatchClient
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingGenerator:
     def __init__(self):
-        # Reduce httpx logging noise
-        logging.getLogger('httpx').setLevel(logging.WARNING)
-        
         self.validate_environment()
-        self.gemini_client = GeminiClient(
-            api_key=os.environ.get('GEMINI_API_KEY'),
-            model_id=os.environ.get('GEMINI_MODEL_ID')
+        self.bedrock_client = BedrockBatchClient(
+            region=os.environ.get('AWS_REGION'),
+            model_id=os.environ.get('BEDROCK_MODEL_ID')
         )
         
-        self.batch_size = 50  # Process embeddings in batches
-        self.max_text_length = 2000  # Limit text length for embedding
-        # DuckDB + artifact settings
-        self.duckdb_path = os.environ.get('DUCKDB_PATH', '/out/fdnix.duckdb').strip()
+        # Use Bedrock batch size for processing (up to 50,000)
+        self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '50000'))
+        self.max_text_length = 8192  # Titan Text v2 supports up to 8,192 tokens
+        # DuckDB + artifact settings (operate on the main database)
+        self.duckdb_path = os.environ.get('DUCKDB_PATH', '/out/fdnix-data.duckdb').strip()
         self.artifacts_bucket = os.environ.get('ARTIFACTS_BUCKET', '').strip()
-        # Embedding phase reads/writes the minified DB artifact in S3
-        self.duckdb_key = os.environ.get('DUCKDB_MINIFIED_KEY', '').strip()
+        # Embedding phase reads/writes the MAIN DB artifact in S3
+        self.duckdb_key = os.environ.get('DUCKDB_DATA_KEY', '').strip()
         self.embedding_dim: int | None = None
         # VSS index parameters (override via env)
         self.vss_hnsw_m = int(os.environ.get('VSS_HNSW_M', '16'))
@@ -39,7 +37,7 @@ class EmbeddingGenerator:
     def validate_environment(self):
         """Validate required environment variables"""
         required_vars = [
-            'GEMINI_API_KEY'
+            'BEDROCK_ROLE_ARN'
         ]
         
         missing_vars = [var for var in required_vars if not os.environ.get(var)]
@@ -100,7 +98,7 @@ class EmbeddingGenerator:
     def fetch_packages_to_embed(self, con: duckdb.DuckDBPyConnection, limit: int | None = None, force_rebuild: bool = False) -> List[Dict[str, Any]]:
         # Select all candidates - process all data regardless of broken/insecure/unsupported status
         base_select = (
-            "SELECT packageName, version, attributePath, description, longDescription, homepage, mainProgram, "
+            "SELECT package_id, packageName, version, attributePath, description, longDescription, homepage, mainProgram, "
             "license, maintainers, platforms, COALESCE(hasEmbedding, FALSE) AS hasEmbedding, "
             "COALESCE(available, TRUE) AS available, COALESCE(broken, FALSE) AS broken, "
             "COALESCE(insecure, FALSE) AS insecure, COALESCE(unsupported, FALSE) AS unsupported, "
@@ -151,12 +149,12 @@ class EmbeddingGenerator:
             return
         con.executemany("INSERT OR REPLACE INTO embeddings (package_id, vector) VALUES (?, ?)", rows)
 
-    def mark_packages_embedded(self, con: duckdb.DuckDBPyConnection, keys: List[Tuple[str, str]]) -> None:
+    def mark_packages_embedded(self, con: duckdb.DuckDBPyConnection, keys: List[str]) -> None:
         if not keys:
             return
         con.executemany(
-            "UPDATE packages SET hasEmbedding = TRUE WHERE packageName = ? AND version = ?",
-            keys,
+            "UPDATE packages SET hasEmbedding = TRUE WHERE package_id = ?",
+            [(k,) for k in keys],
         )
 
     def ensure_vss_index(self, con: duckdb.DuckDBPyConnection) -> None:
@@ -316,7 +314,7 @@ class EmbeddingGenerator:
         
         Returns: (processed_count, reused_count) 
         """
-        logger.info(f"Processing batch of {len(packages)} packages...")
+        logger.info(f"Processing Bedrock batch of {len(packages)} packages...")
         
         # Separate packages that can reuse embeddings vs need new ones
         packages_need_embedding = []
@@ -350,12 +348,12 @@ class EmbeddingGenerator:
         if packages_can_reuse:
             logger.info(f"Reusing embeddings for {reused_count} packages with unchanged content...")
             vector_rows: List[Tuple[str, list]] = []
-            reuse_keys: List[Tuple[str, str]] = []
+            reuse_keys: List[str] = []
             
             for package, vector in packages_can_reuse:
-                pkg_id = f"{package['packageName']}#{package['version']}"
+                pkg_id = package['package_id']
                 vector_rows.append((pkg_id, vector))
-                reuse_keys.append((package['packageName'], package['version']))
+                reuse_keys.append(pkg_id)
             
             con = self._duckdb_con
             con.execute("BEGIN TRANSACTION;")
@@ -371,20 +369,24 @@ class EmbeddingGenerator:
         # Process packages that need new embeddings
         if packages_need_embedding:
             texts = []
-            new_package_keys: List[Tuple[str, str]] = []
+            new_package_ids: List[str] = []
             content_hashes = []
             
             for package in packages_need_embedding:
                 text = self.create_embedding_text(package)
                 texts.append(text)
-                new_package_keys.append((package['packageName'], package['version']))
+                new_package_ids.append(package['package_id'])
                 content_hashes.append(package.get('content_hash'))
             
             try:
-                # Generate embeddings using Gemini
+                # Generate embeddings using Bedrock batch inference
                 logger.info(f"Generating embeddings for {len(texts)} new/changed texts...")
-                async with self.gemini_client as client:
-                    embeddings = await client.generate_embeddings_batch(texts)
+                texts_with_ids = [(pkg_id, text) for pkg_id, text in zip(new_package_ids, texts)]
+                embeddings_with_ids = await self.bedrock_client.generate_embeddings_batch(texts_with_ids)
+                
+                # Convert to list indexed by original order
+                embeddings_dict = {record_id: embedding for record_id, embedding in embeddings_with_ids}
+                embeddings = [embeddings_dict.get(pkg_id, []) for pkg_id in new_package_ids]
                 
                 if len(embeddings) != len(texts):
                     logger.error(f"Mismatch in embeddings count: expected {len(texts)}, got {len(embeddings)}")
@@ -398,8 +400,7 @@ class EmbeddingGenerator:
                 vector_rows: List[Tuple[str, list]] = []
                 hash_rows: List[Tuple[str, list]] = []
                 
-                for i, ((pkg_name, ver), vec, content_hash) in enumerate(zip(new_package_keys, embeddings, content_hashes)):
-                    pkg_id = f"{pkg_name}#{ver}"
+                for i, (pkg_id, vec, content_hash) in enumerate(zip(new_package_ids, embeddings, content_hashes)):
                     vector_rows.append((pkg_id, vec))
                     if content_hash:
                         hash_rows.append((content_hash, vec))
@@ -409,7 +410,7 @@ class EmbeddingGenerator:
                 con.execute("BEGIN TRANSACTION;")
                 try:
                     self.insert_embeddings(con, vector_rows)
-                    self.mark_packages_embedded(con, new_package_keys)
+                    self.mark_packages_embedded(con, new_package_ids)
                     # Store content hash -> embedding mappings for future reuse
                     if hash_rows:
                         con.executemany(
@@ -426,7 +427,7 @@ class EmbeddingGenerator:
                 logger.error(f"Error processing batch: {str(error)}")
                 return processed_count, reused_count
         
-        logger.info(f"Successfully processed batch: {len(packages_need_embedding)} new, {reused_count} reused")
+        logger.info(f"Successfully processed Bedrock batch: {len(packages_need_embedding)} new, {reused_count} reused")
         return processed_count, reused_count
 
     async def run(self, force_rebuild: bool = False):
@@ -434,17 +435,36 @@ class EmbeddingGenerator:
         logger.info("Starting fdnix embedding generation process...")
         
         try:
-            # Test Gemini access first
-            logger.info("Validating Gemini model access...")
-            if not await self.gemini_client.validate_model_access():
-                raise RuntimeError("Cannot access Gemini model. Check API key and permissions.")
-            logger.info("Gemini model access validated successfully")
+            # Test Bedrock access first
+            logger.info("Validating Bedrock model access...")
+            if not self.bedrock_client.validate_model_access():
+                raise RuntimeError("Cannot access Bedrock model. Check IAM permissions and model availability.")
+            logger.info("Bedrock model access validated successfully")
             
-            # Connect to DuckDB
-            self._duckdb_con = self.connect_duckdb()
+            # Connect to DuckDB, downloading current artifact from S3 if missing
+            downloaded_current = False
+            try:
+                self._duckdb_con = self.connect_duckdb()
+            except FileNotFoundError:
+                if self.artifacts_bucket and self.duckdb_key:
+                    logger.info(
+                        f"Local main DB not found at {self.duckdb_path}. Attempting download from s3://{self.artifacts_bucket}/{self.duckdb_key}"
+                    )
+                    try:
+                        import boto3
+                        s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
+                        s3.download_file(self.artifacts_bucket, self.duckdb_key, self.duckdb_path)
+                        downloaded_current = True
+                        self._duckdb_con = self.connect_duckdb()
+                        logger.info("Downloaded and opened main DB from S3")
+                    except Exception as e:
+                        logger.error(f"Failed to download main DB from S3: {e}")
+                        raise
+                else:
+                    raise
             
             # Try to load previous artifact for incremental updates (unless force rebuild)
-            if not force_rebuild:
+            if not force_rebuild and not downloaded_current:
                 prev_artifact_path = self.duckdb_path + ".previous"
                 if self._maybe_download_previous_artifact():
                     self._load_previous_embeddings_and_hashes(prev_artifact_path)
@@ -474,26 +494,18 @@ class EmbeddingGenerator:
                 batch = candidates[i:i + self.batch_size]
                 batch_num = i//self.batch_size + 1
                 total_batches = (total_packages + self.batch_size - 1)//self.batch_size
-                logger.info(f"Processing batch {batch_num}/{total_batches}")
+                logger.info(f"Processing Bedrock batch {batch_num}/{total_batches} ({len(batch)} packages)")
                 
                 try:
                     batch_processed, batch_reused = await self.process_packages_batch(batch)
                     total_processed += batch_processed
                     total_reused += batch_reused
                     
-                    logger.info(f"Progress: {total_processed}/{total_packages} total, "
+                    logger.info(f"Bedrock batch {batch_num} complete: {total_processed}/{total_packages} total, "
                                f"{batch_processed - batch_reused} new embeddings, "
                                f"{total_reused} reused from cache")
                 except Exception as e:
                     logger.error(f"Failed to process batch {batch_num}: {e}")
-                
-                # Smooth API traffic between batches (configurable via GEMINI_INTER_BATCH_DELAY)
-                try:
-                    delay = float(os.environ.get('GEMINI_INTER_BATCH_DELAY', getattr(self.gemini_client, 'inter_batch_delay', 0.02)))
-                except Exception:
-                    delay = 0.02
-                if delay > 0:
-                    await asyncio.sleep(delay)
                     failed_count += len(batch)
             
             # Build or update VSS index in DuckDB
@@ -517,7 +529,7 @@ class EmbeddingGenerator:
         Returns True if previous artifact was downloaded, False otherwise.
         """
         if not self.artifacts_bucket or not self.duckdb_key:
-            logger.info("Artifact download not configured (ARTIFACTS_BUCKET/DUCKDB_MINIFIED_KEY missing). Skipping download.")
+            logger.info("Artifact download not configured (ARTIFACTS_BUCKET/DUCKDB_DATA_KEY missing). Skipping download.")
             return False
             
         # Use a temporary path for the previous artifact
@@ -526,34 +538,34 @@ class EmbeddingGenerator:
         try:
             import boto3
             s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
-            logger.info(f"Attempting to download previous minified artifact from s3://{self.artifacts_bucket}/{self.duckdb_key}")
+            logger.info(f"Attempting to download previous main DB artifact from s3://{self.artifacts_bucket}/{self.duckdb_key}")
             
             # Check if object exists first
             try:
                 s3.head_object(Bucket=self.artifacts_bucket, Key=self.duckdb_key)
             except ClientError as e:
                 if e.response['Error']['Code'] == '404':
-                    logger.info(f"No previous minified artifact exists at s3://{self.artifacts_bucket}/{self.duckdb_key}. Starting fresh build.")
+                    logger.info(f"No previous main DB artifact exists at s3://{self.artifacts_bucket}/{self.duckdb_key}. Starting fresh build.")
                     return False
                 else:
-                    logger.info(f"Could not check for previous artifact: {e}. Starting fresh build.")
+                    logger.info(f"Could not check for previous main DB artifact: {e}. Starting fresh build.")
                     return False
             except Exception as e:
-                logger.info(f"Could not check for previous artifact: {e}. Starting fresh build.")
+                logger.info(f"Could not check for previous main DB artifact: {e}. Starting fresh build.")
                 return False
             
             # Download the file
             s3.download_file(self.artifacts_bucket, self.duckdb_key, prev_artifact_path)
-            logger.info(f"Successfully downloaded previous minified artifact to {prev_artifact_path}")
+            logger.info(f"Successfully downloaded previous main DB artifact to {prev_artifact_path}")
             return True
         except Exception as e:
-            logger.info(f"Failed to download previous minified artifact: {e}. Starting fresh build.")
+            logger.info(f"Failed to download previous main DB artifact: {e}. Starting fresh build.")
             return False
 
     def _load_previous_embeddings_and_hashes(self, prev_artifact_path: str) -> None:
         """Load embeddings and content hashes from previous artifact into current DB."""
         try:
-            logger.info("Loading embeddings and content hashes from previous artifact...")
+            logger.info("Loading embeddings and content hashes from previous main DB artifact...")
             with duckdb.connect(prev_artifact_path, read_only=True) as prev_con:
                 # Load VSS extension in previous connection
                 try:
@@ -574,11 +586,11 @@ class EmbeddingGenerator:
                             embeddings_data
                         )
                     else:
-                        logger.info("No existing embeddings found in previous artifact")
+                        logger.info("No existing embeddings found in previous main DB artifact")
                 except duckdb.CatalogException as e:
-                    logger.info(f"No embeddings table found in previous artifact: {e}")
+                    logger.info(f"No embeddings table found in previous main DB artifact: {e}")
                 except Exception as e:
-                    logger.warning(f"Could not load embeddings from previous artifact: {e}")
+                    logger.warning(f"Could not load embeddings from previous main DB artifact: {e}")
                 
                 # Copy content hashes and their embeddings
                 try:
@@ -590,25 +602,25 @@ class EmbeddingGenerator:
                     ).fetchall()
                     
                     if hash_data:
-                        logger.info(f"Copying {len(hash_data)} content hash mappings...")
+                        logger.info(f"Copying {len(hash_data)} content hash mappings from previous main DB...")
                         self._duckdb_con.executemany(
                             "INSERT OR REPLACE INTO embeddings_content_hashes (content_hash, vector) VALUES (?, ?)",
                             hash_data
                         )
                     else:
-                        logger.info("No content hashes found in previous artifact (old schema)")
+                        logger.info("No content hashes found in previous main DB artifact (old schema)")
                         
                 except Exception as e:
-                    logger.info(f"Could not load content hashes from previous artifact: {e}")
+                    logger.info(f"Could not load content hashes from previous main DB artifact: {e}")
                     
         except Exception as e:
-            logger.warning(f"Failed to load previous embeddings: {e}")
+            logger.warning(f"Failed to load previous embeddings from main DB artifact: {e}")
 
     def _maybe_upload_artifact(self) -> None:
         if not self.artifacts_bucket or not self.duckdb_key:
-            logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/DUCKDB_MINIFIED_KEY missing). Skipping upload.")
+            logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/DUCKDB_DATA_KEY missing). Skipping upload.")
             return
         import boto3
         s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
-        logger.info(f"Uploading minified DB {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
+        logger.info(f"Uploading main DB {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
         s3.upload_file(self.duckdb_path, self.artifacts_bucket, self.duckdb_key)

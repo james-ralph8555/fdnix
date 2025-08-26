@@ -1,23 +1,22 @@
 # fdnix Data Processing Containers
 
-Status: Unified container architecture (metadata + embeddings + minified publishing).
+Status: Three-phase pipeline with S3 artifacts (metadata → embeddings → minified).
 
 ## What’s Included
 
 - Nixpkgs Indexer (`packages/containers/nixpkgs-indexer/`)
-  - Combines nixpkgs metadata extraction and embedding generation
-  - Derives a minified DuckDB from the full database for Lambda layer use
-  - Three modes: `metadata`, `embedding`, or `both` (default)
-  - Outputs two artifacts: full `fdnix-data.duckdb` and minified `fdnix.duckdb` (with FTS; VSS built during embeddings)
-  - S3 integration for artifact upload/download
-  - Runs as non-root; dependencies installed via Nix on `nixos/nix:2.18.1` (Python 3.11, DuckDB, boto3, httpx, etc.)
+  - Phases: Metadata, Embeddings, Minified (run individually or all)
+  - Outputs: Full DB `fdnix-data.duckdb` (metadata + embeddings) → Minified DB `fdnix.duckdb` (FTS, essential columns)
+  - Modes: `metadata`, `embedding`, `minified`, or `both`/`full` (all phases; default)
+  - S3 integration for upload/download per phase for observability
+  - Runs as non-root; dependencies installed via Nix on `nixos/nix` (Python, DuckDB, boto3, httpx, etc.)
 
 Deprecated: the separate `metadata-generator` and `embedding-generator` containers have been replaced by the unified processor.
 
 ## How It Runs in AWS
 
 - Orchestration: Step Functions `fdnix-daily-pipeline` runs nightly (02:00 UTC) via EventBridge.
-- Sequence: ECS Fargate runs a single indexer task (`PROCESSING_MODE=both`) → Publish Layer.
+- Sequence: ECS Fargate runs a single indexer task (`PROCESSING_MODE=both/full`) which performs metadata → embedding → minified, then (optionally) publishes the minified DB as a Lambda layer.
 - Resources (from CDK):
   - Artifacts bucket: `fdnix-artifacts` (stores `.duckdb`).
   - Lambda Layer: `fdnix-db-layer` (packages `.duckdb` under `/opt/fdnix/fdnix.duckdb`).
@@ -31,7 +30,7 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
   - `ARTIFACTS_BUCKET`: S3 bucket for `.duckdb` artifacts (e.g., `fdnix-artifacts`).
   - `DUCKDB_DATA_KEY`: S3 key for the full database (e.g., `snapshots/fdnix-data.duckdb`).
   - `DUCKDB_MINIFIED_KEY`: S3 key for the minified database used by the Lambda layer (e.g., `snapshots/fdnix.duckdb`).
-  - `PROCESSING_MODE`: `metadata` | `embedding` | `both` (default: `both`).
+  - `PROCESSING_MODE`: `metadata` | `embedding` | `minified` | `both` | `full` (default: `both` → all phases).
   - FTS (optional tuning): `FTS_STOPWORDS` (default `english`), `FTS_STEMMER` (default `english`), `FTS_INDEX_NAME` (default `packages_fts_idx`).
 - Embeddings:
   - `GEMINI_API_KEY`: Google Gemini API key for embeddings.
@@ -49,7 +48,14 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
 - Local paths (optional):
   - `OUTPUT_PATH`: Local path for the full database (default: `/out/fdnix-data.duckdb`).
   - `OUTPUT_MINIFIED_PATH`: Local path for the minified database (default: `/out/fdnix.duckdb`).
-  - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to the minified DB when processing `both`).
+  - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to the full DB).
+
+## AWS Guidelines
+
+- Naming: Prefix resources with `fdnix-` (e.g., `fdnix-artifacts`, `fdnix-nixpkgs-indexer`, `fdnix-db-layer`).
+- Secrets: Store API keys in SSM Parameter Store or Secrets Manager; reference them in task definitions or via CDK.
+- IAM: Grant least-privilege to ECS tasks for S3 read/write on the configured keys and for Lambda layer publishing when enabled.
+- DNS/TLS: DNS via Cloudflare; ACM certificates for CloudFront in `us-east-1` (handled in CDK).
 
 ## Build (Local)
 
@@ -60,12 +66,12 @@ From repo root:
 
 ## Run (Local)
 
-- Metadata-only (produces local `fdnix-data.duckdb` and `fdnix.duckdb`):
-  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
-- Embedding-only (consumes and updates provided DB path):
-  - `docker run --rm --env-file .env -v "$PWD":/out -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
-- Both phases and upload to S3 (stores both DBs under different keys):
+- All phases with S3 artifacts:
   - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+- Single phases:
+  - Metadata: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb fdnix/nixpkgs-indexer`
+  - Embedding: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=embedding -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb fdnix/nixpkgs-indexer`
+  - Minified: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=minified -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
 For AWS runs, provide `ARTIFACTS_BUCKET` and keys for one or both artifacts (`DUCKDB_DATA_KEY` and/or `DUCKDB_MINIFIED_KEY`). Requires credentials with access to S3 and a Google Gemini API key. Embedding mode requires `GEMINI_API_KEY`.
 
@@ -80,7 +86,7 @@ For AWS runs, provide `ARTIFACTS_BUCKET` and keys for one or both artifacts (`DU
 
 ## Outputs and Schema
 
-- Full database: `fdnix-data.duckdb` (complete metadata, embeddings if generated)
+- Full database: `fdnix-data.duckdb` (complete metadata + embeddings once generated)
 - Minified database: `fdnix.duckdb` (only essential columns + FTS; simplified license/maintainers; used by Lambda layer)
 - Core tables present in both, when applicable:
   - `packages(...)` (normalized metadata; minified drops non-essential columns like positions, outputsToInstall, lastUpdated, content_hash)
@@ -95,14 +101,17 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
   - Extracts package metadata from the nixpkgs channel via `nix-env -qaP --json` (no git clone).
   - Cleans and normalizes fields (ids, names, attrs, descriptions, maintainers, etc.).
   - Writes `packages` and `packages_fts_source` tables to DuckDB.
-  - Builds full‑text search index using DuckDB `fts` extension.
-  - Optionally uploads the DuckDB artifact to S3.
+  - Optionally uploads the full DuckDB artifact to S3.
 - Embedding phase:
   - Opens existing DuckDB (downloads from S3 when `ARTIFACTS_BUCKET` plus the relevant key is provided if not present locally).
   - Generates text embeddings with Google Gemini API (e.g., `gemini-embedding-001`) with 256 dimensions.
   - Inserts new vectors into `embeddings` and maintains referential integrity with `packages`.
   - Builds/refreshes vector similarity index using DuckDB `vss` extension.
-  - Optionally uploads the updated DuckDB to S3.
+  - Optionally uploads the updated full DuckDB to S3.
+- Minified phase:
+  - Creates `fdnix.duckdb` by copying essential data and embeddings from the full DB.
+  - Builds the FTS index in the minified DB using DuckDB `fts` extension.
+  - Uploads the minified DuckDB to S3 for use by the Lambda layer.
 
 ## Legacy Support Removal
 

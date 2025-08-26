@@ -23,6 +23,7 @@ export class FdnixPipelineStack extends Stack {
   public readonly nixpkgsIndexerTaskDefinition: ecs.FargateTaskDefinition;
   public readonly pipelineStateMachine: stepfunctions.StateMachine;
   public readonly nixpkgsIndexerDockerBuild: DockerBuildConstruct;
+  public readonly bedrockBatchRole: iam.Role;
 
   constructor(scope: Construct, id: string, props: FdnixPipelineStackProps) {
     super(scope, id, props);
@@ -74,9 +75,67 @@ export class FdnixPipelineStack extends Stack {
     // Grant database access to task role
     databaseStack.artifactsBucket.grantReadWrite(fargateTaskRole);
 
+    // Create IAM role for Bedrock batch inference
+    this.bedrockBatchRole = new iam.Role(this, 'BedrockBatchRole', {
+      assumedBy: new iam.ServicePrincipal('bedrock.amazonaws.com'),
+      inlinePolicies: {
+        BedrockBatchPolicy: new iam.PolicyDocument({
+          statements: [
+            // S3 permissions for batch inference input/output
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                's3:GetObject',
+                's3:PutObject',
+                's3:DeleteObject',
+                's3:ListBucket',
+              ],
+              resources: [
+                databaseStack.artifactsBucket.bucketArn,
+                `${databaseStack.artifactsBucket.bucketArn}/*`,
+              ],
+            }),
+            // Bedrock model invocation permissions for batch inference
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'bedrock:InvokeModel',
+              ],
+              resources: [
+                `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+              ],
+              conditions: {
+                StringEquals: {
+                  'bedrock:sourceBucket': databaseStack.artifactsBucket.bucketName,
+                },
+              },
+            }),
+          ],
+        }),
+      },
+    });
 
-    // No longer need Bedrock permissions as we're using Google Gemini API
-    // Google Gemini API key will be provided via secrets manager or environment variable
+    // Grant Bedrock permissions to the Fargate task role
+    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'bedrock:CreateModelInvocationJob',
+        'bedrock:GetModelInvocationJob',
+        'bedrock:StopModelInvocationJob',
+        'bedrock:ListModelInvocationJobs',
+        'bedrock:ListFoundationModels',
+      ],
+      resources: ['*'], // Bedrock batch jobs require wildcard permissions
+    }));
+
+    // Grant permission to pass the Bedrock batch role
+    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iam:PassRole',
+      ],
+      resources: [this.bedrockBatchRole.roleArn],
+    }));
 
     // Grant Lambda layer publishing permissions using safe ARN handling
     const dbLayerParts = Arn.split(databaseStack.databaseLayer.layerVersionArn, ArnFormat.COLON_RESOURCE_NAME);
@@ -131,10 +190,15 @@ export class FdnixPipelineStack extends Stack {
       environment: {
         AWS_REGION: this.region,
         PROCESSING_MODE: 'both',
-        GEMINI_MODEL_ID: 'gemini-embedding-001',
-        GEMINI_OUTPUT_DIMENSIONS: '256',
-        GEMINI_TASK_TYPE: 'SEMANTIC_SIMILARITY',
+        // Bedrock configuration
+        BEDROCK_MODEL_ID: 'amazon.titan-embed-text-v2:0',
+        BEDROCK_OUTPUT_DIMENSIONS: '256',
+        BEDROCK_BATCH_SIZE: '50000',
+        BEDROCK_ROLE_ARN: this.bedrockBatchRole.roleArn,
+        // S3 configuration
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
+        BEDROCK_INPUT_BUCKET: databaseStack.artifactsBucket.bucketName,
+        BEDROCK_OUTPUT_BUCKET: databaseStack.artifactsBucket.bucketName,
         // Dual database configuration
         DUCKDB_DATA_KEY: 'snapshots/fdnix-data.duckdb',        // Main database with all metadata
         DUCKDB_MINIFIED_KEY: 'snapshots/fdnix.duckdb',        // Minified database for Lambda layer
@@ -143,6 +207,9 @@ export class FdnixPipelineStack extends Stack {
         // Layer publish configuration
         PUBLISH_LAYER: 'true',
         LAYER_ARN: dbLayerUnversionedArn,
+        // Batch job polling configuration
+        BEDROCK_POLL_INTERVAL: '60',                           // Poll every 60 seconds
+        BEDROCK_MAX_WAIT_TIME: '7200',                         // Max 2 hours per batch job
       },
     });
 

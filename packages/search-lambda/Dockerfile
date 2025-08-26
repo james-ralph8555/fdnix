@@ -1,5 +1,5 @@
 # Multi-stage build for C++ Lambda with AWS SDK and DuckDB support
-FROM public.ecr.aws/lambda/provided:al2023-x86_64 AS base
+FROM amazonlinux:2023 AS base
 
 # Install build dependencies
 RUN dnf update -y && \
@@ -65,7 +65,7 @@ RUN cmake -Bbuild \
     ninja -C build -j$(nproc)
 
 # Runtime stage
-FROM public.ecr.aws/lambda/provided:al2023-x86_64
+FROM amazonlinux:2023
 
 # Copy the built Lambda function
 COPY --from=builder /build/lambda/dist/bootstrap ${LAMBDA_RUNTIME_DIR}/bootstrap

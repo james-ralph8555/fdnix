@@ -64,12 +64,15 @@ async def main() -> int:
         validate_env()
         
         processing_mode = os.environ.get("PROCESSING_MODE", "both").lower()
+        # Map aliases
+        if processing_mode in ("all", "full"):
+            processing_mode = "both"
         
         # Setup paths for both databases
         main_db_path = os.environ.get("OUTPUT_PATH", "/out/fdnix-data.duckdb")
         minified_db_path = os.environ.get("OUTPUT_MINIFIED_PATH", "/out/fdnix.duckdb")
         
-        # Phase 1: Metadata Generation (if needed)
+        # Phase 1: Metadata Generation (if requested)
         if processing_mode in ("metadata", "both"):
             logger.info("=== METADATA GENERATION PHASE ===")
             
@@ -90,56 +93,46 @@ async def main() -> int:
             logger.info("Writing metadata to main DuckDB artifact...")
             main_writer.write_artifact(packages)
             logger.info("Main database generation completed successfully!")
-            
-            # Create minified database from main database (upload to minified key)
-            logger.info("=== MINIFIED DATABASE GENERATION ===")
-            minified_writer = MinifiedDuckDBWriter(
-                output_path=minified_db_path,
-                s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
-                s3_key=os.environ.get("DUCKDB_MINIFIED_KEY"),
-                region=os.environ.get("AWS_REGION"),
-            )
-            
-            logger.info("Creating minified database from main database...")
-            minified_writer.create_minified_db_from_main(main_db_path)
-            logger.info("Minified database generation completed successfully!")
         
         # Phase 2: Embedding Generation (if needed)
         if processing_mode in ("embedding", "both"):
             logger.info("=== EMBEDDING GENERATION PHASE ===")
             
             # Set required environment for embedding generator
-            if not os.environ.get("GEMINI_MODEL_ID"):
-                os.environ["GEMINI_MODEL_ID"] = "gemini-embedding-001"
-            if not os.environ.get("GEMINI_OUTPUT_DIMENSIONS"):
-                os.environ["GEMINI_OUTPUT_DIMENSIONS"] = "256"
+            if not os.environ.get("BEDROCK_MODEL_ID"):
+                os.environ["BEDROCK_MODEL_ID"] = "amazon.titan-embed-text-v2:0"
+            if not os.environ.get("BEDROCK_OUTPUT_DIMENSIONS"):
+                os.environ["BEDROCK_OUTPUT_DIMENSIONS"] = "256"
             
-            # Use minified database for embeddings (it has all the data needed)
-            embedding_db_path = minified_db_path if processing_mode == "both" else main_db_path
+            # Always use the main database for embeddings
             if not os.environ.get("DUCKDB_PATH"):
-                os.environ["DUCKDB_PATH"] = embedding_db_path
+                os.environ["DUCKDB_PATH"] = main_db_path
             
             # Check for force rebuild flag
             force_rebuild = _truthy(os.environ.get("FORCE_REBUILD_EMBEDDINGS"))
             if force_rebuild:
                 logger.info("Force rebuild enabled - will regenerate all embeddings")
             
+            # Ensure S3 key is set for main DB during embedding stage
+            if os.environ.get("ARTIFACTS_BUCKET") and not os.environ.get("DUCKDB_DATA_KEY"):
+                os.environ["DUCKDB_DATA_KEY"] = "fdnix-data.duckdb"
+
             generator = EmbeddingGenerator()
             await generator.run(force_rebuild=force_rebuild)
             logger.info("Embedding generation completed successfully!")
-            
-            # If we have both databases and used minified for embeddings, 
-            # sync the minified database back to S3
-            if processing_mode == "both" and os.environ.get("DUCKDB_MINIFIED_KEY"):
-                logger.info("Re-uploading minified database with embeddings to S3...")
-                minified_writer = MinifiedDuckDBWriter(
-                    output_path=minified_db_path,
-                    s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
-                    s3_key=os.environ.get("DUCKDB_MINIFIED_KEY"),
-                    region=os.environ.get("AWS_REGION"),
-                )
-                minified_writer._upload_to_s3()
-                logger.info("Minified database with embeddings uploaded to S3")
+
+        # Phase 3: Minified Database Generation (if requested)
+        if processing_mode in ("minified", "both"):
+            logger.info("=== MINIFIED DATABASE GENERATION PHASE ===")
+            minified_writer = MinifiedDuckDBWriter(
+                output_path=minified_db_path,
+                s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
+                s3_key=os.environ.get("DUCKDB_MINIFIED_KEY"),
+                region=os.environ.get("AWS_REGION"),
+            )
+            logger.info("Creating minified database from main database (with embeddings if present)...")
+            minified_writer.create_minified_db_from_main(main_db_path)
+            logger.info("Minified database generation completed successfully!")
         
         # Phase 3: Publish DuckDB layer (if requested)
         if _truthy(os.environ.get("PUBLISH_LAYER")):

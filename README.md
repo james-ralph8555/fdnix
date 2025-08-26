@@ -96,6 +96,8 @@ Rate limits used by the pipeline:
 - `GEMINI_TOKENS_PER_MINUTE` (default: `1000000`)
 - `GEMINI_INTER_BATCH_DELAY` seconds (default: `0.02`)
 
+Secrets: Store sensitive values (e.g., `GEMINI_API_KEY`) in AWS SSM Parameter Store or Secrets Manager and inject them at deploy/runtime. IAM policies across stacks follow least-privilege.
+
 ### Backend Details
 - For backend and infrastructure details, see:
   - `packages/search-lambda/README.md`
@@ -104,13 +106,13 @@ Rate limits used by the pipeline:
 ### Project Structure
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)
-  - `containers/` (unified `nixpkgs-indexer/` container for metadata + embeddings + optional layer publish)
+  - `containers/` (unified `nixpkgs-indexer/` container for metadata → embeddings → minified + optional layer publish)
   - `search-lambda/` (C++ Lambda backend)
   - `frontend/` (SolidJS)
 - CDK commands must be run from the `packages/cdk` workspace
 - Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
 
-Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs both phases. The container can also publish the DuckDB artifact to the Lambda layer as part of the same ECS task. See `packages/containers/README.md`.
+Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs a three-phase pipeline: metadata → embeddings → minified. The minified DuckDB is uploaded to S3 and used by the Lambda layer; the container can optionally publish the layer in the same ECS task. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
 
