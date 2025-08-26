@@ -32,7 +32,7 @@ Current status: A minimal Node.js handler may be deployed as a temporary stub to
 
 Environment variables used for embeddings:
 
-- `GOOGLE_GEMINI_API_KEY`: API key for Gemini requests (required).
+- `GEMINI_API_KEY`: API key for Gemini requests (required).
 - `GEMINI_MODEL_ID`: Embedding model id (default `gemini-embedding-001`).
 - `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default `256`).
 - `GEMINI_TASK_TYPE`: Embedding task type (default `SEMANTIC_SIMILARITY`).

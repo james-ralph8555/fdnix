@@ -32,7 +32,7 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
   - `PROCESSING_MODE`: `metadata` | `embedding` | `both` (default: `both`).
   - FTS (optional tuning): `FTS_STOPWORDS` (default `english`), `FTS_STEMMER` (default `english`), `FTS_INDEX_NAME` (default `packages_fts_idx`).
 - Embeddings:
-  - `GOOGLE_GEMINI_API_KEY`: Google Gemini API key for embeddings.
+  - `GEMINI_API_KEY`: Google Gemini API key for embeddings.
   - `GEMINI_MODEL_ID`: Gemini model id (e.g., `gemini-embedding-001`). If not set, defaults to `gemini-embedding-001`.
   - `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
   - `GEMINI_TASK_TYPE`: Task type optimization (default: `SEMANTIC_SIMILARITY`).
@@ -60,11 +60,11 @@ From repo root:
 - Metadata-only (produces local `fdnix.duckdb`):
   - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
 - Embedding-only (consumes and updates `fdnix.duckdb`):
-  - `docker run --rm --env-file .env -v "$PWD":/out -e GOOGLE_GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
+  - `docker run --rm --env-file .env -v "$PWD":/out -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
 - Both phases and upload to S3:
-  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GOOGLE_GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
-For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final artifact. Requires credentials with access to S3 and a Google Gemini API key. Embedding mode requires `GOOGLE_GEMINI_API_KEY`.
+For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final artifact. Requires credentials with access to S3 and a Google Gemini API key. Embedding mode requires `GEMINI_API_KEY`.
 
 ## Deployment Notes
 

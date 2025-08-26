@@ -14,7 +14,7 @@ This container indexes nixpkgs by combining metadata extraction and embedding ge
 
 ### Required
 - `AWS_REGION`: AWS region for services
-- `GOOGLE_GEMINI_API_KEY`: Google Gemini API key for embeddings (only needed for embedding mode)
+- `GEMINI_API_KEY`: Google Gemini API key for embeddings (only needed for embedding mode)
 
 ### Optional
 - `PROCESSING_MODE`: Mode to run - "metadata", "embedding", or "both" (default: "both")
@@ -71,7 +71,7 @@ The container automatically determines what to run based on the `PROCESSING_MODE
 
 ```bash
 docker run --env-file .env -e AWS_REGION=us-east-1 \
-           -e GOOGLE_GEMINI_API_KEY=your-api-key \
+           -e GEMINI_API_KEY=your-api-key \
            -e GEMINI_MODEL_ID=gemini-embedding-001 \
            -e GEMINI_OUTPUT_DIMENSIONS=256 \
            -e PROCESSING_MODE=both \
@@ -94,11 +94,11 @@ The indexer produces the following schema:
   - `docker build -t fdnix/nixpkgs-indexer packages/containers/nixpkgs-indexer`
 - Run (local output to current dir):
   - Metadata only: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
-  - Embeddings only: `docker run --rm --env-file .env -v "$PWD":/out -e GOOGLE_GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e GEMINI_OUTPUT_DIMENSIONS=256 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
-  - Both + upload to S3: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GOOGLE_GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e GEMINI_OUTPUT_DIMENSIONS=256 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+  - Embeddings only: `docker run --rm --env-file .env -v "$PWD":/out -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e GEMINI_OUTPUT_DIMENSIONS=256 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
+  - Both + upload to S3: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e GEMINI_OUTPUT_DIMENSIONS=256 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
 Notes:
-- Embedding mode requires `GOOGLE_GEMINI_API_KEY`; `GEMINI_MODEL_ID` defaults to `gemini-embedding-001` if not set. Dimensions default to 256.
+- Embedding mode requires `GEMINI_API_KEY`; `GEMINI_MODEL_ID` defaults to `gemini-embedding-001` if not set. Dimensions default to 256.
 - S3 upload requires all of `ARTIFACTS_BUCKET`, `DUCKDB_KEY`, and `AWS_REGION`.
 - Default local artifact path is `/out/fdnix.duckdb`.
 

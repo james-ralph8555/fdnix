@@ -43,7 +43,7 @@ class LayerPublisher:
         try:
             resp = lambda_client.publish_layer_version(
                 LayerName=layer_arn,
-                Description="DuckDB database file for fdnix search API",
+                Description="Minified DuckDB database with search indexes for fdnix search API",
                 Content={"S3Bucket": bucket, "S3Key": key},
                 CompatibleRuntimes=["provided.al2023"],
                 CompatibleArchitectures=["arm64"],

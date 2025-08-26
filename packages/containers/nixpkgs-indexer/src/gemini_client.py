@@ -13,13 +13,13 @@ logger.setLevel(logging.INFO)
 
 class GeminiClient:
     def __init__(self, api_key: str = None, model_id: str = None):
-        self.api_key = api_key or os.environ.get('GOOGLE_GEMINI_API_KEY')
+        self.api_key = api_key or os.environ.get('GEMINI_API_KEY')
         self.model_id = model_id or os.environ.get('GEMINI_MODEL_ID', 'gemini-embedding-001')
         self.output_dimensions = int(os.environ.get('GEMINI_OUTPUT_DIMENSIONS', '256'))
         self.task_type = os.environ.get('GEMINI_TASK_TYPE', 'SEMANTIC_SIMILARITY')
         
         if not self.api_key:
-            raise ValueError("GOOGLE_GEMINI_API_KEY environment variable is required")
+            raise ValueError("GEMINI_API_KEY environment variable is required")
         
         self.base_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_id}:embedContent"
         
@@ -244,18 +244,20 @@ class GeminiClient:
             logger.error(f"Error details: {repr(error)}")
             raise error
 
-    def validate_model_access(self) -> bool:
+    async def validate_model_access(self) -> bool:
         """Validate that the Gemini API is accessible"""
-        async def _validate():
-            try:
-                async with self:
-                    test_embedding = await self.generate_embedding("test")
-                    return len(test_embedding) > 0
-            except Exception as error:
-                logger.error(f"Model validation failed: {str(error)}")
-                return False
-        
         try:
-            return asyncio.run(_validate())
-        except Exception:
+            async with self:
+                test_embedding = await self.generate_embedding("test")
+                return len(test_embedding) > 0
+        except Exception as error:
+            logger.error(f"Model validation failed: {type(error).__name__}: {str(error)}")
+            # Try to extract more details from HTTP errors
+            if hasattr(error, 'response'):
+                try:
+                    logger.error(f"HTTP Status: {error.response.status_code}")
+                    logger.error(f"Response body: {error.response.text}")
+                    logger.error(f"Response headers: {dict(error.response.headers)}")
+                except Exception:
+                    pass
             return False

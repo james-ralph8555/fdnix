@@ -27,12 +27,12 @@ export class FdnixDatabaseStack extends Stack {
       enforceSSL: true,
     });
 
-    // Lambda Layer for DuckDB file
-    // This layer will contain the DuckDB file at /opt/fdnix/fdnix.duckdb
+    // Lambda Layer for minified DuckDB file
+    // This layer will contain the minified DuckDB file at /opt/fdnix/fdnix.duckdb
     // Initial version with empty layer - will be updated by pipeline
     this.databaseLayer = new lambda.LayerVersion(this, 'DatabaseLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, 'empty-layer')),
-      description: 'DuckDB file containing nixpkgs metadata, embeddings, and search indexes',
+      description: 'Minified DuckDB file optimized for Lambda with search indexes and essential data only',
       compatibleRuntimes: [lambda.Runtime.PROVIDED_AL2023],
       compatibleArchitectures: [lambda.Architecture.ARM_64],
     });
@@ -115,13 +115,13 @@ export class FdnixDatabaseStack extends Stack {
     // Outputs
     new CfnOutput(this, 'ArtifactsBucketName', {
       value: this.artifactsBucket.bucketName,
-      description: 'S3 bucket for pipeline artifacts',
+      description: 'S3 bucket for pipeline artifacts (stores both main and minified databases)',
       exportName: 'FdnixArtifactsBucketName',
     });
 
     new CfnOutput(this, 'DatabaseLayerArn', {
       value: this.databaseLayer.layerVersionArn,
-      description: 'ARN of the DuckDB Lambda Layer',
+      description: 'ARN of the minified DuckDB Lambda Layer',
       exportName: 'FdnixDatabaseLayerArn',
     });
 

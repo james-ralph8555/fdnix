@@ -150,7 +150,7 @@ npm install
 
 Embedding configuration (used by pipeline and API):
 
--   `GOOGLE_GEMINI_API_KEY` - API key for embeddings (store in SSM/Secrets Manager).
+-   `GEMINI_API_KEY` - API key for embeddings (store in SSM/Secrets Manager).
 -   `GEMINI_MODEL_ID` - Embedding model id (default: `gemini-embedding-001`).
 -   `GEMINI_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
 -   `GEMINI_TASK_TYPE` - Embedding task type (default: `SEMANTIC_SIMILARITY`).

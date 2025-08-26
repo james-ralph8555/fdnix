@@ -7,15 +7,19 @@ import json
 import asyncio
 from typing import List, Dict, Any, Tuple
 import duckdb
+from botocore.exceptions import ClientError
 from gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingGenerator:
     def __init__(self):
+        # Reduce httpx logging noise
+        logging.getLogger('httpx').setLevel(logging.WARNING)
+        
         self.validate_environment()
         self.gemini_client = GeminiClient(
-            api_key=os.environ.get('GOOGLE_GEMINI_API_KEY'),
+            api_key=os.environ.get('GEMINI_API_KEY'),
             model_id=os.environ.get('GEMINI_MODEL_ID')
         )
         
@@ -34,7 +38,7 @@ class EmbeddingGenerator:
     def validate_environment(self):
         """Validate required environment variables"""
         required_vars = [
-            'GOOGLE_GEMINI_API_KEY'
+            'GEMINI_API_KEY'
         ]
         
         missing_vars = [var for var in required_vars if not os.environ.get(var)]
@@ -57,11 +61,7 @@ class EmbeddingGenerator:
             logger.error(error_msg)
             raise RuntimeError(error_msg) from e
         # Enable experimental persistence for HNSW indexes for on-disk DBs
-        try:
-            con.execute("SET hnsw_enable_experimental_persistence = true;")
-        except Exception:
-            # Some versions might guard this flag differently; ignore if unsupported
-            pass
+        con.execute("SET hnsw_enable_experimental_persistence = true;")
         # Best-effort: set runtime VSS parameters (ignored if unsupported)
         try:
             con.execute(f"SET vss.ef_search={int(self.vss_ef_search)};")
@@ -435,7 +435,7 @@ class EmbeddingGenerator:
         try:
             # Test Gemini access first
             logger.info("Validating Gemini model access...")
-            if not self.gemini_client.validate_model_access():
+            if not await self.gemini_client.validate_model_access():
                 raise RuntimeError("Cannot access Gemini model. Check API key and permissions.")
             logger.info("Gemini model access validated successfully")
             
