@@ -32,7 +32,7 @@ ENV NIX_PATH="nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos"
 
 # Copy Python project metadata and install runtime deps via uv
 COPY pyproject.toml ./
-RUN uv pip install --system boto3 botocore requests
+RUN uv pip install --system boto3 botocore requests duckdb>=0.10.0
 
 # Copy application source
 COPY src/ ./src/
@@ -48,8 +48,7 @@ USER appuser
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 
-# Required env (overridden by CDK)
-ENV DYNAMODB_TABLE=fdnix-packages
+# Optional env (overridden by CDK)
 ENV AWS_REGION=us-east-1
 
 # Entry point

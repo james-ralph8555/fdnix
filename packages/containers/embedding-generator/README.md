@@ -30,7 +30,7 @@ IAM: S3 read/write to the artifacts bucket; Bedrock `bedrock:InvokeModel`; Cloud
   -v "$PWD":/out \
   fdnix/embedding-generator`
 
-Requires AWS credentials with access to DynamoDB, S3, and Bedrock (InvokeModel).
+Requires AWS credentials with access to S3 and Bedrock (InvokeModel).
 
 ## Artifact Layout
 

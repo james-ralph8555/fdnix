@@ -53,3 +53,7 @@ coverage/
 
 # Keep nixpkgs directory
 nixpkgs/
+
+# Python
+__pycache__/
+*.pyc

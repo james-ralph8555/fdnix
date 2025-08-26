@@ -4,7 +4,7 @@ Generates normalized nixpkgs metadata and writes it into a DuckDB file. Part of 
 
 ## Features
 
-- Extracts nixpkgs via `nix-env -qaP --json` (shallow clone, robust parsing)
+- Extracts nixpkgs via `nix-env -qaP --json --meta` (robust parsing)
 - Cleans and validates fields (description/homepage/license/platforms/maintainers)
 - Writes structured rows into a DuckDB file: `packages`, `packages_fts_source`
 - Builds an FTS index (DuckDB `fts` extension) over relevant text
@@ -26,16 +26,20 @@ IAM: S3 write access to the artifacts bucket; CloudWatch Logs for `/fdnix/metada
 
 - `docker run --rm \
   -e AWS_REGION=us-east-1 \
+  -e ARTIFACTS_BUCKET=fdnix-artifacts \
+  -e DUCKDB_KEY=snapshots/fdnix.duckdb \
   -v "$PWD":/out \
   fdnix/metadata-generator`
 
-Requires AWS credentials in the environment (or via Docker credential helpers).
+Outputs a local DuckDB file at `/out/fdnix.duckdb`. If `ARTIFACTS_BUCKET` and `DUCKDB_KEY` are set, also uploads the artifact to S3.
 
 ## Data Model
 
 DuckDB schema outline:
-- `packages(package_id, name, version, description, homepage, license, platforms, maintainers, broken, unfree, lastUpdated)`
+- `packages(package_id, name, version, description, homepage, license, platforms, maintainers, broken, unfree, available, mainProgram, lastUpdated)`
 - `packages_fts_source(package_id, text)` with FTS index built on `text`
+
+The embedding generator consumes this file to append embeddings and build a VSS index in a subsequent step before publishing the final artifact as a Lambda Layer.
 
 ## Operational Notes
 
@@ -49,4 +53,4 @@ DuckDB schema outline:
 - Common issues:
   - Missing env vars → container exits with an error
   - Network/clone failures → retried; ensure egress access in the VPC
-  - FTS extension not available → ensure DuckDB `fts` is present in the image
+  - FTS extension not available → ensure DuckDB `fts` can be installed/loaded in the image

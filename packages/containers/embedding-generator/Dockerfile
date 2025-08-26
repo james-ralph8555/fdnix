@@ -17,7 +17,7 @@ ENV PATH="/root/.local/bin:$PATH"
 
 # Copy pyproject.toml and install Python dependencies with uv
 COPY pyproject.toml .
-RUN uv pip install --system boto3 botocore numpy requests
+RUN uv pip install --system boto3 botocore numpy requests duckdb
 
 # Copy application source
 COPY src/ ./src/
@@ -36,9 +36,10 @@ ENV PYTHONUNBUFFERED=1
 # Set default environment variables (can be overridden by CDK)
 ENV AWS_REGION=us-east-1
 ENV BEDROCK_MODEL_ID=cohere.embed-english-v3
-# Optional: local file-based I/O until DuckDB integration
-ENV PACKAGES_INPUT=""
-ENV EMBEDDINGS_OUTPUT="/tmp/embeddings.jsonl"
+# DuckDB file location and artifact upload
+ENV DUCKDB_PATH="/out/fdnix.duckdb"
+ENV ARTIFACTS_BUCKET=""
+ENV DUCKDB_KEY=""
 
 # Command to run the application using uv
 CMD ["uv", "run", "python", "src/index.py"]

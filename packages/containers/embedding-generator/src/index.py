@@ -4,7 +4,9 @@ import os
 import sys
 import logging
 import json
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+import duckdb
+import boto3
 from bedrock_client import BedrockClient
 
 # Configure logging
@@ -24,9 +26,11 @@ class EmbeddingGenerator:
         
         self.batch_size = 50  # Process embeddings in batches
         self.max_text_length = 2000  # Limit text length for embedding
-        # Optional local file I/O (temporary until DuckDB integration lands)
-        self.packages_input = os.environ.get('PACKAGES_INPUT', '').strip()
-        self.embeddings_output = os.environ.get('EMBEDDINGS_OUTPUT', '/tmp/embeddings.jsonl').strip()
+        # DuckDB + artifact settings
+        self.duckdb_path = os.environ.get('DUCKDB_PATH', '/out/fdnix.duckdb').strip()
+        self.artifacts_bucket = os.environ.get('ARTIFACTS_BUCKET', '').strip()
+        self.duckdb_key = os.environ.get('DUCKDB_KEY', '').strip()
+        self.embedding_dim: int | None = None
 
     def validate_environment(self):
         """Validate required environment variables"""
@@ -39,28 +43,93 @@ class EmbeddingGenerator:
         if missing_vars:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
-    def load_packages_from_file(self) -> List[Dict[str, Any]]:
-        """Load packages from a JSONL file if provided via PACKAGES_INPUT."""
-        path = self.packages_input
-        if not path:
-            logger.info("No PACKAGES_INPUT provided; nothing to process.")
-            return []
-        if not os.path.exists(path):
-            logger.warning(f"PACKAGES_INPUT file not found: {path}")
-            return []
-        logger.info(f"Loading packages from {path} ...")
-        pkgs: List[Dict[str, Any]] = []
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    pkgs.append(json.loads(line))
-                except Exception as e:
-                    logger.warning(f"Skipping invalid JSON line: {e}")
-        logger.info(f"Loaded {len(pkgs)} packages from file")
-        return pkgs
+    # -----------------------
+    # DuckDB helpers
+    # -----------------------
+    def connect_duckdb(self) -> duckdb.DuckDBPyConnection:
+        if not os.path.exists(self.duckdb_path):
+            raise FileNotFoundError(f"DuckDB file not found at {self.duckdb_path}")
+        logger.info(f"Opening DuckDB at {self.duckdb_path}")
+        con = duckdb.connect(self.duckdb_path)
+        # Ensure VSS extension is available
+        con.execute("INSTALL vss; LOAD vss;")
+        # Create embeddings table if not present
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embeddings (
+                package_id TEXT PRIMARY KEY,
+                vector FLOAT[]
+            );
+            """
+        )
+        return con
+
+    def fetch_packages_to_embed(self, con: duckdb.DuckDBPyConnection, limit: int | None = None) -> List[Dict[str, Any]]:
+        # Select candidates, preferring usable packages
+        sql = (
+            "SELECT packageName, version, attributePath, description, longDescription, homepage, mainProgram, "
+            "license, maintainers, platforms, COALESCE(hasEmbedding, FALSE) AS hasEmbedding, "
+            "COALESCE(available, TRUE) AS available, COALESCE(broken, FALSE) AS broken, "
+            "COALESCE(insecure, FALSE) AS insecure, COALESCE(unsupported, FALSE) AS unsupported "
+            "FROM packages "
+            "WHERE COALESCE(hasEmbedding, FALSE) = FALSE "
+            "AND COALESCE(available, TRUE) = TRUE "
+            "AND COALESCE(broken, FALSE) = FALSE "
+            "AND COALESCE(insecure, FALSE) = FALSE "
+            "AND COALESCE(unsupported, FALSE) = FALSE"
+        )
+        if limit:
+            sql += f" LIMIT {int(limit)}"
+        try:
+            res = con.execute(sql)
+            rows = res.fetchall()
+        except duckdb.CatalogException as e:
+            raise RuntimeError("Expected 'packages' table not found in DuckDB. Run metadata phase first.") from e
+
+        columns = [d[0] for d in res.description]
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            rec = dict(zip(columns, r))
+            # Coerce JSON-like columns into Python types when stored as JSON or VARCHAR
+            for key in ("license", "maintainers", "platforms"):
+                val = rec.get(key)
+                if isinstance(val, str):
+                    try:
+                        rec[key] = json.loads(val)
+                    except Exception:
+                        # keep as-is if not valid JSON
+                        pass
+            out.append(rec)
+        return out
+
+    def insert_embeddings(self, con: duckdb.DuckDBPyConnection, rows: List[Tuple[str, list]]) -> None:
+        if not rows:
+            return
+        con.executemany("INSERT OR REPLACE INTO embeddings (package_id, vector) VALUES (?, ?)", rows)
+
+    def mark_packages_embedded(self, con: duckdb.DuckDBPyConnection, keys: List[Tuple[str, str]]) -> None:
+        if not keys:
+            return
+        con.executemany(
+            "UPDATE packages SET hasEmbedding = TRUE WHERE packageName = ? AND version = ?",
+            keys,
+        )
+
+    def ensure_vss_index(self, con: duckdb.DuckDBPyConnection) -> None:
+        # Determine dimension from existing rows if not already known
+        dim = self.embedding_dim
+        if dim is None:
+            try:
+                dim_row = con.execute("SELECT list_length(vector) FROM embeddings WHERE vector IS NOT NULL LIMIT 1").fetchone()
+                if dim_row and dim_row[0]:
+                    dim = int(dim_row[0])
+            except Exception:
+                dim = None
+        if not dim:
+            logger.warning("Skipping VSS index creation: no embeddings present to infer dimension")
+            return
+        logger.info(f"Creating VSS index on embeddings.vector with dim={dim} (idempotent)")
+        con.execute(f"CREATE INDEX IF NOT EXISTS embeddings_vss_idx ON embeddings(vector) USING vss (dim={dim});")
 
     def create_embedding_text(self, package: Dict[str, Any]) -> str:
         """Create a text representation of the package for embedding"""
@@ -159,15 +228,12 @@ class EmbeddingGenerator:
         
         # Create embedding texts
         texts = []
-        package_keys = []
+        package_keys: List[Tuple[str, str]] = []
         
         for package in packages:
             text = self.create_embedding_text(package)
             texts.append(text)
-            package_keys.append({
-                'packageName': package['packageName'],
-                'version': package['version']
-            })
+            package_keys.append((package['packageName'], package['version']))
         
         try:
             # Generate embeddings using Bedrock
@@ -178,24 +244,26 @@ class EmbeddingGenerator:
                 logger.error(f"Mismatch in embeddings count: expected {len(texts)}, got {len(embeddings)}")
                 return 0
             
-            # Prepare vector payloads (temporary file-based output)
-            vector_data = []
-            for i, (package_key, embedding, text) in enumerate(zip(package_keys, embeddings, texts)):
-                vector_data.append({
-                    'id': f"{package_key['packageName']}#{package_key['version']}",
-                    'vector': embedding,
-                    'metadata': {
-                        'packageName': package_key['packageName'],
-                        'version': package_key['version'],
-                        'text': text[:500]  # Store first 500 chars for debugging
-                    }
-                })
-            # Write to local JSONL as a temporary artifact
-            os.makedirs(os.path.dirname(self.embeddings_output), exist_ok=True)
-            with open(self.embeddings_output, 'a', encoding='utf-8') as out:
-                for item in vector_data:
-                    out.write(json.dumps(item) + "\n")
-            logger.info(f"Wrote {len(vector_data)} embeddings to {self.embeddings_output}")
+            # Remember embedding dimension for VSS index creation later
+            if embeddings and not self.embedding_dim:
+                self.embedding_dim = len(embeddings[0]) if embeddings[0] else None
+
+            # Prepare rows for insertion
+            vector_rows: List[Tuple[str, list]] = []
+            for (pkg_name, ver), vec in zip(package_keys, embeddings):
+                pkg_id = f"{pkg_name}#{ver}"
+                vector_rows.append((pkg_id, vec))
+
+            # Insert into DuckDB and mark packages
+            con = self._duckdb_con
+            con.execute("BEGIN TRANSACTION;")
+            try:
+                self.insert_embeddings(con, vector_rows)
+                self.mark_packages_embedded(con, package_keys)
+                con.execute("COMMIT;")
+            except Exception:
+                con.execute("ROLLBACK;")
+                raise
             
             logger.info(f"Successfully processed batch of {len(packages)} packages")
             return len(packages)
@@ -209,11 +277,15 @@ class EmbeddingGenerator:
         logger.info("Starting fdnix embedding generation process...")
         
         try:
-            # Temporary input path flow until DuckDB integration is added
-            packages = self.load_packages_from_file()
-            total_packages = len(packages)
+            # Connect to DuckDB
+            self._duckdb_con = self.connect_duckdb()
+            # Load candidates
+            candidates = self.fetch_packages_to_embed(self._duckdb_con)
+            total_packages = len(candidates)
             if total_packages == 0:
-                logger.info("No input packages provided. Exiting.")
+                logger.info("No packages need embeddings (hasEmbedding=true for all). Nothing to do.")
+                # Still consider uploading if requested
+                self._maybe_upload_artifact()
                 return
             
             # Process packages in batches
@@ -221,7 +293,7 @@ class EmbeddingGenerator:
             failed_count = 0
             
             for i in range(0, total_packages, self.batch_size):
-                batch = packages[i:i + self.batch_size]
+                batch = candidates[i:i + self.batch_size]
                 logger.info(f"Processing batch {i//self.batch_size + 1}/{(total_packages + self.batch_size - 1)//self.batch_size}")
                 
                 batch_processed = await self.process_packages_batch(batch)
@@ -229,14 +301,25 @@ class EmbeddingGenerator:
                 failed_count += len(batch) - batch_processed
                 
                 logger.info(f"Progress: {processed_count}/{total_packages} processed, {failed_count} failed")
-            
-            # No S3 index handling; this will move to DuckDB
-            
+            # Build or update VSS index in DuckDB
+            self.ensure_vss_index(self._duckdb_con)
+
+            # Upload final artifact to S3 if configured
+            self._maybe_upload_artifact()
+
             logger.info(f"Embedding generation completed! Processed: {processed_count}, Failed: {failed_count}")
             
         except Exception as error:
             logger.error(f"Fatal error during embedding generation: {str(error)}")
             sys.exit(1)
+
+    def _maybe_upload_artifact(self) -> None:
+        if not self.artifacts_bucket or not self.duckdb_key:
+            logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/DUCKDB_KEY missing). Skipping upload.")
+            return
+        s3 = boto3.client('s3', region_name=os.environ['AWS_REGION'])
+        logger.info(f"Uploading {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
+        s3.upload_file(self.duckdb_path, self.artifacts_bucket, self.duckdb_key)
 
 async def main():
     generator = EmbeddingGenerator()
