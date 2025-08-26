@@ -18,6 +18,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC")
 # Find required packages
 find_package(CURL REQUIRED)
 find_package(PkgConfig REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # Find AWS SDK for C++ (for HTTP client utilities)
 find_package(AWSSDK REQUIRED COMPONENTS core)
@@ -46,6 +47,7 @@ target_link_libraries(${PROJECT_NAME}
     AWS::aws-lambda-runtime
     ${AWSSDK_LINK_LIBRARIES}
     ${CURL_LIBRARIES}
+    ZLIB::ZLIB
     dl  # For DuckDB dynamic loading
 )
 

@@ -28,9 +28,9 @@ invocation_response handler(invocation_request const& request)
         int limit = 50;
         int offset = 0;
         
-        if (event.ValueExists("queryStringParameters") && 
-            !event.GetObject("queryStringParameters").IsNull()) {
-            auto query_params = event.GetObject("queryStringParameters");
+        if (event.View().ValueExists("queryStringParameters") && 
+            !event.View().GetObject("queryStringParameters").IsNull()) {
+            auto query_params = event.View().GetObject("queryStringParameters");
             
             if (query_params.ValueExists("q")) {
                 query_param = query_params.GetString("q");
@@ -55,8 +55,8 @@ invocation_response handler(invocation_request const& request)
                 search_params.limit = limit;
                 search_params.offset = offset;
                 // Optional filters
-                if (event.ValueExists("queryStringParameters") && !event.GetObject("queryStringParameters").IsNull()) {
-                    auto qps = event.GetObject("queryStringParameters");
+                if (event.View().ValueExists("queryStringParameters") && !event.View().GetObject("queryStringParameters").IsNull()) {
+                    auto qps = event.View().GetObject("queryStringParameters");
                     if (qps.ValueExists("license")) {
                         search_params.license_filter = qps.GetString("license");
                     }
@@ -213,7 +213,7 @@ int main()
     std::cout << "Lambda initialization complete. Starting runtime..." << std::endl;
     
     // Run the Lambda runtime
-    auto result = run_handler(handler);
+    run_handler(handler);
     
     // Cleanup clients
     g_duckdb_client.reset();
@@ -222,5 +222,5 @@ int main()
     // Cleanup AWS SDK
     Aws::ShutdownAPI(options);
     
-    return result;
+    return 0;
 }

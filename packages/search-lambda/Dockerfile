@@ -68,10 +68,10 @@ RUN cmake -Bbuild \
 FROM amazonlinux:2023
 
 # Copy the built Lambda function
-COPY --from=builder /build/lambda/dist/bootstrap ${LAMBDA_RUNTIME_DIR}/bootstrap
+COPY --from=builder /build/lambda/dist/bootstrap /bootstrap
 
 # Make sure bootstrap is executable
-RUN chmod +x ${LAMBDA_RUNTIME_DIR}/bootstrap
+RUN chmod +x /bootstrap
 
 # Set the Lambda runtime handler (not used with custom runtime but good practice)
 CMD ["bootstrap"]

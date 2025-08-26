@@ -6,6 +6,7 @@
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/core/utils/StringUtils.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
+#include <aws/core/client/ClientConfiguration.h>
 
 namespace fdnix {
 
@@ -194,12 +195,12 @@ namespace fdnix {
 
             std::vector<double> embedding;
 
-            if (!response_json.ValueExists("embedding")) {
+            if (!response_json.View().ValueExists("embedding")) {
                 std::cerr << "No embedding found in response" << std::endl;
                 return embedding;
             }
 
-            auto embedding_obj = response_json.GetObject("embedding");
+            auto embedding_obj = response_json.View().GetObject("embedding");
             if (!embedding_obj.ValueExists("values")) {
                 std::cerr << "No values found in embedding object" << std::endl;
                 return embedding;
