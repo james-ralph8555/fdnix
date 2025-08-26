@@ -9,6 +9,8 @@
     "diff": "cdk diff --all",
     "bootstrap": "cdk bootstrap",
     "deploy": "cdk deploy --all",
+    "destroy": "cdk destroy",
+    "destroy:all": "cdk destroy --all",
     "cleanup:list-stacks": "aws cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE DELETE_FAILED --query 'StackSummaries[?starts_with(StackName, `Fdnix`)].{Name:StackName,Status:StackStatus,Created:CreationTime}' --output table",
     "cleanup:orphaned-resources": "echo 'Check for orphaned resources not managed by CloudFormation:' && aws s3 ls | grep fdnix && aws dynamodb list-tables --query 'TableNames[?starts_with(@, `fdnix`)]' && aws ecr describe-repositories --query 'repositories[?starts_with(repositoryName, `fdnix`)].repositoryName'",
     "cleanup:force-delete-stack": "aws cloudformation delete-stack --stack-name $1 && echo 'Monitor deletion with: aws cloudformation describe-stacks --stack-name $1'"

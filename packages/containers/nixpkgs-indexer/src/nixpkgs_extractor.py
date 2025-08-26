@@ -240,4 +240,3 @@ class NixpkgsExtractor:
                     "githubId": None,
                 })
         return result[:10]
-

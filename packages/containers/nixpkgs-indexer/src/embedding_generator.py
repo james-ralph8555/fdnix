@@ -9,11 +9,6 @@ import duckdb
 import boto3
 from bedrock_client import BedrockClient
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 class EmbeddingGenerator:
@@ -311,7 +306,7 @@ class EmbeddingGenerator:
             
         except Exception as error:
             logger.error(f"Fatal error during embedding generation: {str(error)}")
-            sys.exit(1)
+            raise error
 
     def _maybe_upload_artifact(self) -> None:
         if not self.artifacts_bucket or not self.duckdb_key:
@@ -320,11 +315,3 @@ class EmbeddingGenerator:
         s3 = boto3.client('s3', region_name=os.environ['AWS_REGION'])
         logger.info(f"Uploading {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
         s3.upload_file(self.duckdb_path, self.artifacts_bucket, self.duckdb_key)
-
-async def main():
-    generator = EmbeddingGenerator()
-    await generator.run()
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())

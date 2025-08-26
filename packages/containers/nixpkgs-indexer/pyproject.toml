@@ -1,0 +1,23 @@
+[project]
+name = "fdnix-nixpkgs-indexer"
+version = "0.1.0"
+description = "Nixpkgs indexer (metadata + embeddings) for fdnix"
+authors = [{name = "fdnix", email = "noreply@example.com"}]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "boto3",
+    "botocore", 
+    "requests",
+    "duckdb>=0.10.0",
+    "numpy"
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = []
+

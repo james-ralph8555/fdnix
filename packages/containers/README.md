@@ -1,37 +1,27 @@
 # fdnix Data Processing Containers
 
-Status: Updated for DuckDB-in-Lambda-layer architecture.
+Status: Unified container architecture (metadata + embeddings in one).
 
 ## What’s Included
 
-- Metadata Generator
-  - Complete nixpkgs extraction via `nix-env -qaP --json`
-  - Cleans and normalizes fields
-  - Writes structured tables into a DuckDB file
-  - Prepares FTS source and builds FTS index (`fts` extension)
-- Embedding Generator
-  - AWS Bedrock with `cohere.embed-english-v3`
-  - Generates per-package embeddings and writes into DuckDB
-  - Builds a vector similarity index using DuckDB `vss`
-  - Finalizes a single `.duckdb` artifact for query
-- Infrastructure Integration
-  - CDK-aligned env vars and IAM
-  - Step Functions orchestration (metadata → embeddings → publish layer)
-  - Daily automation via EventBridge cron
-  - Right-sized CPU/memory per task
+- Nixpkgs Indexer (`packages/containers/nixpkgs-indexer/`)
+  - Combines nixpkgs metadata extraction and embedding generation
+  - Three modes: `metadata`, `embedding`, or `both` (default)
+  - Outputs a single DuckDB artifact with FTS and VSS indexes
+  - S3 integration for artifact upload/download
+  - Runs as non-root; minimal, pinned dependencies (Python 3.11 + Nix utils)
+
+Deprecated: the separate `metadata-generator` and `embedding-generator` containers have been replaced by the unified processor.
 
 ## How It Runs in AWS
 
-- Orchestration: Step Functions `fdnix-daily-pipeline` runs nightly (02:00 UTC) via EventBridge rule `fdnix-daily-pipeline-trigger`.
-- Sequence: ECS Fargate runs containers sequentially
-  1) Metadata Generator → (produces intermediate .duckdb)
-  2) Embedding Generator → (adds embeddings, builds FTS/VSS) → uploads final `.duckdb` to S3 artifacts
-  3) Publish Layer → create new `fdnix-db-layer` version from artifact
+- Orchestration: Step Functions `fdnix-daily-pipeline` runs nightly (02:00 UTC) via EventBridge.
+- Sequence: ECS Fargate runs a single indexer task (`PROCESSING_MODE=both`) → Publish Layer.
 - Resources (from CDK):
-  - Artifacts bucket: `fdnix-artifacts` (stores `.duckdb`)
-  - Lambda Layer: `fdnix-db-layer` (packages the `.duckdb` under `/opt/fdnix/fdnix.duckdb`)
-  - Logs: `/fdnix/metadata-generator`, `/fdnix/embedding-generator`
-  - ECR repos: `fdnix-metadata-generator`, `fdnix-embedding-generator`
+  - Artifacts bucket: `fdnix-artifacts` (stores `.duckdb`).
+  - Lambda Layer: `fdnix-db-layer` (packages `.duckdb` under `/opt/fdnix/fdnix.duckdb`).
+  - Logs: single log group for the indexer task (e.g., `/fdnix/nixpkgs-indexer`).
+  - ECR: single repository (e.g., `fdnix-nixpkgs-indexer`).
 
 ## Container Environment Variables
 
@@ -39,44 +29,60 @@ Status: Updated for DuckDB-in-Lambda-layer architecture.
   - `AWS_REGION`: AWS region used by clients.
   - `ARTIFACTS_BUCKET`: S3 bucket for `.duckdb` artifacts (e.g., `fdnix-artifacts`).
   - `DUCKDB_KEY`: S3 key for the artifact (e.g., `snapshots/fdnix.duckdb`).
-- Embedding Generator:
+  - `PROCESSING_MODE`: `metadata` | `embedding` | `both` (default: `both`).
+- Embeddings:
   - `BEDROCK_MODEL_ID`: Bedrock model id (e.g., `cohere.embed-english-v3`).
+- Local paths (optional):
+  - `OUTPUT_PATH`: Local DuckDB path (default: `/out/fdnix.duckdb`).
+  - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to `OUTPUT_PATH`).
 
 ## Build (Local)
 
 From repo root:
 
-- Metadata Generator:
-  - `docker build -t fdnix/metadata-generator packages/containers/metadata-generator`
-- Embedding Generator:
-  - `docker build -t fdnix/embedding-generator packages/containers/embedding-generator`
+- Nixpkgs Indexer:
+  - `docker build -t fdnix/nixpkgs-indexer packages/containers/nixpkgs-indexer`
 
 ## Run (Local)
 
-- Metadata Generator (produces local `fdnix.duckdb`):
-  - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 fdnix/metadata-generator`
-- Embedding Generator (consumes and updates `fdnix.duckdb`):
-  - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 fdnix/embedding-generator`
+- Metadata-only (produces local `fdnix.duckdb`):
+  - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
+- Embedding-only (consumes and updates `fdnix.duckdb`):
+  - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
+- Both phases and upload to S3:
+  - `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
 For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final artifact. Requires credentials with access to S3 and Bedrock (InvokeModel).
 
 ## Deployment Notes
 
-- CDK creates ECR repos and task defs with sizing:
-  - Metadata: `cpu=1024`, `memory=3072MiB`
-  - Embedding: `cpu=2048`, `memory=6144MiB`
-- Push images to ECR (example):
+- CDK defines a single ECR repo and task definition sized for the end-to-end job.
+- Push image to ECR (example):
   - `aws ecr get-login-password --region $REGION | docker login --username AWS --password-stdin $ACCOUNT.dkr.ecr.$REGION.amazonaws.com`
-  - `docker tag fdnix/metadata-generator $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/fdnix-metadata-generator:latest`
-  - `docker push $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/fdnix-metadata-generator:latest`
-  - Repeat for `fdnix-embedding-generator`.
-- A final Step Functions task publishes/updates the Lambda Layer from the artifact.
+  - `docker tag fdnix/nixpkgs-indexer $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/fdnix-nixpkgs-indexer:latest`
+  - `docker push $ACCOUNT.dkr.ecr.$REGION.amazonaws.com/fdnix-nixpkgs-indexer:latest`
+- Step Functions then publishes/updates the Lambda Layer from the artifact.
 
-## Outputs and Formats
+## Outputs and Schema
 
 - DuckDB file: `fdnix.duckdb` containing tables:
   - `packages(...)` (normalized metadata)
-  - `packages_fts_source(...)` and FTS index
-  - `embeddings(package_id, vector)` and VSS index
+  - `packages_fts_source(...)` with FTS index
+  - `embeddings(package_id, vector)` with VSS index
 
-See each container README for details and troubleshooting.
+See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troubleshooting.
+
+## Phase Details
+
+- Metadata phase:
+  - Clones `nixpkgs` and extracts package metadata via `nix-env -qaP --json`.
+  - Cleans and normalizes fields (ids, names, attrs, descriptions, maintainers, etc.).
+  - Writes `packages` and `packages_fts_source` tables to DuckDB.
+  - Builds full‑text search index using DuckDB `fts` extension.
+  - Optionally uploads the DuckDB artifact to S3.
+- Embedding phase:
+  - Opens existing DuckDB (downloaded from S3 when `ARTIFACTS_BUCKET`/`DUCKDB_KEY` provided if not present locally).
+  - Generates text embeddings with AWS Bedrock (e.g., `cohere.embed-english-v3`).
+  - Inserts new vectors into `embeddings` and maintains referential integrity with `packages`.
+  - Builds/refreshes vector similarity index using DuckDB `vss` extension.
+  - Optionally uploads the updated DuckDB to S3.

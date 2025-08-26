@@ -20,13 +20,10 @@ export interface FdnixPipelineStackProps extends StackProps {
 
 export class FdnixPipelineStack extends Stack {
   public readonly cluster: ecs.Cluster;
-  public readonly metadataRepository: ecr.Repository;
-  public readonly embeddingRepository: ecr.Repository;
-  public readonly metadataTaskDefinition: ecs.FargateTaskDefinition;
-  public readonly embeddingTaskDefinition: ecs.FargateTaskDefinition;
+  public readonly nixpkgsIndexerRepository: ecr.Repository;
+  public readonly nixpkgsIndexerTaskDefinition: ecs.FargateTaskDefinition;
   public readonly pipelineStateMachine: stepfunctions.StateMachine;
-  public readonly metadataDockerBuild: DockerBuildConstruct;
-  public readonly embeddingDockerBuild: DockerBuildConstruct;
+  public readonly nixpkgsIndexerDockerBuild: DockerBuildConstruct;
 
   constructor(scope: Construct, id: string, props: FdnixPipelineStackProps) {
     super(scope, id, props);
@@ -45,36 +42,22 @@ export class FdnixPipelineStack extends Stack {
       containerInsights: true,
     });
 
-    // ECR Repositories
-    this.metadataRepository = new ecr.Repository(this, 'MetadataRepository', {
+    // ECR Repository for nixpkgs-indexer
+    this.nixpkgsIndexerRepository = new ecr.Repository(this, 'NixpkgsIndexerRepository', {
       lifecycleRules: [{
         maxImageCount: 10,
       }],
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    this.embeddingRepository = new ecr.Repository(this, 'EmbeddingRepository', {
-      lifecycleRules: [{
-        maxImageCount: 10,
-      }],
-      removalPolicy: RemovalPolicy.RETAIN,
-    });
-
-    // Docker build constructs for automated container building
+    // Docker build construct for nixpkgs-indexer
     const containersPath = path.join(__dirname, '../../containers');
     
-    this.metadataDockerBuild = new DockerBuildConstruct(this, 'MetadataDockerBuild', {
-      repository: this.metadataRepository,
-      dockerfilePath: path.join(containersPath, 'metadata-generator/Dockerfile'),
-      contextPath: path.join(containersPath, 'metadata-generator'),
-      imageName: 'metadata-generator',
-    });
-
-    this.embeddingDockerBuild = new DockerBuildConstruct(this, 'EmbeddingDockerBuild', {
-      repository: this.embeddingRepository,
-      dockerfilePath: path.join(containersPath, 'embedding-generator/Dockerfile'),
-      contextPath: path.join(containersPath, 'embedding-generator'),
-      imageName: 'embedding-generator',
+    this.nixpkgsIndexerDockerBuild = new DockerBuildConstruct(this, 'NixpkgsIndexerDockerBuild', {
+      repository: this.nixpkgsIndexerRepository,
+      dockerfilePath: path.join(containersPath, 'nixpkgs-indexer/Dockerfile'),
+      contextPath: path.join(containersPath, 'nixpkgs-indexer'),
+      imageName: 'nixpkgs-indexer',
     });
 
     // IAM roles for Fargate tasks
@@ -133,72 +116,41 @@ export class FdnixPipelineStack extends Stack {
     }));
 
 
-    // CloudWatch Log Groups
-    const metadataLogGroup = new logs.LogGroup(this, 'MetadataLogGroup', {
+    // CloudWatch Log Group
+    const indexerLogGroup = new logs.LogGroup(this, 'NixpkgsIndexerLogGroup', {
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    const embeddingLogGroup = new logs.LogGroup(this, 'EmbeddingLogGroup', {
-      retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.RETAIN,
-    });
-
-    // Fargate Task Definitions
-    this.metadataTaskDefinition = new ecs.FargateTaskDefinition(this, 'MetadataTaskDefinition', {
-      cpu: 1024,
-      memoryLimitMiB: 3072,
-      executionRole: fargateExecutionRole,
-      taskRole: fargateTaskRole,
-    });
-
-    const metadataContainer = this.metadataTaskDefinition.addContainer('MetadataContainer', {
-      image: ecs.ContainerImage.fromDockerImageAsset(this.metadataDockerBuild.dockerImageAsset),
-      logging: ecs.LogDrivers.awsLogs({
-        streamPrefix: 'metadata',
-        logGroup: metadataLogGroup,
-      }),
-      environment: {
-        AWS_REGION: this.region,
-        ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
-        DUCKDB_KEY: 'snapshots/fdnix.duckdb',
-      },
-    });
-
-    this.embeddingTaskDefinition = new ecs.FargateTaskDefinition(this, 'EmbeddingTaskDefinition', {
+    // Fargate Task Definition for nixpkgs-indexer
+    this.nixpkgsIndexerTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsIndexerTaskDefinition', {
       cpu: 2048,
       memoryLimitMiB: 6144,
       executionRole: fargateExecutionRole,
       taskRole: fargateTaskRole,
     });
 
-    const embeddingContainer = this.embeddingTaskDefinition.addContainer('EmbeddingContainer', {
-      image: ecs.ContainerImage.fromDockerImageAsset(this.embeddingDockerBuild.dockerImageAsset),
+    const indexerContainer = this.nixpkgsIndexerTaskDefinition.addContainer('NixpkgsIndexerContainer', {
+      image: ecs.ContainerImage.fromDockerImageAsset(this.nixpkgsIndexerDockerBuild.dockerImageAsset),
       logging: ecs.LogDrivers.awsLogs({
-        streamPrefix: 'embedding',
-        logGroup: embeddingLogGroup,
+        streamPrefix: 'nixpkgs-indexer',
+        logGroup: indexerLogGroup,
       }),
       environment: {
         AWS_REGION: this.region,
+        PROCESSING_MODE: 'both',
         BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
         DUCKDB_KEY: 'snapshots/fdnix.duckdb',
+        OUTPUT_PATH: '/out/fdnix.duckdb',
       },
     });
 
     // Step Functions State Machine for pipeline orchestration
-    const metadataTask = new stepfunctionsTasks.EcsRunTask(this, 'MetadataTask', {
+    const indexerTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsIndexerTask', {
       integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
       cluster: this.cluster,
-      taskDefinition: this.metadataTaskDefinition,
-      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget(),
-      assignPublicIp: true,
-    });
-
-    const embeddingTask = new stepfunctionsTasks.EcsRunTask(this, 'EmbeddingTask', {
-      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
-      cluster: this.cluster,
-      taskDefinition: this.embeddingTaskDefinition,
+      taskDefinition: this.nixpkgsIndexerTaskDefinition,
       launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget(),
       assignPublicIp: true,
     });
@@ -285,16 +237,8 @@ def handler(event, context):
       }),
     });
 
-    // Wait state between tasks
-    const waitForProcessing = new stepfunctions.Wait(this, 'WaitForProcessing', {
-      time: stepfunctions.WaitTime.duration(Duration.minutes(5)),
-    });
-
-    // Define the state machine
-    const definition = metadataTask
-      .next(waitForProcessing)
-      .next(embeddingTask)
-      .next(publishLayerTask);
+    // Define the simplified state machine (single indexer task then publish layer)
+    const definition = indexerTask.next(publishLayerTask);
 
     this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
       definition,
@@ -322,8 +266,7 @@ def handler(event, context):
         'ecs:DescribeTasks',
       ],
       resources: [
-        this.metadataTaskDefinition.taskDefinitionArn,
-        this.embeddingTaskDefinition.taskDefinitionArn,
+        this.nixpkgsIndexerTaskDefinition.taskDefinitionArn,
         `arn:aws:ecs:${this.region}:${this.account}:task/${this.cluster.clusterName}/*`,
       ],
     }));

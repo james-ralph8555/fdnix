@@ -51,7 +51,7 @@ class DuckDBWriter:
             """
             CREATE TABLE IF NOT EXISTS packages (
               package_id TEXT PRIMARY KEY,
-              name TEXT,
+              packageName TEXT,
               version TEXT,
               attributePath TEXT,
               description TEXT,
@@ -128,7 +128,7 @@ class DuckDBWriter:
         conn.executemany(
             """
             INSERT OR REPLACE INTO packages (
-              package_id, name, version, attributePath, description, longDescription,
+              package_id, packageName, version, attributePath, description, longDescription,
               homepage, license, platforms, maintainers, broken, unfree, available,
               insecure, unsupported, mainProgram, position, outputsToInstall,
               lastUpdated, hasEmbedding
@@ -221,4 +221,3 @@ class DuckDBWriter:
         s3 = boto3.client("s3", region_name=self.region)
         s3.upload_file(str(self.output_path), self.s3_bucket, self.s3_key)
         logger.info("Upload complete.")
-
