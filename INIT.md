@@ -2,7 +2,18 @@ INIT: fdnix - A Hybrid Search Engine for nixpkgs
 
 This document outlines the development plan for fdnix, a serverless, JAMstack-based search engine for the Nix packages collection (nixpkgs). The goal is to provide fast, relevant, and filterable search results using a hybrid approach that combines traditional text search with modern vector-based semantic search.
 
-Important update: The storage and query architecture now centers on a single DuckDB database file embedded in a Lambda Layer, queried directly from the search Lambda. We no longer use S3 Vectors, S3 Tables/Athena, or a Rust runtime for the search function.
+Important update: The storage and query architecture now centers on a minified DuckDB database embedded in a Lambda Layer, queried directly from the search Lambda. The pipeline also produces a full database for analytics/debugging stored in S3. We no longer use S3 Vectors, S3 Tables/Athena, or a Rust runtime for the search function.
+
+Implementation Summary (Minified Database)
+
+- MinifiedDuckDBWriter: Constructs a stripped-down DuckDB with only essential columns for search and presentation. License and maintainer data are flattened to strings. Non-essential metadata fields (e.g., positions, outputsToInstall, lastUpdated, content_hash) are omitted. An FTS index is built on the minified text.
+- Indexing Workflow: The pipeline generates the full database first (`fdnix-data.duckdb`) and uploads it; then creates the minified database (`fdnix.duckdb`) and uploads it; embeddings are generated against the minified DB; the Lambda layer is published from the minified artifact.
+- Environment Variables: `DUCKDB_DATA_KEY` (full DB key), `DUCKDB_MINIFIED_KEY` (minified DB key used by the Lambda layer).
+- Infrastructure: CDK descriptions and the layer publisher reference the minified database; the artifacts bucket stores both DBs at different keys.
+
+Legacy Support Removal
+
+- Removed backward compatibility for `DUCKDB_KEY`. Validation and publishing now require `DUCKDB_DATA_KEY`/`DUCKDB_MINIFIED_KEY` explicitly. `DUCKDB_MINIFIED_KEY` is required for layer publishing.
 
 This plan is designed to be executed by an autonomous coding agent. Each section details a phase of the project, broken down into specific, actionable tasks.
 1. Core Principles
@@ -251,3 +262,11 @@ Phase 4: Frontend Application
     Migrate builds to Nix:
 
         Adopt Nix-based builds and dev environments across packages to improve reproducibility and contributor onboarding. Replace Docker-centric local builds with Nix (e.g., dev shells and build scripts), keeping container images only where needed for deployment targets.
+
+    Metadata fidelity (TODO):
+
+        Minified DB currently simplifies `license` and `maintainers` to avoid DuckDB `list_transform`/lambda binding errors. Bring back full metadata extraction (arrays/objects → concise strings) once a stable approach is validated, preferably by pre-flattening during metadata ingestion to keep SQL simple and the Lambda layer robust.
+
+    DuckDB layer build optimizations (TODO):
+
+        Optimize the DuckDB shared library used by the Lambda runtime: enable Link Time Optimization (LTO), evaluate Profile-Guided Optimization (PGO) with representative workloads, strip symbols, and remove unused extensions (e.g., `parquet` if not needed in Lambda). Update the Dockerfile/CMake flags in `packages/cdk/lib/duckdb-build/` to minimize cold start, memory, and layer size while preserving FTS/VSS functionality.

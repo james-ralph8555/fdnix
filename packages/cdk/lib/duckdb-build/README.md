@@ -37,3 +37,12 @@ This layer works in conjunction with the database file layer:
 - Layer 2: Database file (`fdnix-db-layer` at `/opt/fdnix/fdnix.duckdb`)
 
 The C++ search Lambda function links against the library from Layer 1 and opens the database from Layer 2.
+
+## Build Optimizations (TODO)
+
+- LTO: Enable Link Time Optimization to reduce binary size and improve performance.
+- PGO: Evaluate Profile-Guided Optimization using representative query workloads.
+- Strip symbols: Ensure `libduckdb.so` is stripped in the final layer stage.
+- Prune extensions: Exclude unused extensions (e.g., `parquet`, possibly `httpfs`) for the Lambda runtime; keep `fts`, `vss`, and `json`.
+- Compiler flags: Revisit `-O` level (`-O3` vs `-Os`) and link flags for smaller, faster cold starts without sacrificing query latency.
+- CI/CD: Add a build matrix or target that produces both a "debug" and an "optimized" layer artifact for comparison.

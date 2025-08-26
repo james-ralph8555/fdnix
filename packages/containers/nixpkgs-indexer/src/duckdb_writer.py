@@ -35,7 +35,6 @@ class DuckDBWriter:
         with duckdb.connect(str(self.output_path)) as conn:
             self._init_schema(conn)
             self._insert_packages(conn, packages)
-            self._build_fts(conn)
             conn.execute("CHECKPOINT")
 
         logger.info("DuckDB artifact written: %s", self.output_path)

@@ -12,11 +12,12 @@ Current status: A minimal Node.js handler may be deployed as a temporary stub to
 
 ## Runtime Data Model
 
-- Lambda Layer: `fdnix-db-layer` provides `/opt/fdnix/fdnix.duckdb`.
-- The `fdnix.duckdb` file contains:
-  - `packages(...)` with full metadata
+- Lambda Layer: `fdnix-db-layer` provides `/opt/fdnix/fdnix.duckdb` (minified database).
+- Minified database contents (essential for search):
+  - `packages(...)` with essential columns only (name, version, attr path, description, homepage, simplified license/maintainers, flags)
   - `packages_fts_source(...)` and FTS index (BM25)
   - `embeddings(package_id, vector)` with VSS index (e.g., HNSW/IVF)
+- Full database (`fdnix-data.duckdb`) is produced by the pipeline and stored in S3 for analytics/debugging; it is not deployed to Lambda.
 
 ## Request Handling
 

@@ -44,6 +44,8 @@ COPY build-config.cmake .
 FROM builder AS duckdb-build
 
 # Configure CMake build with static extensions and cross-compilation
+## TODO(optimizations): Consider enabling LTO/PGO and tuning -O flags for size/speed.
+## Also consider pruning unused extensions at configure-time to reduce lib size.
 RUN cmake -B build \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
@@ -58,12 +60,14 @@ RUN cmake -B build \
     .
 
 # Build with parallel jobs
+## TODO(optimizations): Pass appropriate flags to enable Thin/Full LTO and PGO if adopted.
 RUN ninja -C build -j$(nproc)
 
 # Stage 3: Package for Lambda Layer
 FROM scratch AS layer
 
 # Copy the built shared library
+## TODO(optimizations): Ensure final binary is stripped to minimize layer size.
 COPY --from=duckdb-build /build/duckdb/build/src/libduckdb.so /opt/lib/libduckdb.so
 
 # Copy any additional required libraries (if needed)

@@ -82,13 +82,15 @@ class MinifiedDuckDBWriter:
               description TEXT,
               homepage TEXT,
               license TEXT,           -- Simplified license string
-              maintainers TEXT,       -- Simplified maintainer string  
+              maintainers TEXT,       -- Simplified maintainer string
               broken BOOLEAN,
               unfree BOOLEAN,
               available BOOLEAN,
               insecure BOOLEAN,
               unsupported BOOLEAN,
-              mainProgram TEXT
+              mainProgram TEXT,
+              hasEmbedding BOOLEAN,
+              content_hash HUGEINT
             );
             """
         )
@@ -131,7 +133,8 @@ class MinifiedDuckDBWriter:
             """
             INSERT INTO packages (
                 package_id, packageName, version, attributePath, description, homepage,
-                license, maintainers, broken, unfree, available, insecure, unsupported, mainProgram
+                license, maintainers, broken, unfree, available, insecure, unsupported, mainProgram,
+                hasEmbedding, content_hash
             )
             SELECT 
                 package_id,
@@ -140,6 +143,10 @@ class MinifiedDuckDBWriter:
                 attributePath,
                 description,
                 homepage,
+                -- TODO(follow-up): Restore richer license extraction for minified DB
+                --   We currently avoid DuckDB list_transform/lambda usage to prevent binding
+                --   errors observed in some environments. Bring back full license fidelity
+                --   (arrays, objects, strings) once stable, ideally pre-flattened upstream.
                 CASE 
                     WHEN license IS NULL THEN NULL
                     ELSE COALESCE(
@@ -147,44 +154,25 @@ class MinifiedDuckDBWriter:
                         json_extract_string(license, '$.shortName'),
                         json_extract_string(license, '$.fullName'),
                         json_extract_string(license, '$.value'),
-                        CASE 
-                            WHEN json_extract_string(license, '$.type') = 'array' THEN
-                                array_to_string(
-                                    list_transform(
-                                        json_extract(license, '$.licenses'),
-                                        x -> COALESCE(
-                                            json_extract_string(x, '$.spdxId'),
-                                            json_extract_string(x, '$.shortName'),
-                                            json_extract_string(x, '$.fullName')
-                                        )
-                                    ),
-                                    ', '
-                                )
-                            ELSE substr(license, 1, 100)
-                        END
+                        substr(license, 1, 100)
                     )
                 END as license,
+                -- TODO(follow-up): Restore richer maintainers extraction for minified DB
+                --   For now we store a truncated JSON string to avoid lambda/list
+                --   transforms in SQL. Consider precomputing a concise, human-readable
+                --   maintainer string during metadata ingestion.
                 CASE 
                     WHEN maintainers IS NULL THEN NULL
-                    ELSE array_to_string(
-                        list_transform(
-                            json_extract(maintainers, '$'),
-                            x -> COALESCE(
-                                json_extract_string(x, '$.name'),
-                                json_extract_string(x, '$.email'),
-                                json_extract_string(x, '$.github'),
-                                CAST(x AS VARCHAR)
-                            )
-                        ),
-                        ', '
-                    )
+                    ELSE substr(maintainers, 1, 200)
                 END as maintainers,
                 COALESCE(broken, FALSE) as broken,
                 COALESCE(unfree, FALSE) as unfree,
                 COALESCE(available, TRUE) as available,
                 COALESCE(insecure, FALSE) as insecure,
                 COALESCE(unsupported, FALSE) as unsupported,
-                mainProgram
+                mainProgram,
+                COALESCE(hasEmbedding, FALSE) as hasEmbedding,
+                content_hash
             FROM main_db.packages;
             """
         )

@@ -1,13 +1,14 @@
 # fdnix Data Processing Containers
 
-Status: Unified container architecture (metadata + embeddings in one).
+Status: Unified container architecture (metadata + embeddings + minified publishing).
 
 ## What’s Included
 
 - Nixpkgs Indexer (`packages/containers/nixpkgs-indexer/`)
   - Combines nixpkgs metadata extraction and embedding generation
+  - Derives a minified DuckDB from the full database for Lambda layer use
   - Three modes: `metadata`, `embedding`, or `both` (default)
-  - Outputs a single DuckDB artifact with FTS and VSS indexes
+  - Outputs two artifacts: full `fdnix-data.duckdb` and minified `fdnix.duckdb` (with FTS; VSS built during embeddings)
   - S3 integration for artifact upload/download
   - Runs as non-root; dependencies installed via Nix on `nixos/nix:2.18.1` (Python 3.11, DuckDB, boto3, httpx, etc.)
 
@@ -28,7 +29,8 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
 - Common:
   - `AWS_REGION`: AWS region used by clients.
   - `ARTIFACTS_BUCKET`: S3 bucket for `.duckdb` artifacts (e.g., `fdnix-artifacts`).
-  - `DUCKDB_KEY`: S3 key for the artifact (e.g., `snapshots/fdnix.duckdb`).
+  - `DUCKDB_DATA_KEY`: S3 key for the full database (e.g., `snapshots/fdnix-data.duckdb`).
+  - `DUCKDB_MINIFIED_KEY`: S3 key for the minified database used by the Lambda layer (e.g., `snapshots/fdnix.duckdb`).
   - `PROCESSING_MODE`: `metadata` | `embedding` | `both` (default: `both`).
   - FTS (optional tuning): `FTS_STOPWORDS` (default `english`), `FTS_STEMMER` (default `english`), `FTS_INDEX_NAME` (default `packages_fts_idx`).
 - Embeddings:
@@ -45,8 +47,9 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
     - `GEMINI_INTER_BATCH_DELAY` seconds (default: `0.02`)
     - The embedding client uses an asyncio semaphore and a sliding 60s window to respect RPM/TPM, with exponential backoff + jitter on throttling.
 - Local paths (optional):
-  - `OUTPUT_PATH`: Local DuckDB path (default: `/out/fdnix.duckdb`).
-  - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to `OUTPUT_PATH`).
+  - `OUTPUT_PATH`: Local path for the full database (default: `/out/fdnix-data.duckdb`).
+  - `OUTPUT_MINIFIED_PATH`: Local path for the minified database (default: `/out/fdnix.duckdb`).
+  - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to the minified DB when processing `both`).
 
 ## Build (Local)
 
@@ -57,14 +60,14 @@ From repo root:
 
 ## Run (Local)
 
-- Metadata-only (produces local `fdnix.duckdb`):
+- Metadata-only (produces local `fdnix-data.duckdb` and `fdnix.duckdb`):
   - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
-- Embedding-only (consumes and updates `fdnix.duckdb`):
+- Embedding-only (consumes and updates provided DB path):
   - `docker run --rm --env-file .env -v "$PWD":/out -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
-- Both phases and upload to S3:
-  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+- Both phases and upload to S3 (stores both DBs under different keys):
+  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
-For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final artifact. Requires credentials with access to S3 and a Google Gemini API key. Embedding mode requires `GEMINI_API_KEY`.
+For AWS runs, provide `ARTIFACTS_BUCKET` and keys for one or both artifacts (`DUCKDB_DATA_KEY` and/or `DUCKDB_MINIFIED_KEY`). Requires credentials with access to S3 and a Google Gemini API key. Embedding mode requires `GEMINI_API_KEY`.
 
 ## Deployment Notes
 
@@ -77,9 +80,11 @@ For AWS runs, provide `ARTIFACTS_BUCKET` and `DUCKDB_KEY` to upload the final ar
 
 ## Outputs and Schema
 
-- DuckDB file: `fdnix.duckdb` containing tables:
-  - `packages(...)` (normalized metadata)
-  - `packages_fts_source(...)` with FTS index
+- Full database: `fdnix-data.duckdb` (complete metadata, embeddings if generated)
+- Minified database: `fdnix.duckdb` (only essential columns + FTS; simplified license/maintainers; used by Lambda layer)
+- Core tables present in both, when applicable:
+  - `packages(...)` (normalized metadata; minified drops non-essential columns like positions, outputsToInstall, lastUpdated, content_hash)
+  - `packages_fts_source(...)` with FTS index (built on minified data)
   - `embeddings(package_id, vector)` with VSS index
 
 See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troubleshooting.
@@ -93,8 +98,19 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
   - Builds full‑text search index using DuckDB `fts` extension.
   - Optionally uploads the DuckDB artifact to S3.
 - Embedding phase:
-  - Opens existing DuckDB (downloaded from S3 when `ARTIFACTS_BUCKET`/`DUCKDB_KEY` provided if not present locally).
+  - Opens existing DuckDB (downloads from S3 when `ARTIFACTS_BUCKET` plus the relevant key is provided if not present locally).
   - Generates text embeddings with Google Gemini API (e.g., `gemini-embedding-001`) with 256 dimensions.
   - Inserts new vectors into `embeddings` and maintains referential integrity with `packages`.
   - Builds/refreshes vector similarity index using DuckDB `vss` extension.
   - Optionally uploads the updated DuckDB to S3.
+
+## Legacy Support Removal
+
+- Backward compatibility for `DUCKDB_KEY` has been removed across the indexer and docs. Use `DUCKDB_DATA_KEY` (full DB) and `DUCKDB_MINIFIED_KEY` (minified DB, used for layer publishing). `DUCKDB_MINIFIED_KEY` is explicitly required for publishing the layer.
+
+## Benefits of Minified Layer
+
+- Reduced Lambda layer size and faster cold starts
+- Optimized query performance over a smaller dataset
+- Lower storage and transfer costs
+- Full database preserved in S3 for debugging and analytics

@@ -7,7 +7,7 @@ This package contains the AWS CDK infrastructure definitions for the fdnix hybri
 The infrastructure consists of four main stacks, a certificate stack, and a set of constructs for building Docker images and Lambda layers.
 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
-2.  **Database Stack** - S3 artifact storage + Lambda Layers for the DuckDB file and the DuckDB shared library.
+2.  **Database Stack** - S3 artifact storage + Lambda Layers for the DuckDB file (minified) and the DuckDB shared library.
 3.  **Pipeline Stack** - Data processing pipeline that builds the DuckDB file and publishes the Lambda layer.
 4.  **Search API Stack** - A C++ Lambda-based search API using the DuckDB layers and Google Gemini for embeddings.
 5.  **Frontend Stack** - Static site hosting with CloudFront.
@@ -21,8 +21,8 @@ graph TD
     end
 
     subgraph "FdnixDatabaseStack"
-        s3_artifacts[(S3 Artifacts)]
-        db_layer[[Lambda Layer: DuckDB File]]
+    s3_artifacts[(S3 Artifacts)]
+        db_layer[[Lambda Layer: DuckDB File (minified)]]
         db_lib_layer[[Lambda Layer: DuckDB Library]]
     end
 
@@ -80,8 +80,8 @@ graph TD
         db_layer[[Lambda Layer: DuckDB File]]
     end
 
-    indexer_task -- reads/writes --> s3_artifacts
-    indexer_task -- publishes to --> db_layer
+    indexer_task -- reads/writes (full + minified) --> s3_artifacts
+    indexer_task -- publishes minified to --> db_layer
 ```
 
 ## Search API Diagram
@@ -234,8 +234,8 @@ npm run synth
 
 **Resources:**
 
--   `fdnix-artifacts` - S3 bucket for pipeline artifacts (final `.duckdb` file).
--   `fdnix-db-layer` - Lambda Layer that packages the `.duckdb` file under `/opt/fdnix/fdnix.duckdb`.
+-   `fdnix-artifacts` - S3 bucket for pipeline artifacts (stores both main and minified `.duckdb` files).
+-   `fdnix-db-layer` - Lambda Layer that packages the minified `.duckdb` file under `/opt/fdnix/fdnix.duckdb`.
 -   `fdnix-db-lib-layer` - Lambda Layer that packages the DuckDB shared library and extensions.
 -   `fdnix-database-access-role` - IAM role for artifact access and layer publishing.
 
@@ -243,7 +243,7 @@ npm run synth
 
 -   S3 versioning with lifecycle management (30-day retention).
 -   Encryption at rest with S3-managed keys.
--   The `databaseLayer` is initially empty and is populated by the pipeline.
+-   The `databaseLayer` is populated by the pipeline with the minified database.
 -   The `duckdbLibraryLayer` is built from the `lib/duckdb-build` directory using Docker and CMake.
 
 ### Pipeline Stack (`FdnixPipelineStack`)
@@ -257,7 +257,7 @@ npm run synth
 
 **Key Features:**
 
--   Single-step pipeline: one ECS task runs metadata + embeddings and publishes the Lambda layer.
+-   Single-step pipeline: one ECS task runs metadata + embeddings, produces the full DB, derives a minified DB, and publishes the minified DB as a Lambda layer.
 -   Automated daily execution (2:00 AM UTC).
 -   Unified container for the entire indexing flow.
 -   Custom `DockerBuildConstruct` for building the container image.
@@ -427,3 +427,7 @@ For issues or questions:
 -   Review CloudWatch logs.
 -   Verify IAM permissions.
 -   Ensure all prerequisites are met.
+Pipeline database keys (used by the indexer task):
+
+-   `DUCKDB_DATA_KEY` - S3 key for the full DuckDB (e.g., `snapshots/fdnix-data.duckdb`).
+-   `DUCKDB_MINIFIED_KEY` - S3 key for the minified DuckDB used by the Lambda layer (e.g., `snapshots/fdnix.duckdb`).

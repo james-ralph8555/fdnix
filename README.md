@@ -26,6 +26,20 @@ Fast, relevant, filterable search for the Nix packages collection. fdnix blends 
 
 Note: If you’re looking for the implementation details and deployment plan, see `INIT.md`.
 
+## Implementation Summary
+
+- Complete Minified DuckDB: Lambda ships a minified DuckDB containing only essential columns for search (name, version, attr path, description, homepage, simplified license/maintainers, flags). The full metadata database is still produced for analytics/debugging and stored in S3.
+- Updated Indexing Workflow: The container builds the full database first (`fdnix-data.duckdb`), then derives a minified database (`fdnix.duckdb`) from it, builds FTS, and publishes the minified artifact to the Lambda layer.
+- Env Configuration: `DUCKDB_DATA_KEY` stores the full database; `DUCKDB_MINIFIED_KEY` stores the minified database used by the layer.
+- Infra Alignment: CDK descriptions and the layer publisher reference the minified database; the artifacts bucket stores both DBs using different keys.
+
+Benefits: smaller Lambda layer, faster cold starts, improved query latency, lower storage/transfer costs, and preserved inspectability via the full database in S3.
+
+Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed. Use only:
+- `DUCKDB_DATA_KEY`: S3 key for the full database upload
+- `DUCKDB_MINIFIED_KEY`: S3 key for the minified database and layer publishing
+- `ARTIFACTS_BUCKET` and `AWS_REGION` are required when uploading/publishing
+
 ## Search Tips
 
 - Quotes for specifics: Use quotes to prefer tight keyword matches (e.g., `"nix fmt"`).
@@ -35,7 +49,7 @@ Note: If you’re looking for the implementation details and deployment plan, se
 ## How It Works (High‑Level)
 
 - Frontend provides a fast, static UI.
-- A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only dataset bundled with the function.
+- A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only minified DuckDB bundled in a Lambda layer; the full database is retained in S3 for diagnostics and analytics.
 - Embeddings are generated via Google Gemini (REST API) using 256‑dimensional vectors by default.
 - A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
@@ -71,7 +85,7 @@ npm run synth
 ```
 
 ### Environment Variables (Gemini)
-- `GOOGLE_GEMINI_API_KEY`: API key used by the indexer and the search Lambda to call the Gemini Embeddings API.
+- `GEMINI_API_KEY`: API key used by the indexer and the search Lambda to call the Gemini Embeddings API.
 - `GEMINI_MODEL_ID`: Embedding model id (default: `gemini-embedding-001`).
 - `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
 - `GEMINI_TASK_TYPE`: Embedding task type (default: `SEMANTIC_SIMILARITY`).

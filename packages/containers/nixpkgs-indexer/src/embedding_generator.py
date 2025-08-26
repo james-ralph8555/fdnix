@@ -28,7 +28,8 @@ class EmbeddingGenerator:
         # DuckDB + artifact settings
         self.duckdb_path = os.environ.get('DUCKDB_PATH', '/out/fdnix.duckdb').strip()
         self.artifacts_bucket = os.environ.get('ARTIFACTS_BUCKET', '').strip()
-        self.duckdb_key = os.environ.get('DUCKDB_KEY', '').strip()
+        # Embedding phase reads/writes the minified DB artifact in S3
+        self.duckdb_key = os.environ.get('DUCKDB_MINIFIED_KEY', '').strip()
         self.embedding_dim: int | None = None
         # VSS index parameters (override via env)
         self.vss_hnsw_m = int(os.environ.get('VSS_HNSW_M', '16'))
@@ -516,7 +517,7 @@ class EmbeddingGenerator:
         Returns True if previous artifact was downloaded, False otherwise.
         """
         if not self.artifacts_bucket or not self.duckdb_key:
-            logger.info("Artifact download not configured (ARTIFACTS_BUCKET/DUCKDB_KEY missing). Skipping download.")
+            logger.info("Artifact download not configured (ARTIFACTS_BUCKET/DUCKDB_MINIFIED_KEY missing). Skipping download.")
             return False
             
         # Use a temporary path for the previous artifact
@@ -525,14 +526,14 @@ class EmbeddingGenerator:
         try:
             import boto3
             s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
-            logger.info(f"Attempting to download previous artifact from s3://{self.artifacts_bucket}/{self.duckdb_key}")
+            logger.info(f"Attempting to download previous minified artifact from s3://{self.artifacts_bucket}/{self.duckdb_key}")
             
             # Check if object exists first
             try:
                 s3.head_object(Bucket=self.artifacts_bucket, Key=self.duckdb_key)
             except ClientError as e:
                 if e.response['Error']['Code'] == '404':
-                    logger.info(f"No previous artifact exists at s3://{self.artifacts_bucket}/{self.duckdb_key}. Starting fresh build.")
+                    logger.info(f"No previous minified artifact exists at s3://{self.artifacts_bucket}/{self.duckdb_key}. Starting fresh build.")
                     return False
                 else:
                     logger.info(f"Could not check for previous artifact: {e}. Starting fresh build.")
@@ -543,10 +544,10 @@ class EmbeddingGenerator:
             
             # Download the file
             s3.download_file(self.artifacts_bucket, self.duckdb_key, prev_artifact_path)
-            logger.info(f"Successfully downloaded previous artifact to {prev_artifact_path}")
+            logger.info(f"Successfully downloaded previous minified artifact to {prev_artifact_path}")
             return True
         except Exception as e:
-            logger.info(f"Failed to download previous artifact: {e}. Starting fresh build.")
+            logger.info(f"Failed to download previous minified artifact: {e}. Starting fresh build.")
             return False
 
     def _load_previous_embeddings_and_hashes(self, prev_artifact_path: str) -> None:
@@ -605,9 +606,9 @@ class EmbeddingGenerator:
 
     def _maybe_upload_artifact(self) -> None:
         if not self.artifacts_bucket or not self.duckdb_key:
-            logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/DUCKDB_KEY missing). Skipping upload.")
+            logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/DUCKDB_MINIFIED_KEY missing). Skipping upload.")
             return
         import boto3
         s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
-        logger.info(f"Uploading {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
+        logger.info(f"Uploading minified DB {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
         s3.upload_file(self.duckdb_path, self.artifacts_bucket, self.duckdb_key)

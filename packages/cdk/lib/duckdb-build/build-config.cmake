@@ -6,6 +6,8 @@ duckdb_extension_load(fts)        # Full Text Search (BM25, etc.)
 duckdb_extension_load(vss)        # Vector Similarity Search (HNSW, IVF)
 duckdb_extension_load(json)       # JSON parsing and manipulation
 duckdb_extension_load(parquet)    # Parquet file format support (if needed for data pipeline)
+# TODO(optimizations): If parquet is not needed at Lambda runtime, drop it to
+# reduce lib size. Keep only fts/vss/json for read-only query of the packaged DB.
 
 # Additional useful extensions that might be needed
 duckdb_extension_load(httpfs)     # HTTP file system (for S3 if needed)

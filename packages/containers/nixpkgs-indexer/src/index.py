@@ -34,30 +34,23 @@ def validate_env() -> None:
     has_minified_key = bool(os.environ.get("DUCKDB_MINIFIED_KEY"))
     has_region = bool(os.environ.get("AWS_REGION"))
     
-    # Support legacy DUCKDB_KEY for backward compatibility
-    has_legacy_key = bool(os.environ.get("DUCKDB_KEY"))
-    
-    if has_bucket or has_data_key or has_minified_key or has_legacy_key or has_region:
+    if has_bucket or has_data_key or has_minified_key or has_region:
         required_basic = [k for k in ("ARTIFACTS_BUCKET", "AWS_REGION") if not os.environ.get(k)]
         if required_basic:
             raise RuntimeError(
                 "S3 upload requested but missing envs: " + ", ".join(required_basic)
             )
         
-        # Need at least one database key
-        if not (has_data_key or has_minified_key or has_legacy_key):
-            raise RuntimeError(
-                "S3 upload requested but missing database keys: need DUCKDB_DATA_KEY or DUCKDB_MINIFIED_KEY"
-            )
+        # Set default keys if not provided but S3 upload is configured
+        if not has_data_key:
+            os.environ["DUCKDB_DATA_KEY"] = "fdnix-data.duckdb"
+        if not has_minified_key:
+            os.environ["DUCKDB_MINIFIED_KEY"] = "fdnix.duckdb"
 
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):
-        required_keys = ["LAYER_ARN", "ARTIFACTS_BUCKET", "AWS_REGION"]
+        required_keys = ["LAYER_ARN", "ARTIFACTS_BUCKET", "AWS_REGION", "DUCKDB_MINIFIED_KEY"]
         missing = [k for k in required_keys if not os.environ.get(k)]
-        
-        # Need minified key for layer publishing, fallback to legacy
-        if not os.environ.get("DUCKDB_MINIFIED_KEY") and not os.environ.get("DUCKDB_KEY"):
-            missing.append("DUCKDB_MINIFIED_KEY")
             
         if missing:
             raise RuntimeError(
@@ -103,7 +96,7 @@ async def main() -> int:
             minified_writer = MinifiedDuckDBWriter(
                 output_path=minified_db_path,
                 s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
-                s3_key=os.environ.get("DUCKDB_MINIFIED_KEY") or os.environ.get("DUCKDB_KEY"),
+                s3_key=os.environ.get("DUCKDB_MINIFIED_KEY"),
                 region=os.environ.get("AWS_REGION"),
             )
             
@@ -142,7 +135,7 @@ async def main() -> int:
                 minified_writer = MinifiedDuckDBWriter(
                     output_path=minified_db_path,
                     s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
-                    s3_key=os.environ.get("DUCKDB_MINIFIED_KEY") or os.environ.get("DUCKDB_KEY"),
+                    s3_key=os.environ.get("DUCKDB_MINIFIED_KEY"),
                     region=os.environ.get("AWS_REGION"),
                 )
                 minified_writer._upload_to_s3()
@@ -154,10 +147,10 @@ async def main() -> int:
             layer_arn = os.environ.get("LAYER_ARN", "").strip()
             bucket = os.environ.get("ARTIFACTS_BUCKET", "").strip()
             
-            # Use minified key for layer publishing, fallback to legacy key
-            key = os.environ.get("DUCKDB_MINIFIED_KEY") or os.environ.get("DUCKDB_KEY", "")
+            # Use minified key for layer publishing
+            key = os.environ.get("DUCKDB_MINIFIED_KEY", "")
             if not key:
-                raise RuntimeError("No database key found for layer publishing")
+                raise RuntimeError("DUCKDB_MINIFIED_KEY required for layer publishing")
 
             publisher = LayerPublisher(region=os.environ.get("AWS_REGION"))
             publisher.publish_from_s3(bucket=bucket, key=key, layer_arn=layer_arn)
