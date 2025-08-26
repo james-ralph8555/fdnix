@@ -17,6 +17,10 @@
     ]
   },
   "context": {
+    "@aws-cdk/core:newStyleStackSynthesis": true,
+    "@aws-cdk/aws-iam:standardizedServicePrincipals": true,
+    "@aws-cdk/aws-ec2:restrictDefaultSecurityGroup": true,
+    
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target": "aws-cdk-lib",
@@ -25,16 +29,17 @@
     "@aws-cdk/aws-cloudfront:defaultSecurityPolicyTLSv1.2_2021": true,
     "@aws-cdk/core:stackRelativeExports": true,
     "@aws-cdk/aws-rds:lowercaseDbIdentifier": true,
-    "@aws-cdk/aws-efs:defaultEncryptionAtRest": true,
+    
     "@aws-cdk/aws-s3:createDefaultLoggingPolicy": true,
     "@aws-cdk/aws-sns-subscriptions:restrictSqsDescryption": true,
     "@aws-cdk/aws-apigateway:disableCloudWatchRole": true,
     "@aws-cdk/core:enablePartitionLiterals": true,
-    "aws-cdk:enableDiffNoFail": true,
+    
     "@aws-cdk/aws-ecr:deleteRepositoryPolicy": true,
     "@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy": true,
     "@aws-cdk/aws-s3-deployment:createDefaultLoggingPolicy": true,
     "@aws-cdk/aws-iam:minimizePolicies": true,
-    "@aws-cdk/core:validateSnapshotRemovalPolicy": true
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "@aws-cdk/aws-ec2:uniqueImdsv2TemplateName": true
   }
 }

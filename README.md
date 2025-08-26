@@ -34,12 +34,9 @@ Note: If you’re looking for the implementation details and deployment plan, se
 
 ## How It Works (High‑Level)
 
-- Frontend (SolidJS SSG) provides a fast, static UI.
-- API (AWS Lambda via API Gateway) is implemented in Rust (custom runtime) and performs a hybrid search:
-  - Vector search: Embeds your query and searches a Faiss index stored in S3 bucket `fdnix-vec`.
-  - Keyword search: Queries an OpenSearch Serverless index for textual relevance.
-  - Fusion + hydrate: Combines and ranks results, then fetches full metadata from DynamoDB.
-- A daily data pipeline refreshes metadata, embeddings, and indexes.
+- Frontend provides a fast, static UI.
+- A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only dataset bundled with the function.
+- A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
 ## Project Status
 
@@ -71,35 +68,23 @@ npm run diff
 npm run synth
 ```
 
-### Build the Rust Lambda
-```bash
-# Build the custom runtime bootstrap (skips if cargo not installed)
-pnpm --filter search-lambda build
-```
-
-### Rust Lambda Best Practices
-- Build on Amazon Linux 2023: Compile the `bootstrap` in an AL2023 environment to match Lambda’s glibc.
-  - Example using Docker (bind-mount repo):
-    - `docker run --rm -it -v "$PWD":/workspace -w /workspace/packages/search-lambda public.ecr.aws/amazonlinux/amazonlinux:2023 bash -lc "dnf -y install gcc gcc-c++ unzip tar gzip make && curl https://sh.rustup.rs -sSf | sh -s -- -y && source $HOME/.cargo/env && ./build.sh"`
-- Or build static with MUSL: Target `x86_64-unknown-linux-musl` for a fully static binary. Ensure all deps support `musl` (prefer `rustls` over OpenSSL to avoid system libs).
-- Strip and optimize: Keep binary small for faster cold starts. Use release mode, LTO, and strip symbols.
-  - Example: `strip packages/search-lambda/dist/bootstrap` (if not already stripped).
-- Verify artifact: Ensure `packages/search-lambda/dist/bootstrap` exists and is executable before deploying.
+### Backend Details
+- For backend and infrastructure details, see:
+  - `packages/search-lambda/README.md`
+  - `packages/cdk/README.md`
 
 ### Project Structure
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)
   - `containers/` (`metadata-generator/`, `embedding-generator/`)
-  - `search-lambda/` (Rust Lambda — custom runtime)
+  - `search-lambda/` (Lambda backend)
   - `frontend/` (SolidJS)
 - All CDK commands can be run from the repository root
 - Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
 
-### Backend Implementation Note
 
-- The search API Lambda will be written in Rust and deployed using the AWS Lambda custom runtime (`provided.al2023`). During early scaffolding, a minimal Node.js handler exists only as a stub to keep the CDK wiring and API Gateway in place. The stub will be replaced by a compiled Rust binary packaged as `bootstrap`.
 
 ## Custom Domain (Cloudflare)
 
@@ -108,3 +93,7 @@ If you want to track progress or help prioritize features, check `INIT.md` and o
 - Settings: In Cloudflare, set SSL/TLS mode to “Full (strict)”.
 
 See `packages/cdk/README.md` for step‑by‑step DNS and validation instructions.
+
+## Roadmap
+
+- Migrate builds from Docker to Nix for reproducible, lightweight development and CI.

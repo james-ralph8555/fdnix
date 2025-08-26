@@ -21,15 +21,8 @@ export class FdnixSearchApiStack extends Stack {
 
     const { databaseStack } = props;
 
-    // CloudWatch Log Group for Lambda
-    const logGroup = new logs.LogGroup(this, 'SearchLambdaLogGroup', {
-      logGroupName: '/aws/lambda/fdnix-search-api',
-      retention: logs.RetentionDays.ONE_MONTH,
-    });
-
     // IAM role for Lambda execution
     this.lambdaExecutionRole = new iam.Role(this, 'LambdaExecutionRole', {
-      roleName: 'fdnix-lambda-execution-role',
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
@@ -52,15 +45,14 @@ export class FdnixSearchApiStack extends Stack {
     // Implemented in C++ using the custom runtime (PROVIDED_AL2023).
     // The build places a `bootstrap` binary in `packages/search-lambda/dist`.
     this.searchFunction = new lambda.Function(this, 'SearchFunction', {
-      functionName: 'fdnix-search-api',
       runtime: lambda.Runtime.PROVIDED_AL2023,
+      architecture: lambda.Architecture.ARM_64,
       handler: 'bootstrap',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/dist')),
       timeout: Duration.seconds(30),
       memorySize: 1024,
       role: this.lambdaExecutionRole,
       layers: [databaseStack.databaseLayer, databaseStack.duckdbLibraryLayer],
-      logGroup,
       environment: {
         DUCKDB_PATH: '/opt/fdnix/fdnix.duckdb',
         BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
@@ -68,9 +60,14 @@ export class FdnixSearchApiStack extends Stack {
       },
     });
 
+    // CloudWatch Log Group for Lambda with retention aligned to function name
+    new logs.LogGroup(this, 'SearchLambdaLogGroup', {
+      logGroupName: `/aws/lambda/${this.searchFunction.functionName}`,
+      retention: logs.RetentionDays.ONE_MONTH,
+    });
+
     // API Gateway
     this.api = new apigateway.RestApi(this, 'SearchApiGateway', {
-      restApiName: 'fdnix-search-api-gateway',
       description: 'API Gateway for fdnix hybrid search engine',
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
@@ -144,7 +141,6 @@ export class FdnixSearchApiStack extends Stack {
 
     // Usage plan for rate limiting
     const usagePlan = this.api.addUsagePlan('SearchApiUsagePlan', {
-      name: 'fdnix-search-usage-plan',
       description: 'Usage plan for fdnix search API',
       throttle: {
         rateLimit: 100,

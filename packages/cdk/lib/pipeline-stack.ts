@@ -35,21 +35,18 @@ export class FdnixPipelineStack extends Stack {
 
     // Create VPC for Fargate tasks
     const vpc = new ec2.Vpc(this, 'PipelineVpc', {
-      vpcName: 'fdnix-pipeline-vpc',
       maxAzs: 2,
       natGateways: 1,
     });
 
     // ECS Cluster
     this.cluster = new ecs.Cluster(this, 'ProcessingCluster', {
-      clusterName: 'fdnix-processing-cluster',
       vpc,
       containerInsights: true,
     });
 
     // ECR Repositories
     this.metadataRepository = new ecr.Repository(this, 'MetadataRepository', {
-      repositoryName: 'fdnix-metadata-generator',
       lifecycleRules: [{
         maxImageCount: 10,
       }],
@@ -57,7 +54,6 @@ export class FdnixPipelineStack extends Stack {
     });
 
     this.embeddingRepository = new ecr.Repository(this, 'EmbeddingRepository', {
-      repositoryName: 'fdnix-embedding-generator',
       lifecycleRules: [{
         maxImageCount: 10,
       }],
@@ -83,7 +79,6 @@ export class FdnixPipelineStack extends Stack {
 
     // IAM roles for Fargate tasks
     const fargateExecutionRole = new iam.Role(this, 'FargateExecutionRole', {
-      roleName: 'fdnix-fargate-execution-role',
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
@@ -91,7 +86,6 @@ export class FdnixPipelineStack extends Stack {
     });
 
     const fargateTaskRole = new iam.Role(this, 'FargateTaskRole', {
-      roleName: 'fdnix-fargate-task-role',
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
     });
 
@@ -118,27 +112,24 @@ export class FdnixPipelineStack extends Stack {
         'lambda:ListLayerVersions',
       ],
       resources: [
-        `arn:aws:lambda:${this.region}:${this.account}:layer:fdnix-db-layer:*`,
+        `${databaseStack.databaseLayer.layerVersionArn.split(':').slice(0, -1).join(':')}:*`,
       ],
     }));
 
 
     // CloudWatch Log Groups
     const metadataLogGroup = new logs.LogGroup(this, 'MetadataLogGroup', {
-      logGroupName: '/fdnix/metadata-generator',
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
     const embeddingLogGroup = new logs.LogGroup(this, 'EmbeddingLogGroup', {
-      logGroupName: '/fdnix/embedding-generator',
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
     // Fargate Task Definitions
     this.metadataTaskDefinition = new ecs.FargateTaskDefinition(this, 'MetadataTaskDefinition', {
-      family: 'fdnix-metadata-task',
       cpu: 1024,
       memoryLimitMiB: 3072,
       executionRole: fargateExecutionRole,
@@ -159,7 +150,6 @@ export class FdnixPipelineStack extends Stack {
     });
 
     this.embeddingTaskDefinition = new ecs.FargateTaskDefinition(this, 'EmbeddingTaskDefinition', {
-      family: 'fdnix-embedding-task',
       cpu: 2048,
       memoryLimitMiB: 6144,
       executionRole: fargateExecutionRole,
@@ -199,7 +189,6 @@ export class FdnixPipelineStack extends Stack {
 
     // Lambda function to publish layer from S3 artifact
     const publishLayerFunction = new lambda.Function(this, 'PublishLayerFunction', {
-      functionName: 'fdnix-publish-layer',
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'index.handler',
       code: lambda.Code.fromInline(`
@@ -212,17 +201,19 @@ def handler(event, context):
     
     bucket_name = event['bucket_name']
     key = event['key']
+    layer_arn = event['layer_arn']
     
     try:
         # Publish new layer version
         response = lambda_client.publish_layer_version(
-            LayerName='fdnix-db-layer',
+            LayerName=layer_arn,
             Description='DuckDB database file for fdnix search API',
             Content={
                 'S3Bucket': bucket_name,
                 'S3Key': key
             },
-            CompatibleRuntimes=['provided.al2023']
+            CompatibleRuntimes=['provided.al2023'],
+            CompatibleArchitectures=['arm64']
         )
         
         return {
@@ -245,6 +236,7 @@ def handler(event, context):
       payload: stepfunctions.TaskInput.fromObject({
         bucket_name: databaseStack.artifactsBucket.bucketName,
         key: 'snapshots/fdnix.duckdb',
+        layer_arn: `${databaseStack.databaseLayer.layerVersionArn.split(':').slice(0, -1).join(':')}`,
       }),
     });
 
@@ -260,14 +252,12 @@ def handler(event, context):
       .next(publishLayerTask);
 
     this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
-      stateMachineName: 'fdnix-daily-pipeline',
       definition,
       timeout: Duration.hours(6),
     });
 
     // EventBridge rule for daily execution
     const dailyRule = new events.Rule(this, 'DailyPipelineRule', {
-      ruleName: 'fdnix-daily-pipeline-trigger',
       description: 'Triggers the fdnix data processing pipeline daily',
       schedule: events.Schedule.cron({ 
         hour: '2', 

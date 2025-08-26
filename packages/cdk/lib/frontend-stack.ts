@@ -25,12 +25,18 @@ export class FdnixFrontendStack extends Stack {
 
     const { searchApiStack, domainName, certificateArn } = props;
 
-    // S3 bucket for static site hosting (import existing)
-    this.hostingBucket = s3.Bucket.fromBucketName(this, 'FrontendHostingBucket', 'fdnix-frontend-hosting');
+    // S3 bucket for static site hosting (CDK-managed for idempotency)
+    this.hostingBucket = new s3.Bucket(this, 'FrontendHostingBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+      autoDeleteObjects: false,
+    });
 
     // Origin Access Control for CloudFront
     this.oac = new cloudfront.S3OriginAccessControl(this, 'OriginAccessControl', {
-      originAccessControlName: 'fdnix-oac',
       description: 'Origin Access Control for fdnix frontend',
     });
 
@@ -123,7 +129,6 @@ export class FdnixFrontendStack extends Stack {
 
     // Cache invalidation function for future CI/CD integration
     const invalidationRole = new iam.Role(this, 'InvalidationRole', {
-      roleName: 'fdnix-cache-invalidation-role',
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),

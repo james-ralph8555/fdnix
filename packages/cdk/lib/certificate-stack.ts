@@ -17,7 +17,6 @@ export class FdnixCertificateStack extends Stack {
     this.certificate = new acm.Certificate(this, 'SslCertificate', {
       domainName,
       subjectAlternativeNames: [`www.${domainName}`],
-      certificateName: 'fdnix-ssl-certificate',
       validation: acm.CertificateValidation.fromDns(),
     });
 

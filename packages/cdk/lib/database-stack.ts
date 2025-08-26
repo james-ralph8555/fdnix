@@ -16,7 +16,6 @@ export class FdnixDatabaseStack extends Stack {
 
     // S3 bucket for pipeline artifacts (DuckDB file storage)
     this.artifactsBucket = new s3.Bucket(this, 'ArtifactsBucket', {
-      bucketName: 'fdnix-artifacts',
       versioned: true,
       lifecycleRules: [{
         id: 'delete-old-versions',
@@ -32,24 +31,23 @@ export class FdnixDatabaseStack extends Stack {
     // This layer will contain the DuckDB file at /opt/fdnix/fdnix.duckdb
     // Initial version with empty layer - will be updated by pipeline
     this.databaseLayer = new lambda.LayerVersion(this, 'DatabaseLayer', {
-      layerVersionName: 'fdnix-db-layer',
       code: lambda.Code.fromAsset(path.join(__dirname, 'empty-layer')),
       description: 'DuckDB file containing nixpkgs metadata, embeddings, and search indexes',
       compatibleRuntimes: [lambda.Runtime.PROVIDED_AL2023],
+      compatibleArchitectures: [lambda.Architecture.ARM_64],
     });
 
     // Lambda Layer for DuckDB shared library with extensions
     // This layer will contain the DuckDB library with FTS and VSS extensions
     this.duckdbLibraryLayer = new lambda.LayerVersion(this, 'DuckdbLibraryLayer', {
-      layerVersionName: 'fdnix-duckdb-lib-layer',
       code: lambda.Code.fromAsset(path.join(__dirname, 'duckdb-build')),
       description: 'DuckDB shared library with FTS and VSS extensions for C++ Lambda',
       compatibleRuntimes: [lambda.Runtime.PROVIDED_AL2023],
+      compatibleArchitectures: [lambda.Architecture.ARM_64],
     });
 
     // IAM role for database access
     this.databaseAccessRole = new iam.Role(this, 'DatabaseAccessRole', {
-      roleName: 'fdnix-database-access-role',
       assumedBy: new iam.CompositePrincipal(
         new iam.ServicePrincipal('lambda.amazonaws.com'),
         new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),

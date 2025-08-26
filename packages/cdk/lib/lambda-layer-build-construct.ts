@@ -8,6 +8,7 @@ export interface LambdaLayerBuildConstructProps {
   contextPath: string;
   description: string;
   compatibleRuntimes: lambda.Runtime[];
+  compatibleArchitectures?: lambda.Architecture[];
 }
 
 export class LambdaLayerBuildConstruct extends Construct {
@@ -16,18 +17,18 @@ export class LambdaLayerBuildConstruct extends Construct {
   constructor(scope: Construct, id: string, props: LambdaLayerBuildConstructProps) {
     super(scope, id);
 
-    const { 
-      layerName, 
-      dockerfilePath, 
-      contextPath, 
-      description, 
-      compatibleRuntimes
+    const {
+      layerName,
+      dockerfilePath,
+      contextPath,
+      description,
+      compatibleRuntimes,
+      compatibleArchitectures,
     } = props;
 
-    // Create Lambda Layer using Docker build with ARM64 platform
-    // This will build the multi-stage Dockerfile and export the 'layer' stage
+    // Create Lambda Layer using Docker build
+    // Build the provided Dockerfile and export the 'layer' stage
     this.layerVersion = new lambda.LayerVersion(this, `${layerName}Layer`, {
-      layerVersionName: layerName,
       code: lambda.Code.fromDockerBuild(contextPath, {
         file: path.relative(contextPath, dockerfilePath),
         buildArgs: {
@@ -35,6 +36,7 @@ export class LambdaLayerBuildConstruct extends Construct {
         },
       }),
       compatibleRuntimes,
+      compatibleArchitectures,
       description,
     });
   }

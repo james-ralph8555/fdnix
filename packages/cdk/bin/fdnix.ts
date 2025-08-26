@@ -18,58 +18,64 @@ const env = {
 // Domain configuration - using Cloudflare for DNS management
 const domainName = process.env.FDNIX_DOMAIN_NAME || 'fdnix.com';
 
-// Stack naming prefix
-const stackPrefix = 'Fdnix';
+// Environment-stage and stack naming prefix (optional)
+const stage = process.env.FDNIX_STAGE || process.env.FDNIX_ENV || '';
+const stackPrefix = process.env.FDNIX_STACK_PREFIX || 'Fdnix';
+
+const toPascal = (s: string) => (s ? s.replace(/(^|[-_\s]+)([a-zA-Z])/g, (_, __, c) => c.toUpperCase()) : '');
+const stagePascal = toPascal(stage);
+const stackId = (name: string) => (stagePascal ? `${stackPrefix}${stagePascal}${name}` : `${stackPrefix}${name}`);
+const envTag = stage || 'production';
 
 // Database Stack - Core data storage resources
-const databaseStack = new FdnixDatabaseStack(app, `${stackPrefix}DatabaseStack`, {
+const databaseStack = new FdnixDatabaseStack(app, stackId('DatabaseStack'), {
   env,
   description: 'Database resources for fdnix hybrid search engine',
   tags: {
     Project: 'fdnix',
     Component: 'database',
-    Environment: 'production',
+    Environment: envTag,
   },
 });
 
 // Pipeline Stack - Data processing pipeline
-const pipelineStack = new FdnixPipelineStack(app, `${stackPrefix}PipelineStack`, {
+const pipelineStack = new FdnixPipelineStack(app, stackId('PipelineStack'), {
   env,
   databaseStack,
   description: 'Data processing pipeline for fdnix',
   tags: {
     Project: 'fdnix',
     Component: 'pipeline',
-    Environment: 'production',
+    Environment: envTag,
   },
 });
 
 // Search API Stack - Lambda-based search API
-const searchApiStack = new FdnixSearchApiStack(app, `${stackPrefix}SearchApiStack`, {
+const searchApiStack = new FdnixSearchApiStack(app, stackId('SearchApiStack'), {
   env,
   databaseStack,
   description: 'Search API for fdnix hybrid search engine',
   tags: {
     Project: 'fdnix',
     Component: 'api',
-    Environment: 'production',
+    Environment: envTag,
   },
 });
 
 // Always create a separate Certificate Stack (validation can take time; does not block frontend)
-new FdnixCertificateStack(app, `${stackPrefix}CertificateStack`, {
+new FdnixCertificateStack(app, stackId('CertificateStack'), {
   env,
   description: 'ACM certificate for fdnix frontend custom domain',
   tags: {
     Project: 'fdnix',
     Component: 'certificate',
-    Environment: 'production',
+    Environment: envTag,
   },
   domainName,
 });
 
 // Frontend Stack - Static site hosting (does not require certificate)
-const frontendStack = new FdnixFrontendStack(app, `${stackPrefix}FrontendStack`, {
+const frontendStack = new FdnixFrontendStack(app, stackId('FrontendStack'), {
   env,
   searchApiStack,
   domainName,
@@ -78,7 +84,7 @@ const frontendStack = new FdnixFrontendStack(app, `${stackPrefix}FrontendStack`,
   tags: {
     Project: 'fdnix',
     Component: 'frontend',
-    Environment: 'production',
+    Environment: envTag,
   },
 });
 
