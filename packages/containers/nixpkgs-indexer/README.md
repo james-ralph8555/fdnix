@@ -23,6 +23,10 @@ This container indexes nixpkgs by combining metadata extraction and embedding ge
 - `DUCKDB_KEY`: S3 key for DuckDB artifact
 - `DUCKDB_PATH`: Path to DuckDB file for embedding phase (defaults to OUTPUT_PATH)
   
+Layer publish (optional):
+- `PUBLISH_LAYER`: When truthy (`true`/`1`/`yes`), publish the DuckDB to a Lambda Layer after processing
+- `LAYER_ARN`: Unversioned Lambda Layer ARN or name (e.g., `arn:aws:lambda:us-east-1:123456789012:layer:fdnix-database-layer`)
+
 FTS tuning (metadata phase):
 - `FTS_STOPWORDS`: Stopwords language (default: `english`)
 - `FTS_STEMMER`: Stemmer language (default: `english`, set empty to disable)

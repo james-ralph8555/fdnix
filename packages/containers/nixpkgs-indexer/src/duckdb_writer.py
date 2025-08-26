@@ -166,12 +166,12 @@ class DuckDBWriter:
         try:
             if stemmer:
                 pragma = (
-                    "PRAGMA create_fts_index('packages_fts_source', 'text', "
+                    f"PRAGMA create_fts_index('packages_fts_source', 'package_id', 'text', "
                     f"stopwords='{stopwords}', stemmer='{stemmer}', strip_accents=true);"
                 )
             else:
                 pragma = (
-                    "PRAGMA create_fts_index('packages_fts_source', 'text', "
+                    f"PRAGMA create_fts_index('packages_fts_source', 'package_id', 'text', "
                     f"stopwords='{stopwords}', strip_accents=true);"
                 )
             conn.execute(pragma)

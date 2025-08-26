@@ -1,19 +1,29 @@
 #include "bedrock_client.hpp"
 #include <iostream>
+#include <cstdlib>
+#include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/bedrock-runtime/model/InvokeModelRequest.h>
 #include <aws/core/utils/memory/stl/AWSStringStream.h>
 
 namespace fdnix {
 
-    BedrockClient::BedrockClient(const std::string& model_id) 
-        : model_id_(model_id), client_(nullptr) {
-        
-        // TODO: Initialize AWS Bedrock client with proper configuration
-        // For now, create a placeholder
-        std::cout << "BedrockClient created with model: " << model_id_ << std::endl;
-        
-        // client_ = std::make_unique<Aws::BedrockRuntime::BedrockRuntimeClient>();
+    BedrockClient::BedrockClient(const std::string& model_id, const std::string& region)
+        : model_id_(model_id), region_(region), client_(nullptr) {
+        // Initialize AWS Bedrock client with region from env if not provided
+        std::string cfg_region = region_;
+        if (cfg_region.empty()) {
+            const char* env_region = std::getenv("BEDROCK_REGION");
+            if (!env_region) env_region = std::getenv("AWS_REGION");
+            if (env_region) cfg_region = env_region; else cfg_region = "us-east-1";
+        }
+
+        Aws::Client::ClientConfiguration config;
+        config.region = cfg_region.c_str();
+        client_ = std::make_unique<Aws::BedrockRuntime::BedrockRuntimeClient>(config);
+
+        std::cout << "BedrockClient created with model: " << model_id_ 
+                  << ", region: " << cfg_region << std::endl;
     }
 
     BedrockClient::~BedrockClient() {
@@ -27,38 +37,30 @@ namespace fdnix {
         }
 
         try {
-            // TODO: Implement actual Bedrock API call
-            // For now, return a placeholder embedding
-            std::cout << "Generating embedding for text: " << text.substr(0, 50) 
-                      << (text.length() > 50 ? "..." : "") << std::endl;
-
-            // Placeholder: return a fixed-size embedding with some variation
-            std::vector<double> embedding(1024); // Cohere embeddings are typically 1024-dimensional
-            
-            // Generate a deterministic but varied embedding based on text hash
-            std::hash<std::string> hasher;
-            size_t hash = hasher(text);
-            
-            for (size_t i = 0; i < embedding.size(); ++i) {
-                embedding[i] = (static_cast<double>((hash + i) % 10000) / 10000.0) * 2.0 - 1.0;
+            if (!client_) {
+                std::cerr << "Bedrock client not initialized" << std::endl;
+                return {};
             }
 
-            // TODO: Replace with actual implementation:
-            /*
-            auto request = Aws::BedrockRuntime::Model::InvokeModelRequest();
-            request.SetModelId(model_id_);
-            request.SetBody(prepare_request_body(text));
-            
+            Aws::BedrockRuntime::Model::InvokeModelRequest request;
+            request.SetModelId(model_id_.c_str());
+            request.SetContentType("application/json");
+            request.SetAccept("application/json");
+
+            const auto body = prepare_request_body(text);
+            auto stream = Aws::MakeShared<Aws::StringStream>("BedrockBody");
+            (*stream) << body;
+            request.SetBody(stream);
+
             auto outcome = client_->InvokeModel(request);
-            if (outcome.IsSuccess()) {
-                return parse_embedding_response(outcome.GetResult().GetBody());
-            } else {
+            if (!outcome.IsSuccess()) {
                 std::cerr << "Bedrock API error: " << outcome.GetError().GetMessage() << std::endl;
                 return {};
             }
-            */
 
-            return embedding;
+            auto& result = outcome.GetResultWithOwnership();
+            Aws::String payload((std::istreambuf_iterator<char>(result.GetBody())), std::istreambuf_iterator<char>());
+            return parse_embedding_response(std::string(payload.c_str()));
 
         } catch (const std::exception& e) {
             std::cerr << "Error generating embedding: " << e.what() << std::endl;
@@ -84,24 +86,10 @@ namespace fdnix {
 
     bool BedrockClient::health_check() {
         try {
-            // TODO: Make a simple test call to Bedrock to verify connectivity
-            // For now, just check if client exists
-            std::cout << "Performing Bedrock health check..." << std::endl;
-            
-            // Placeholder health check
-            if (model_id_.empty()) {
-                std::cerr << "Model ID is not set" << std::endl;
-                return false;
-            }
-
-            // TODO: Replace with actual health check:
-            /*
+            // Simple test embedding
+            if (model_id_.empty() || !client_) return false;
             auto test_embedding = generate_embedding("test");
             return !test_embedding.empty();
-            */
-
-            std::cout << "Bedrock health check passed (placeholder)" << std::endl;
-            return true;
 
         } catch (const std::exception& e) {
             std::cerr << "Bedrock health check failed: " << e.what() << std::endl;
@@ -110,34 +98,38 @@ namespace fdnix {
     }
 
     std::string BedrockClient::prepare_request_body(const std::string& text) {
-        // TODO: Implement proper request body formatting for Cohere model
+        // Cohere v3 on Bedrock: {"texts":[text],"input_type":"search_document","truncate":"END","embedding_types":["float"]}
         using namespace Aws::Utils::Json;
-        
         JsonValue request_json;
-        request_json.WithString("input_type", "search_query");
-        request_json.WithString("text", text);
-        
+        Aws::Utils::Array<JsonValue> texts_array(1);
+        texts_array[0] = JsonValue(text);
+        request_json.WithArray("texts", texts_array);
+        request_json.WithString("input_type", "search_document");
+        request_json.WithString("truncate", "END");
+        Aws::Utils::Array<JsonValue> types_arr(1);
+        types_arr[0] = JsonValue("float");
+        request_json.WithArray("embedding_types", types_arr);
         return request_json.View().WriteCompact();
     }
 
     std::string BedrockClient::prepare_request_body(const std::vector<std::string>& texts) {
-        // TODO: Implement batch request body formatting
         using namespace Aws::Utils::Json;
-        
         JsonValue request_json;
-        request_json.WithString("input_type", "search_query");
-        
         Aws::Utils::Array<JsonValue> texts_array(texts.size());
         for (size_t i = 0; i < texts.size(); ++i) {
             texts_array[i] = JsonValue(texts[i]);
         }
         request_json.WithArray("texts", texts_array);
-        
+        request_json.WithString("input_type", "search_document");
+        request_json.WithString("truncate", "END");
+        Aws::Utils::Array<JsonValue> types_arr(1);
+        types_arr[0] = JsonValue("float");
+        request_json.WithArray("embedding_types", types_arr);
         return request_json.View().WriteCompact();
     }
 
     std::vector<double> BedrockClient::parse_embedding_response(const std::string& response) {
-        // TODO: Implement proper response parsing for Cohere model
+        // Parse Cohere v3 embeddings response; handle variants
         try {
             using namespace Aws::Utils::Json;
             
@@ -147,22 +139,43 @@ namespace fdnix {
                 return {};
             }
 
-            // TODO: Extract embedding from response based on Cohere model format
-            // This is a placeholder implementation
             std::vector<double> embedding;
-            
-            if (response_json.ValueExists("embeddings")) {
-                auto embeddings_array = response_json.GetArray("embeddings");
-                if (embeddings_array.GetLength() > 0) {
-                    auto first_embedding = embeddings_array[0];
-                    if (first_embedding.IsListType()) {
-                        auto values = first_embedding.GetArray();
-                        embedding.reserve(values.GetLength());
-                        
-                        for (size_t i = 0; i < values.GetLength(); ++i) {
-                            embedding.push_back(values[i].AsDouble());
-                        }
+
+            if (!response_json.ValueExists("embeddings")) {
+                return embedding;
+            }
+
+            auto embeddings_array = response_json.GetArray("embeddings");
+            if (embeddings_array.GetLength() == 0) return embedding;
+
+            const auto first = embeddings_array[0];
+            if (first.IsListType()) {
+                // Direct float array
+                auto values = first.GetArray();
+                embedding.reserve(values.GetLength());
+                for (size_t i = 0; i < values.GetLength(); ++i) {
+                    embedding.push_back(values[i].AsDouble());
+                }
+                return embedding;
+            }
+
+            if (first.IsObject()) {
+                auto obj = first.AsObject();
+                if (obj.ValueExists("float")) {
+                    auto values = obj.GetArray("float");
+                    embedding.reserve(values.GetLength());
+                    for (size_t i = 0; i < values.GetLength(); ++i) {
+                        embedding.push_back(values[i].AsDouble());
                     }
+                    return embedding;
+                }
+                if (obj.ValueExists("embedding")) {
+                    auto values = obj.GetArray("embedding");
+                    embedding.reserve(values.GetLength());
+                    for (size_t i = 0; i < values.GetLength(); ++i) {
+                        embedding.push_back(values[i].AsDouble());
+                    }
+                    return embedding;
                 }
             }
 
@@ -175,7 +188,7 @@ namespace fdnix {
     }
 
     std::vector<std::vector<double>> BedrockClient::parse_embeddings_response(const std::string& response) {
-        // TODO: Implement batch response parsing
+        // Batch response parsing; handle variants
         try {
             using namespace Aws::Utils::Json;
             
@@ -192,14 +205,30 @@ namespace fdnix {
                 embeddings.reserve(embeddings_array.GetLength());
                 
                 for (size_t i = 0; i < embeddings_array.GetLength(); ++i) {
-                    auto embedding_values = embeddings_array[i].GetArray();
+                    const auto elem = embeddings_array[i];
                     std::vector<double> embedding;
-                    embedding.reserve(embedding_values.GetLength());
-                    
-                    for (size_t j = 0; j < embedding_values.GetLength(); ++j) {
-                        embedding.push_back(embedding_values[j].AsDouble());
+                    if (elem.IsListType()) {
+                        auto embedding_values = elem.GetArray();
+                        embedding.reserve(embedding_values.GetLength());
+                        for (size_t j = 0; j < embedding_values.GetLength(); ++j) {
+                            embedding.push_back(embedding_values[j].AsDouble());
+                        }
+                    } else if (elem.IsObject()) {
+                        auto obj = elem.AsObject();
+                        if (obj.ValueExists("float")) {
+                            auto embedding_values = obj.GetArray("float");
+                            embedding.reserve(embedding_values.GetLength());
+                            for (size_t j = 0; j < embedding_values.GetLength(); ++j) {
+                                embedding.push_back(embedding_values[j].AsDouble());
+                            }
+                        } else if (obj.ValueExists("embedding")) {
+                            auto embedding_values = obj.GetArray("embedding");
+                            embedding.reserve(embedding_values.GetLength());
+                            for (size_t j = 0; j < embedding_values.GetLength(); ++j) {
+                                embedding.push_back(embedding_values[j].AsDouble());
+                            }
+                        }
                     }
-                    
                     embeddings.push_back(std::move(embedding));
                 }
             }

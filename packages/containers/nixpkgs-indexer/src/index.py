@@ -9,12 +9,19 @@ from typing import List, Dict, Any
 from nixpkgs_extractor import NixpkgsExtractor
 from duckdb_writer import DuckDBWriter
 from embedding_generator import EmbeddingGenerator
+from layer_publisher import LayerPublisher
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("fdnix.nixpkgs-indexer")
+
+
+def _truthy(val: str | None) -> bool:
+    if val is None:
+        return False
+    return val.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def validate_env() -> None:
@@ -32,6 +39,14 @@ def validate_env() -> None:
         if required:
             raise RuntimeError(
                 "S3 upload requested but missing envs: " + ", ".join(required)
+            )
+
+    # Optional publish layer: requires LAYER_ARN + S3 triplet
+    if _truthy(os.environ.get("PUBLISH_LAYER")):
+        missing = [k for k in ("LAYER_ARN", "ARTIFACTS_BUCKET", "DUCKDB_KEY", "AWS_REGION") if not os.environ.get(k)]
+        if missing:
+            raise RuntimeError(
+                "Layer publish requested but missing envs: " + ", ".join(missing)
             )
 
 
@@ -77,6 +92,16 @@ async def main() -> int:
             await generator.run()
             logger.info("Embedding generation completed successfully!")
         
+        # Phase 3: Publish DuckDB layer (if requested)
+        if _truthy(os.environ.get("PUBLISH_LAYER")):
+            logger.info("=== LAYER PUBLISH PHASE ===")
+            layer_arn = os.environ.get("LAYER_ARN", "").strip()
+            bucket = os.environ.get("ARTIFACTS_BUCKET", "").strip()
+            key = os.environ.get("DUCKDB_KEY", "").strip()
+
+            publisher = LayerPublisher(region=os.environ.get("AWS_REGION"))
+            publisher.publish_from_s3(bucket=bucket, key=key, layer_arn=layer_arn)
+
         logger.info("Indexing completed successfully!")
         return 0
 

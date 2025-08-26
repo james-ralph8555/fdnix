@@ -24,7 +24,7 @@ namespace fdnix {
             return true;
         }
         
-        // TODO: Add actual query methods
+        // TODO: Add actual query methods (prepare/execute, result iteration)
     };
 
     DuckDBClient::DuckDBClient(const std::string& db_path) 
@@ -120,13 +120,14 @@ namespace fdnix {
         // Placeholder results below for now.
         for (int i = 0; i < std::min(limit, 5); ++i) {
             Package pkg;
-            pkg.name = "vector-result-" + std::to_string(i);
+            pkg.packageName = "vector-result-" + std::to_string(i);
             pkg.version = "1.0.0";
             pkg.description = "Vector search result " + std::to_string(i);
             pkg.homepage = "https://example.com";
             pkg.license = "MIT";
-            pkg.attribute_path = "pkgs.vector-result-" + std::to_string(i);
-            pkg.relevance_score = 1.0 - (i * 0.1);
+            pkg.attributePath = "pkgs.vector-result-" + std::to_string(i);
+            pkg.packageId = pkg.attributePath;
+            pkg.relevanceScore = 1.0 - (i * 0.1);
             results.packages.push_back(pkg);
         }
         
@@ -150,13 +151,14 @@ namespace fdnix {
         // Placeholder results below for now.
         for (int i = 0; i < std::min(limit, 5); ++i) {
             Package pkg;
-            pkg.name = "fts-result-" + std::to_string(i);
+            pkg.packageName = "fts-result-" + std::to_string(i);
             pkg.version = "2.0.0";
             pkg.description = "Full-text search result " + std::to_string(i);
             pkg.homepage = "https://example.com";
             pkg.license = "Apache-2.0";
-            pkg.attribute_path = "pkgs.fts-result-" + std::to_string(i);
-            pkg.relevance_score = 1.0 - (i * 0.15);
+            pkg.attributePath = "pkgs.fts-result-" + std::to_string(i);
+            pkg.packageId = pkg.attributePath;
+            pkg.relevanceScore = 1.0 - (i * 0.15);
             results.packages.push_back(pkg);
         }
         
@@ -194,35 +196,39 @@ namespace fdnix {
         // Add vector results with weighted scores
         for (size_t i = 0; i < vector_results.size(); ++i) {
             Package pkg = vector_results[i];
-            pkg.relevance_score = vector_weight * (1.0 / (i + 1));
+            pkg.relevanceScore = vector_weight * (1.0 / (i + 1));
             combined.push_back(pkg);
-            seen_packages.insert(pkg.name);
+            seen_packages.insert(pkg.packageId.empty() ? pkg.packageName : pkg.packageId);
         }
         
         // Add FTS results, merging scores if already present
         for (size_t i = 0; i < fts_results.size(); ++i) {
             const auto& fts_pkg = fts_results[i];
             
-            if (seen_packages.find(fts_pkg.name) != seen_packages.end()) {
+            const auto key = fts_pkg.packageId.empty() ? fts_pkg.packageName : fts_pkg.packageId;
+            if (seen_packages.find(key) != seen_packages.end()) {
                 // Package already exists, add to its score
                 auto it = std::find_if(combined.begin(), combined.end(),
-                    [&](const Package& p) { return p.name == fts_pkg.name; });
+                    [&](const Package& p) { 
+                        const auto k = p.packageId.empty() ? p.packageName : p.packageId;
+                        return k == key; 
+                    });
                 if (it != combined.end()) {
-                    it->relevance_score += fts_weight * (1.0 / (i + 1));
+                    it->relevanceScore += fts_weight * (1.0 / (i + 1));
                 }
             } else {
                 // New package from FTS results
                 Package pkg = fts_pkg;
-                pkg.relevance_score = fts_weight * (1.0 / (i + 1));
+                pkg.relevanceScore = fts_weight * (1.0 / (i + 1));
                 combined.push_back(pkg);
-                seen_packages.insert(pkg.name);
+                seen_packages.insert(key);
             }
         }
         
         // Sort by relevance score (descending)
         std::sort(combined.begin(), combined.end(),
             [](const Package& a, const Package& b) {
-                return a.relevance_score > b.relevance_score;
+                return a.relevanceScore > b.relevanceScore;
             });
         
         return combined;

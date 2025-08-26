@@ -12,7 +12,8 @@ namespace fdnix {
      */
     class BedrockClient {
     public:
-        explicit BedrockClient(const std::string& model_id = "cohere.embed-english-v3");
+        explicit BedrockClient(const std::string& model_id = "cohere.embed-english-v3",
+                               const std::string& region = "");
         ~BedrockClient();
 
         // Delete copy constructor and assignment operator
@@ -47,6 +48,7 @@ namespace fdnix {
 
     private:
         std::string model_id_;
+        std::string region_;
         std::unique_ptr<Aws::BedrockRuntime::BedrockRuntimeClient> client_;
         
         // Helper methods

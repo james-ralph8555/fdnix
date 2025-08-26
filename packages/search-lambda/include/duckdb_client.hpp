@@ -14,13 +14,14 @@ namespace fdnix {
      * @brief Package metadata structure
      */
     struct Package {
-        std::string name;
+        std::string packageId;       // Prefer attributePath or name@version
+        std::string packageName;
         std::string version;
         std::string description;
         std::string homepage;
         std::string license;
-        std::string attribute_path;
-        double relevance_score = 0.0;
+        std::string attributePath;   // Matches DB schema
+        double relevanceScore = 0.0; // CamelCase for API response
     };
 
     /**

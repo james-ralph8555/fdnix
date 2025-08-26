@@ -54,6 +54,16 @@ invocation_response handler(invocation_request const& request)
                 search_params.query = query_param;
                 search_params.limit = limit;
                 search_params.offset = offset;
+                // Optional filters
+                if (event.ValueExists("queryStringParameters") && !event.GetObject("queryStringParameters").IsNull()) {
+                    auto qps = event.GetObject("queryStringParameters");
+                    if (qps.ValueExists("license")) {
+                        search_params.license_filter = qps.GetString("license");
+                    }
+                    if (qps.ValueExists("category")) {
+                        search_params.category_filter = qps.GetString("category");
+                    }
+                }
                 
                 auto results = g_duckdb_client->hybrid_search(search_params, query_embedding);
                 
@@ -69,13 +79,14 @@ invocation_response handler(invocation_request const& request)
                 Aws::Utils::Array<JsonValue> packages_array(results.packages.size());
                 for (size_t i = 0; i < results.packages.size(); ++i) {
                     JsonValue pkg;
-                    pkg.WithString("name", results.packages[i].name);
+                    pkg.WithString("packageId", results.packages[i].packageId);
+                    pkg.WithString("packageName", results.packages[i].packageName);
                     pkg.WithString("version", results.packages[i].version);
                     pkg.WithString("description", results.packages[i].description);
                     pkg.WithString("homepage", results.packages[i].homepage);
                     pkg.WithString("license", results.packages[i].license);
-                    pkg.WithString("attribute_path", results.packages[i].attribute_path);
-                    pkg.WithDouble("relevance_score", results.packages[i].relevance_score);
+                    pkg.WithString("attributePath", results.packages[i].attributePath);
+                    pkg.WithDouble("relevanceScore", results.packages[i].relevanceScore);
                     packages_array[i] = pkg;
                 }
                 response_body.WithArray("packages", packages_array);
