@@ -5,7 +5,8 @@ Planned C++ implementation of the fdnix hybrid search Lambda.
 - Runtime: AWS Lambda custom runtime (`provided.al2023`).
 - Packaging: Compile to a binary named `bootstrap` and zip for upload.
 - Query Engine: DuckDB opened read-only from a Lambda Layer (see below).
-- SDKs/Libraries: AWS SDK for C++ (API Gateway events, Bedrock), DuckDB (C/C++ API), minimal HTTP handler.
+- Embeddings: Google Gemini Embeddings API (HTTP) with API key auth.
+- Libraries: DuckDB (C/C++ API), minimal HTTP client for outbound requests.
 
 Current status: A minimal Node.js handler may be deployed as a temporary stub to keep CDK wiring and API Gateway in place. It will be replaced by the C++ `bootstrap` binary.
 
@@ -20,17 +21,32 @@ Current status: A minimal Node.js handler may be deployed as a temporary stub to
 ## Request Handling
 
 - `GET /v1/search?q=<query>`
-  - Embed `q` using Bedrock (e.g., `cohere.embed-english-v3`) via AWS SDK for C++.
+  - Embed `q` using Google Gemini Embeddings API (e.g., `gemini-embedding-001`) with 256 dimensions.
   - Run two queries against `/opt/fdnix/fdnix.duckdb`:
     - VSS: nearest neighbors over `embeddings.vector` by the query embedding
     - FTS: BM25 over the FTS index from `packages_fts_source`
   - Fuse results (e.g., RRF or normalized weighted sum), then join to `packages` for metadata.
   - Return JSON array of results with scores.
 
+## Configuration
+
+Environment variables used for embeddings:
+
+- `GOOGLE_GEMINI_API_KEY`: API key for Gemini requests (required).
+- `GEMINI_MODEL_ID`: Embedding model id (default `gemini-embedding-001`).
+- `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default `256`).
+- `GEMINI_TASK_TYPE`: Embedding task type (default `SEMANTIC_SIMILARITY`).
+
+Rate limits (matched to the data pipeline defaults):
+
+- `GEMINI_MAX_CONCURRENT_REQUESTS` (default `10`)
+- `GEMINI_REQUESTS_PER_MINUTE` (default `3000`)
+- `GEMINI_TOKENS_PER_MINUTE` (default `1000000`)
+
 ## Build Outline (to be implemented)
 
 - Build inside Amazon Linux 2023 to match `provided.al2023` glibc.
-- Link against DuckDB and AWS SDK for C++ (Bedrock + core deps).
+- Link against DuckDB and AWS SDK for C++ (for HTTP client utilities).
 - Produce `dist/bootstrap` binary:
   - Example approach (pseudo):
     - `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`

@@ -4,20 +4,19 @@ import os
 import sys
 import logging
 import json
+import asyncio
 from typing import List, Dict, Any, Tuple
 import duckdb
-import boto3
-from botocore.exceptions import ClientError
-from bedrock_client import BedrockClient
+from gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingGenerator:
     def __init__(self):
         self.validate_environment()
-        self.bedrock_client = BedrockClient(
-            model_id=os.environ['BEDROCK_MODEL_ID'],
-            region=os.environ['AWS_REGION']
+        self.gemini_client = GeminiClient(
+            api_key=os.environ.get('GOOGLE_GEMINI_API_KEY'),
+            model_id=os.environ.get('GEMINI_MODEL_ID')
         )
         
         self.batch_size = 50  # Process embeddings in batches
@@ -35,8 +34,7 @@ class EmbeddingGenerator:
     def validate_environment(self):
         """Validate required environment variables"""
         required_vars = [
-            'AWS_REGION',
-            'BEDROCK_MODEL_ID'
+            'GOOGLE_GEMINI_API_KEY'
         ]
         
         missing_vars = [var for var in required_vars if not os.environ.get(var)]
@@ -382,9 +380,10 @@ class EmbeddingGenerator:
                 content_hashes.append(package.get('content_hash'))
             
             try:
-                # Generate embeddings using Bedrock
+                # Generate embeddings using Gemini
                 logger.info(f"Generating embeddings for {len(texts)} new/changed texts...")
-                embeddings = await self.bedrock_client.generate_embeddings_batch(texts)
+                async with self.gemini_client as client:
+                    embeddings = await client.generate_embeddings_batch(texts)
                 
                 if len(embeddings) != len(texts):
                     logger.error(f"Mismatch in embeddings count: expected {len(texts)}, got {len(embeddings)}")
@@ -434,11 +433,11 @@ class EmbeddingGenerator:
         logger.info("Starting fdnix embedding generation process...")
         
         try:
-            # Test Bedrock access first
-            logger.info("Validating Bedrock model access...")
-            if not self.bedrock_client.validate_model_access():
-                raise RuntimeError("Cannot access Bedrock model. Check credentials and model permissions.")
-            logger.info("Bedrock model access validated successfully")
+            # Test Gemini access first
+            logger.info("Validating Gemini model access...")
+            if not self.gemini_client.validate_model_access():
+                raise RuntimeError("Cannot access Gemini model. Check API key and permissions.")
+            logger.info("Gemini model access validated successfully")
             
             # Connect to DuckDB
             self._duckdb_con = self.connect_duckdb()
@@ -486,6 +485,14 @@ class EmbeddingGenerator:
                                f"{total_reused} reused from cache")
                 except Exception as e:
                     logger.error(f"Failed to process batch {batch_num}: {e}")
+                
+                # Smooth API traffic between batches (configurable via GEMINI_INTER_BATCH_DELAY)
+                try:
+                    delay = float(os.environ.get('GEMINI_INTER_BATCH_DELAY', getattr(self.gemini_client, 'inter_batch_delay', 0.02)))
+                except Exception:
+                    delay = 0.02
+                if delay > 0:
+                    await asyncio.sleep(delay)
                     failed_count += len(batch)
             
             # Build or update VSS index in DuckDB
@@ -516,7 +523,8 @@ class EmbeddingGenerator:
         prev_artifact_path = self.duckdb_path + ".previous"
         
         try:
-            s3 = boto3.client('s3', region_name=os.environ['AWS_REGION'])
+            import boto3
+            s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
             logger.info(f"Attempting to download previous artifact from s3://{self.artifacts_bucket}/{self.duckdb_key}")
             
             # Check if object exists first
@@ -599,6 +607,7 @@ class EmbeddingGenerator:
         if not self.artifacts_bucket or not self.duckdb_key:
             logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/DUCKDB_KEY missing). Skipping upload.")
             return
-        s3 = boto3.client('s3', region_name=os.environ['AWS_REGION'])
+        import boto3
+        s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
         logger.info(f"Uploading {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
         s3.upload_file(self.duckdb_path, self.artifacts_bucket, self.duckdb_key)

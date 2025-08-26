@@ -9,7 +9,7 @@ The infrastructure consists of four main stacks, a certificate stack, and a set 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
 2.  **Database Stack** - S3 artifact storage + Lambda Layers for the DuckDB file and the DuckDB shared library.
 3.  **Pipeline Stack** - Data processing pipeline that builds the DuckDB file and publishes the Lambda layer.
-4.  **Search API Stack** - A C++ Lambda-based search API using the DuckDB layers.
+4.  **Search API Stack** - A C++ Lambda-based search API using the DuckDB layers and Google Gemini for embeddings.
 5.  **Frontend Stack** - Static site hosting with CloudFront.
 
 ## Architecture Diagram
@@ -35,7 +35,7 @@ graph TD
     subgraph "FdnixSearchApiStack"
         api[API Gateway]
         lambda[C++ Lambda]
-        bedrock[Bedrock]
+        gemini[Google Gemini API]
     end
 
     subgraph "FdnixFrontendStack"
@@ -49,7 +49,7 @@ graph TD
     api --> lambda
     lambda --> db_layer
     lambda --> db_lib_layer
-    lambda --> bedrock
+    lambda --> gemini
 
     sfn --> ecs
     ecs --> s3_artifacts
@@ -93,7 +93,7 @@ graph TD
     subgraph "FdnixSearchApiStack"
         direction LR
         api[API Gateway] --> lambda[C++ Lambda]
-        lambda --> bedrock[Bedrock for Embeddings]
+        lambda --> gemini[Google Gemini Embeddings]
     end
 
     subgraph "FdnixDatabaseStack"
@@ -147,6 +147,13 @@ npm install
 -   `CDK_DEFAULT_ACCOUNT` - AWS account ID
 -   `CDK_DEFAULT_REGION` - AWS region (defaults to us-east-1)
 -   `FDNIX_DOMAIN_NAME` - Custom domain name (defaults to fdnix.com)
+
+Embedding configuration (used by pipeline and API):
+
+-   `GOOGLE_GEMINI_API_KEY` - API key for embeddings (store in SSM/Secrets Manager).
+-   `GEMINI_MODEL_ID` - Embedding model id (default: `gemini-embedding-001`).
+-   `GEMINI_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
+-   `GEMINI_TASK_TYPE` - Embedding task type (default: `SEMANTIC_SIMILARITY`).
 
 ### AWS Prerequisites
 
@@ -269,7 +276,7 @@ npm run synth
 
 -   Hybrid search using DuckDB VSS (semantic) + FTS (keyword) from a single file.
 -   Direct DuckDB queries (no external databases).
--   Real-time query embedding via Bedrock.
+ -   Real-time query embeddings via Google Gemini (REST API).
 -   CORS enabled for frontend integration.
 -   Rate limiting and usage plans (100 req/sec, 10K/day).
 -   Health check endpoint.

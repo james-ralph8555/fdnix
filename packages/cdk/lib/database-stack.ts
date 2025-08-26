@@ -109,17 +109,8 @@ export class FdnixDatabaseStack extends Stack {
       }),
     );
 
-    // Grant Bedrock access for embeddings
-    this.databaseAccessRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'bedrock:InvokeModel',
-      ],
-      resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/cohere.embed-english-v3`,
-        `arn:aws:bedrock:${this.region}::foundation-model/cohere.embed-multilingual-v3`,
-      ],
-    }));
+    // No longer need Bedrock permissions as we're using Google Gemini API
+    // Google Gemini API key will be provided via secrets manager or environment variable
 
     // Outputs
     new CfnOutput(this, 'ArtifactsBucketName', {

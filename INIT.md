@@ -27,7 +27,7 @@ graph TD
         B --> C[Nixpkgs GitHub Repo];
         B --> D[/Build .duckdb/];
         D -- Input --> E{Embedding Fargate Task};
-        E --> F[Amazon Bedrock];
+        E --> F[Google Gemini API];
         F --> E;
         E --> G[/Finalize .duckdb (FTS+VSS indexes)/];
         G --> H[S3 Artifacts Bucket];
@@ -42,7 +42,7 @@ graph TD
     subgraph "Backend API"
         K --> L{Search Lambda (C++)};
         L --> M[[Lambda Layer: fdnix-db]];
-        L --> N[Amazon Bedrock];
+        L --> N[Google Gemini API];
         M --> O[(DuckDB file: /opt/fdnix/fdnix.duckdb)];
     end
 
@@ -55,7 +55,7 @@ graph TD
 | API | Amazon API Gateway (REST API) |
 | Infrastructure as Code | AWS CDK (TypeScript) |
 | Primary Data Store | DuckDB file in a Lambda Layer (read-only) |
-| Vector Embeddings | Amazon Bedrock (Cohere) |
+| Vector Embeddings | Google Gemini Embeddings (REST API) |
 | Vector Storage | DuckDB VSS index within the database file |
 | Traditional Search | DuckDB FTS index within the database file |
 | Data Processing | AWS Fargate |
@@ -111,7 +111,7 @@ Phase 1: Foundation & Infrastructure (CDK) ✅ **COMPLETED**
 
             ✅ pipeline-stack.ts: ECS Fargate cluster, ECR repositories, task definitions, and EventBridge daily trigger for data processing pipeline
 
-            ✅ search-api-stack.ts: C++ Lambda function with custom runtime, API Gateway, and DuckDB layer attachment with Bedrock permissions
+            ✅ search-api-stack.ts: C++ Lambda function with custom runtime, API Gateway, and DuckDB layer attachment with Gemini configuration (no Bedrock permissions)
 
             ✅ frontend-stack.ts: S3 static hosting and CloudFront distribution with custom domain support
 
@@ -165,7 +165,7 @@ Phase 2: Data Ingestion & Processing Pipeline
 
                 For each package row, constructs a text document from metadata (e.g., "Package: cowsay. Version: 3.03. Description: ...").
 
-                Calls the Amazon Bedrock API (Cohere model) to generate a vector embedding for the text document.
+                Calls the Google Gemini Embeddings API (e.g., `gemini-embedding-001`) to generate a 256‑dimensional vector embedding (configurable 128–3072).
 
                 Writes embeddings into the same DuckDB file (e.g., table `embeddings(package_id, vector)`), and builds/refreshes a VSS index using the DuckDB `vss` extension.
 
@@ -183,7 +183,7 @@ Phase 3: Backend Search API
 
     Tasks:
 
-        Initialize Lambda Project (search-lambda): Scaffold a C++ Lambda targeting the custom runtime (`provided.al2023`). Package the compiled binary as `bootstrap` for deployment. Link to DuckDB (C API/C++ API) to query the database file bundled in the Lambda Layer. Use the AWS SDK for C++ to call Bedrock for runtime query embeddings.
+        Initialize Lambda Project (search-lambda): Scaffold a C++ Lambda targeting the custom runtime (`provided.al2023`). Package the compiled binary as `bootstrap` for deployment. Link to DuckDB (C API/C++ API) to query the database file bundled in the Lambda Layer. Use a minimal HTTP client to call the Google Gemini Embeddings API for runtime query embeddings (API key in `x-goog-api-key`).
 
         Implement API Handler:
 
@@ -195,7 +195,7 @@ Phase 3: Backend Search API
 
             Vector Search (VSS):
 
-                Call Bedrock to generate an embedding for the user's search term.
+                Call Google Gemini to generate an embedding for the user's search term.
 
                 Query the DuckDB VSS index in `/opt/fdnix/fdnix.duckdb` using the embedding to retrieve top-K similar package IDs.
 

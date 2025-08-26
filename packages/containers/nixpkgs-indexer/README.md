@@ -5,7 +5,7 @@ This container indexes nixpkgs by combining metadata extraction and embedding ge
 ## Features
 
 - Metadata Generation: Extracts nixpkgs package metadata using nix-env and stores in DuckDB
-- Embedding Generation: Creates semantic embeddings using AWS Bedrock and stores in DuckDB with VSS index
+- Embedding Generation: Creates semantic embeddings using Google Gemini API and stores in DuckDB with VSS index
 - Unified Execution: Can run both phases in sequence or individually based on configuration
 - S3 Integration: Automatically uploads final DuckDB artifact to S3
 - Security: Runs as a non-root user
@@ -14,7 +14,7 @@ This container indexes nixpkgs by combining metadata extraction and embedding ge
 
 ### Required
 - `AWS_REGION`: AWS region for services
-- `BEDROCK_MODEL_ID`: Bedrock model ID for embeddings (only needed for embedding mode)
+- `GOOGLE_GEMINI_API_KEY`: Google Gemini API key for embeddings (only needed for embedding mode)
 
 ### Optional
 - `PROCESSING_MODE`: Mode to run - "metadata", "embedding", or "both" (default: "both")
@@ -22,6 +22,15 @@ This container indexes nixpkgs by combining metadata extraction and embedding ge
 - `ARTIFACTS_BUCKET`: S3 bucket for artifact upload
 - `DUCKDB_KEY`: S3 key for DuckDB artifact
 - `DUCKDB_PATH`: Path to DuckDB file for embedding phase (defaults to OUTPUT_PATH)
+  
+Embedding concurrency and limits:
+- `GEMINI_MAX_CONCURRENT_REQUESTS`: Max in-flight Gemini requests (default: `10`)
+- `GEMINI_REQUESTS_PER_MINUTE`: Request budget per minute (default: `3000`)
+- `GEMINI_TOKENS_PER_MINUTE`: Approximate token budget/min (default: `1000000`)
+- `GEMINI_INTER_BATCH_DELAY`: Delay (seconds) between internal batches (default: `0.02`)
+- `GEMINI_MODEL_ID`: Gemini model ID (default: `gemini-embedding-001`)
+- `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`)
+- `GEMINI_TASK_TYPE`: Task type optimization (default: `SEMANTIC_SIMILARITY`)
   
 Layer publish (optional):
 - `PUBLISH_LAYER`: When truthy (`true`/`1`/`yes`), publish the DuckDB to a Lambda Layer after processing
@@ -47,8 +56,8 @@ VSS tuning (embedding phase):
 
 ### "embedding" mode
 1. Reads existing DuckDB file (downloads from S3 when `ARTIFACTS_BUCKET`/`DUCKDB_KEY` are provided and the local file is missing).
-2. Generates embeddings via AWS Bedrock (e.g., `cohere.embed-english-v3`) for packages without embeddings; resumes idempotently.
-3. Writes vectors to the `embeddings` table and creates/refreshes a VSS index for vector search (DuckDB `vss` extension).
+2. Generates embeddings via Google Gemini API (e.g., `gemini-embedding-001`) for packages without embeddings; resumes idempotently.
+3. Writes vectors to the `embeddings` table and creates/refreshes a VSS index for vector search (DuckDB `vss` extension). Embedding calls use asyncio with a semaphore, a sliding-window rate limiter (RPM/TPM), and exponential backoff with jitter for throttling.
 4. Optionally uploads the updated DuckDB to S3.
 
 ### "both" mode (default)
@@ -61,8 +70,10 @@ VSS tuning (embedding phase):
 The container automatically determines what to run based on the `PROCESSING_MODE` environment variable. For unified processing that handles both metadata extraction and embedding generation:
 
 ```bash
-docker run -e AWS_REGION=us-east-1 \
-           -e BEDROCK_MODEL_ID=cohere.embed-english-v3 \
+docker run --env-file .env -e AWS_REGION=us-east-1 \
+           -e GOOGLE_GEMINI_API_KEY=your-api-key \
+           -e GEMINI_MODEL_ID=gemini-embedding-001 \
+           -e GEMINI_OUTPUT_DIMENSIONS=256 \
            -e PROCESSING_MODE=both \
            -e ARTIFACTS_BUCKET=my-bucket \
            -e DUCKDB_KEY=snapshots/fdnix.duckdb \
@@ -82,17 +93,17 @@ The indexer produces the following schema:
 - Build (from repo root):
   - `docker build -t fdnix/nixpkgs-indexer packages/containers/nixpkgs-indexer`
 - Run (local output to current dir):
-  - Metadata only: `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
-  - Embeddings only: `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
-  - Both + upload to S3: `docker run --rm -v "$PWD":/out -e AWS_REGION=us-east-1 -e BEDROCK_MODEL_ID=cohere.embed-english-v3 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+  - Metadata only: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
+  - Embeddings only: `docker run --rm --env-file .env -v "$PWD":/out -e GOOGLE_GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e GEMINI_OUTPUT_DIMENSIONS=256 -e PROCESSING_MODE=embedding fdnix/nixpkgs-indexer`
+  - Both + upload to S3: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GOOGLE_GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e GEMINI_OUTPUT_DIMENSIONS=256 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
 Notes:
-- Embedding mode requires `AWS_REGION`; `BEDROCK_MODEL_ID` defaults to `cohere.embed-english-v3` if not set.
+- Embedding mode requires `GOOGLE_GEMINI_API_KEY`; `GEMINI_MODEL_ID` defaults to `gemini-embedding-001` if not set. Dimensions default to 256.
 - S3 upload requires all of `ARTIFACTS_BUCKET`, `DUCKDB_KEY`, and `AWS_REGION`.
 - Default local artifact path is `/out/fdnix.duckdb`.
 
 ## Image & Dependencies
 
 - Base: `nixos/nix:2.31.0`; dependencies installed via Nix (`nix-env`)
-- Installed deps: `python313`, `duckdb`, `boto3`, `numpy`, `requests`
+- Installed deps: `python313`, `duckdb`, `boto3`, `numpy`, `requests`, `httpx`
 - Entry: `python src/index.py`; runs as non-root user

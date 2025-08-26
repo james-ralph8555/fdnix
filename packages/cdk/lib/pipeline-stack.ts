@@ -75,15 +75,8 @@ export class FdnixPipelineStack extends Stack {
     databaseStack.artifactsBucket.grantReadWrite(fargateTaskRole);
 
 
-    // Grant Bedrock access
-    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['bedrock:InvokeModel'],
-      resources: [
-        `arn:aws:bedrock:${this.region}::foundation-model/cohere.embed-english-v3`,
-        `arn:aws:bedrock:${this.region}::foundation-model/cohere.embed-multilingual-v3`,
-      ],
-    }));
+    // No longer need Bedrock permissions as we're using Google Gemini API
+    // Google Gemini API key will be provided via secrets manager or environment variable
 
     // Grant Lambda layer publishing permissions using safe ARN handling
     const dbLayerParts = Arn.split(databaseStack.databaseLayer.layerVersionArn, ArnFormat.COLON_RESOURCE_NAME);
@@ -138,7 +131,9 @@ export class FdnixPipelineStack extends Stack {
       environment: {
         AWS_REGION: this.region,
         PROCESSING_MODE: 'both',
-        BEDROCK_MODEL_ID: 'cohere.embed-english-v3',
+        GEMINI_MODEL_ID: 'gemini-embedding-001',
+        GEMINI_OUTPUT_DIMENSIONS: '256',
+        GEMINI_TASK_TYPE: 'SEMANTIC_SIMILARITY',
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
         DUCKDB_KEY: 'snapshots/fdnix.duckdb',
         OUTPUT_PATH: '/out/fdnix.duckdb',

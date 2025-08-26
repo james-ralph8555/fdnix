@@ -36,6 +36,7 @@ Note: If you’re looking for the implementation details and deployment plan, se
 
 - Frontend provides a fast, static UI.
 - A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only dataset bundled with the function.
+- Embeddings are generated via Google Gemini (REST API) using 256‑dimensional vectors by default.
 - A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
 ## Project Status
@@ -68,6 +69,18 @@ npm run diff
 # Generate CloudFormation templates
 npm run synth
 ```
+
+### Environment Variables (Gemini)
+- `GOOGLE_GEMINI_API_KEY`: API key used by the indexer and the search Lambda to call the Gemini Embeddings API.
+- `GEMINI_MODEL_ID`: Embedding model id (default: `gemini-embedding-001`).
+- `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
+- `GEMINI_TASK_TYPE`: Embedding task type (default: `SEMANTIC_SIMILARITY`).
+
+Rate limits used by the pipeline:
+- `GEMINI_MAX_CONCURRENT_REQUESTS` (default: `10`)
+- `GEMINI_REQUESTS_PER_MINUTE` (default: `3000`)
+- `GEMINI_TOKENS_PER_MINUTE` (default: `1000000`)
+- `GEMINI_INTER_BATCH_DELAY` seconds (default: `0.02`)
 
 ### Backend Details
 - For backend and infrastructure details, see:

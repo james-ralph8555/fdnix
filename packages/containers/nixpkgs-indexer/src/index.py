@@ -15,8 +15,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-# Enable debug logging specifically for bedrock_client
-logging.getLogger("bedrock_client").setLevel(logging.DEBUG)
+# Keep bedrock_client at INFO by default; no forced DEBUG noise
 logger = logging.getLogger("fdnix.nixpkgs-indexer")
 
 
@@ -85,8 +84,10 @@ async def main() -> int:
             logger.info("=== EMBEDDING GENERATION PHASE ===")
             
             # Set required environment for embedding generator
-            if not os.environ.get("BEDROCK_MODEL_ID"):
-                os.environ["BEDROCK_MODEL_ID"] = "cohere.embed-english-v3"
+            if not os.environ.get("GEMINI_MODEL_ID"):
+                os.environ["GEMINI_MODEL_ID"] = "gemini-embedding-001"
+            if not os.environ.get("GEMINI_OUTPUT_DIMENSIONS"):
+                os.environ["GEMINI_OUTPUT_DIMENSIONS"] = "256"
             if not os.environ.get("DUCKDB_PATH"):
                 os.environ["DUCKDB_PATH"] = output_path
             

@@ -19,8 +19,8 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC")
 find_package(CURL REQUIRED)
 find_package(PkgConfig REQUIRED)
 
-# Find AWS SDK for C++
-find_package(AWSSDK REQUIRED COMPONENTS core bedrock-runtime)
+# Find AWS SDK for C++ (for HTTP client utilities)
+find_package(AWSSDK REQUIRED COMPONENTS core)
 
 # Find AWS Lambda Runtime
 find_package(aws-lambda-runtime REQUIRED)
@@ -32,7 +32,7 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(SOURCES
     src/main.cpp
     src/duckdb_client.cpp
-    src/bedrock_client.cpp
+    src/gemini_client.cpp
 )
 
 # Create the Lambda executable

@@ -10,6 +10,7 @@ in
     boto3
     botocore
     requests
+    httpx
     duckdb
     numpy
   ]))
