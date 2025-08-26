@@ -32,19 +32,16 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
   - `DUCKDB_MINIFIED_KEY`: S3 key for the minified database used by the Lambda layer (e.g., `snapshots/fdnix.duckdb`).
   - `PROCESSING_MODE`: `metadata` | `embedding` | `minified` | `both` | `full` (default: `both` → all phases).
   - FTS (optional tuning): `FTS_STOPWORDS` (default `english`), `FTS_STEMMER` (default `english`), `FTS_INDEX_NAME` (default `packages_fts_idx`).
-- Embeddings:
-  - `GEMINI_API_KEY`: Google Gemini API key for embeddings.
-  - `GEMINI_MODEL_ID`: Gemini model id (e.g., `gemini-embedding-001`). If not set, defaults to `gemini-embedding-001`.
-  - `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
-  - `GEMINI_TASK_TYPE`: Task type optimization (default: `SEMANTIC_SIMILARITY`).
+- Embeddings (AWS Bedrock batch):
+  - `BEDROCK_ROLE_ARN`: IAM role ARN Bedrock uses for batch inference S3 access (required for embedding mode).
+  - `BEDROCK_MODEL_ID`: Model ID (default: `amazon.titan-embed-text-v2:0`).
+  - `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
+  - `BEDROCK_INPUT_BUCKET` and `BEDROCK_OUTPUT_BUCKET`: Separate buckets for input/output (or set a single `ARTIFACTS_BUCKET`).
+  - `BEDROCK_BATCH_SIZE`: Max records per batch job (default: `50000`).
+  - `BEDROCK_POLL_INTERVAL`: Seconds between job status polls (default: `60`).
+  - `BEDROCK_MAX_WAIT_TIME`: Max seconds to wait for job completion (default: `7200`).
   - VSS (optional tuning): `VSS_HNSW_M` (default `16`), `VSS_EF_CONSTRUCTION` (default `200`), `VSS_EF_SEARCH` (default `40`).
   - VSS persistence: Enabled by executing `SET hnsw_enable_experimental_persistence = true` in DuckDB.
-  - Rate limiting & concurrency:
-    - `GEMINI_MAX_CONCURRENT_REQUESTS` (default: `10`)
-    - `GEMINI_REQUESTS_PER_MINUTE` (default: `3000`)
-    - `GEMINI_TOKENS_PER_MINUTE` (default: `1000000`)
-    - `GEMINI_INTER_BATCH_DELAY` seconds (default: `0.02`)
-    - The embedding client uses an asyncio semaphore and a sliding 60s window to respect RPM/TPM, with exponential backoff + jitter on throttling.
 - Local paths (optional):
   - `OUTPUT_PATH`: Local path for the full database (default: `/out/fdnix-data.duckdb`).
   - `OUTPUT_MINIFIED_PATH`: Local path for the minified database (default: `/out/fdnix.duckdb`).
@@ -66,14 +63,14 @@ From repo root:
 
 ## Run (Local)
 
-- All phases with S3 artifacts:
-  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+- All phases with S3 artifacts (Bedrock batch):
+  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole fdnix/nixpkgs-indexer`
 - Single phases:
   - Metadata: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb fdnix/nixpkgs-indexer`
-  - Embedding: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=embedding -e GEMINI_API_KEY=your-api-key -e GEMINI_MODEL_ID=gemini-embedding-001 -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb fdnix/nixpkgs-indexer`
+  - Embedding (Bedrock batch): `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=embedding -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole fdnix/nixpkgs-indexer`
   - Minified: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=minified -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
 
-For AWS runs, provide `ARTIFACTS_BUCKET` and keys for one or both artifacts (`DUCKDB_DATA_KEY` and/or `DUCKDB_MINIFIED_KEY`). Requires credentials with access to S3 and a Google Gemini API key. Embedding mode requires `GEMINI_API_KEY`.
+For AWS runs, provide `ARTIFACTS_BUCKET` and keys for one or both artifacts (`DUCKDB_DATA_KEY` and/or `DUCKDB_MINIFIED_KEY`). Embedding mode requires Bedrock batch configuration (`BEDROCK_ROLE_ARN`, buckets, and model settings). No external API keys are required for Bedrock.
 
 ## Deployment Notes
 
@@ -104,7 +101,7 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
   - Optionally uploads the full DuckDB artifact to S3.
 - Embedding phase:
   - Opens existing DuckDB (downloads from S3 when `ARTIFACTS_BUCKET` plus the relevant key is provided if not present locally).
-  - Generates text embeddings with Google Gemini API (e.g., `gemini-embedding-001`) with 256 dimensions.
+  - Generates text embeddings via AWS Bedrock batch inference (Amazon Titan Embeddings). Batch I/O is managed via S3; the task polls for completion.
   - Inserts new vectors into `embeddings` and maintains referential integrity with `packages`.
   - Builds/refreshes vector similarity index using DuckDB `vss` extension.
   - Optionally uploads the updated full DuckDB to S3.

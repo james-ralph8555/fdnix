@@ -8,7 +8,7 @@ Planned C++ implementation of the fdnix hybrid search Lambda.
 - Embeddings: Google Gemini Embeddings API (HTTP) with API key auth.
 - Libraries: DuckDB (C/C++ API), minimal HTTP client for outbound requests.
 
-Current status: A minimal Node.js handler may be deployed as a temporary stub to keep CDK wiring and API Gateway in place. It will be replaced by the C++ `bootstrap` binary.
+Status: C++ implementation in progress. The repo provides a Dockerfile and build script to produce the `bootstrap` binary expected by the CDK.
 
 ## Runtime Data Model
 
@@ -44,24 +44,39 @@ Rate limits (matched to the data pipeline defaults):
 - `GEMINI_REQUESTS_PER_MINUTE` (default `3000`)
 - `GEMINI_TOKENS_PER_MINUTE` (default `1000000`)
 
-## Build Outline (to be implemented)
+## Build
 
-- Build inside Amazon Linux 2023 to match `provided.al2023` glibc.
-- Link against DuckDB and AWS SDK for C++ (for HTTP client utilities).
-- Produce `dist/bootstrap` binary:
-  - Example approach (pseudo):
-    - `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release`
-    - `cmake --build build --target bootstrap -j`
-    - `strip build/bootstrap && cp build/bootstrap dist/bootstrap`
+Two options are provided.
 
-## Best Practices for Building
+1) Local build (requires toolchain and dependencies):
 
-- Match Lambda environment:
-  - Use Amazon Linux 2023 Docker image for reproducible builds and glibc compatibility.
-- Optimize size and cold start:
-  - Build with `-O2/-Os`, link-time optimization (LTO) where feasible, and strip symbols.
-- Verify output:
-  - Ensure `dist/bootstrap` exists and is executable before running CDK deploy.
+```bash
+# Installs not managed here; you need CMake, Ninja, AWS SDK for C++, and aws-lambda-runtime installed locally
+(cd packages/search-lambda && npm run build)
+# Output: packages/search-lambda/dist/bootstrap
+```
+
+2) Docker build (recommended for reproducible output):
+
+```bash
+# Build a multi-stage image that compiles the Lambda binary
+docker build -t fdnix-search-lambda packages/search-lambda
+
+# Extract the bootstrap from the final image into dist/
+cid=$(docker create fdnix-search-lambda) && \
+  mkdir -p packages/search-lambda/dist && \
+  docker cp "$cid":/bootstrap packages/search-lambda/dist/bootstrap && \
+  docker rm "$cid"
+
+# Verify binary exists
+ls -l packages/search-lambda/dist/bootstrap
+```
+
+## Build Tips
+
+- Match Lambda environment: Amazon Linux 2023 is used in the Dockerfile to match `provided.al2023`.
+- Optimize size and cold start: Release builds with LTO and stripped symbols are configured in CMake.
+- Verify output: Ensure `dist/bootstrap` exists and is executable before running CDK deploy.
 
 ## DuckDB Extensions in Lambda
 
@@ -70,5 +85,5 @@ Rate limits (matched to the data pipeline defaults):
 
 ## Deploy Flow
 
-- Build (from repo root): `(cd packages/search-lambda && npm run build)`
+- Build `bootstrap` (one of the methods above)
 - Deploy (from CDK folder): `(cd packages/cdk && npm run deploy)`

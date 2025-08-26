@@ -40,11 +40,7 @@ export class FdnixFrontendStack extends Stack {
       description: 'Origin Access Control for fdnix frontend',
     });
 
-    // Optional certificate: only attach if an issued ACM cert ARN is provided
-    let certificate: certificatemanager.ICertificate | undefined;
-    if (certificateArn) {
-      certificate = certificatemanager.Certificate.fromCertificateArn(this, 'ImportedCert', certificateArn);
-    }
+    // Certificate logic removed - custom domain configuration disabled
 
     // CloudFront distribution
     const defaultBehavior: cloudfront.BehaviorOptions = {
@@ -87,8 +83,7 @@ export class FdnixFrontendStack extends Stack {
           ttl: Duration.minutes(5),
         },
       ],
-      domainNames: domainName && certificate ? [domainName, `www.${domainName}`] : undefined,
-      certificate,
+      domainNames: undefined,
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,

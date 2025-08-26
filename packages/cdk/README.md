@@ -10,7 +10,7 @@ The infrastructure consists of four main stacks, a certificate stack, and a set 
 2.  **Database Stack** - S3 artifact storage + Lambda Layers for the DuckDB file (minified) and the DuckDB shared library.
 3.  **Pipeline Stack** - Data processing pipeline that builds the DuckDB file and publishes the Lambda layer.
 4.  **Search API Stack** - A C++ Lambda-based search API using the DuckDB layers and Google Gemini for embeddings.
-5.  **Frontend Stack** - Static site hosting with CloudFront.
+5.  **Frontend Stack** - Static site hosting with CloudFront (no CDK-managed custom domain).
 
 ## Architecture Diagram
 
@@ -148,12 +148,22 @@ npm install
 -   `CDK_DEFAULT_REGION` - AWS region (defaults to us-east-1)
 -   `FDNIX_DOMAIN_NAME` - Custom domain name (defaults to fdnix.com)
 
-Embedding configuration (used by pipeline and API):
+Embeddings configuration:
 
--   `GEMINI_API_KEY` - API key for embeddings (store in SSM/Secrets Manager).
--   `GEMINI_MODEL_ID` - Embedding model id (default: `gemini-embedding-001`).
--   `GEMINI_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
--   `GEMINI_TASK_TYPE` - Embedding task type (default: `SEMANTIC_SIMILARITY`).
+-   Runtime (API, Google Gemini):
+    -   `GEMINI_API_KEY` - API key for runtime query embeddings (store in SSM/Secrets Manager).
+    -   `GEMINI_MODEL_ID` - Embedding model id (default: `gemini-embedding-001`).
+    -   `GEMINI_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
+    -   `GEMINI_TASK_TYPE` - Embedding task type (default: `SEMANTIC_SIMILARITY`).
+
+-   Pipeline (AWS Bedrock batch, Amazon Titan Embeddings):
+    -   `BEDROCK_MODEL_ID` (default: `amazon.titan-embed-text-v2:0`)
+    -   `BEDROCK_OUTPUT_DIMENSIONS` (default: `256`)
+    -   `BEDROCK_ROLE_ARN` (required; batch invocation role to access S3)
+    -   `BEDROCK_INPUT_BUCKET` and `BEDROCK_OUTPUT_BUCKET` (or a single `ARTIFACTS_BUCKET`)
+    -   `BEDROCK_BATCH_SIZE` (default: `50000`)
+    -   `BEDROCK_POLL_INTERVAL` (default: `60`)
+    -   `BEDROCK_MAX_WAIT_TIME` (default: `7200`)
 
 ### AWS Prerequisites
 
@@ -184,6 +194,13 @@ From this folder (`packages/cdk`):
 ```bash
 # Build the C++ Lambda bootstrap first (required for API)
 (cd ../search-lambda && npm run build)
+
+# Or build via Docker and extract bootstrap
+# docker build -t fdnix-search-lambda ../search-lambda
+# cid=$(docker create fdnix-search-lambda) && \
+#   mkdir -p ../search-lambda/dist && \
+#   docker cp "$cid":/bootstrap ../search-lambda/dist/bootstrap && \
+#   docker rm "$cid"
 
 # Then deploy all stacks
 npm run deploy
@@ -295,17 +312,16 @@ npm run synth
 
 **Resources:**
 
--   `fdnix-frontend-hosting` - S3 bucket for static assets.
--   `fdnix-cdn` - CloudFront distribution.
--   `fdnix-oac` - Origin Access Control.
+-   S3 bucket for static assets (private, OAC-protected).
+-   CloudFront distribution.
+-   Origin Access Control (OAC).
 
 **Key Features:**
 
 -   Global CDN with edge caching.
--   SSL/TLS termination with ACM certificate from the `FdnixCertificateStack`.
--   Custom domain support.
+-   No custom domain configured by CDK. Attach your domain and ACM cert manually after deploy (see “Custom Domain Setup”).
 -   SPA routing support (404 -> index.html).
--   API proxying to the search API.
+-   API proxying to the search API at path `/api/*`.
 -   Frontend assets are deployed from the `frontend/dist` directory.
 
 ## Stack Dependencies
@@ -319,6 +335,8 @@ graph TD
     FdnixDatabaseStack --> FdnixSearchApiStack
     FdnixSearchApiStack --> FdnixFrontendStack
 ```
+
+Note: The frontend stack does not reference the certificate in code; the dependency exists only to provision the ACM certificate you will attach manually.
 
 ## Outputs
 
@@ -343,7 +361,7 @@ Each stack exports key resource identifiers:
 -   Encryption at rest for all storage services (S3-managed keys).
 -   IAM roles follow the principle of least privilege.
 -   Lambda functions with minimal required permissions.
--   CloudFront with security headers.
+-   CloudFront configured with OAC; add response security headers later if needed.
 -   API Gateway with throttling and usage plans.
 -   VPC isolation for ECS processing tasks.
 
@@ -390,30 +408,34 @@ npx cdk --version
 npx cdk synth --validation
 ```
 
-## Cloudflare DNS & TLS Setup
+## Custom Domain Setup (Manual)
 
-After deployment, configure Cloudflare to point your domain to CloudFront and complete ACM validation:
+The frontend stack intentionally does not set a custom domain or attach a certificate. After deploy, set the domain manually:
 
-1.  **Get CloudFront domain**: From CDK outputs, copy the distribution domain (e.g., `dxxxx.cloudfront.net`).
-2.  **Create DNS records in Cloudflare**:
-    -   **CNAME (flattened) for apex**: Name `@` (fdnix.com) -> target the CloudFront domain. Cloudflare will apply CNAME flattening at the apex. Enable proxy (orange cloud) if desired.
-    -   **CNAME for www**: Name `www` -> target the CloudFront domain. Enable proxy (orange cloud) if desired.
-3.  **ACM certificate (us-east-1)**:
-    -   The dedicated `FdnixCertificateStack` is created automatically.
-    -   Open the certificate in ACM and copy the DNS validation CNAMEs.
-    -   Add those CNAME validation records in your Cloudflare zone. Validation usually completes within minutes.
-4.  **Cloudflare SSL/TLS mode**: Set to "Full (strict)".
+1.  Validate the ACM certificate (us-east-1):
+    - Deploy `FdnixCertificateStack`.
+    - In ACM, copy the DNS validation CNAMEs for both apex and `www` SANs.
+    - Add the validation CNAMEs in Cloudflare and wait for status to become Issued.
+2.  Attach domain to CloudFront:
+    - Open the frontend CloudFront distribution.
+    - Edit settings and add Alternate domain names: `fdnix.com`, `www.fdnix.com`.
+    - Select the validated ACM certificate from `us-east-1` and save changes.
+3.  Configure Cloudflare DNS:
+    - Create a CNAME for apex (`@`) pointing to the CloudFront domain (e.g., `dxxxx.cloudfront.net`). Cloudflare will apply CNAME flattening at the apex.
+    - Create a CNAME for `www` pointing to the same CloudFront domain.
+    - Optionally enable the proxy (orange cloud).
+4.  Cloudflare SSL/TLS mode: set to "Full (strict)".
 
 Notes:
 
--   CloudFront only accepts ACM certificates in `us-east-1`. The CDK bin defaults to `us-east-1` to satisfy this.
--   The frontend stack does not depend on the certificate. You can deploy the frontend immediately; the certificate may remain in Pending validation without blocking.
+- You can deploy the frontend before the certificate is issued; custom domain attachment can be done later without re-deploying CDK.
+- The distribution initially serves only its default CloudFront domain until you complete the manual steps above.
 
 ## Next Steps
 
 After successful deployment:
 
-1.  **Set up Cloudflare DNS**: Configure DNS records as described above.
+1.  **Set up the custom domain**: Attach the domain and cert to CloudFront, then configure Cloudflare DNS as described above.
 2.  **Phase 2**: Build and deploy data processing containers.
 3.  **Phase 3**: Implement search Lambda function.
 4.  **Phase 4**: Build and deploy SolidJS frontend.

@@ -50,7 +50,7 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 
 - Frontend provides a fast, static UI.
 - A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only minified DuckDB bundled in a Lambda layer; the full database is retained in S3 for diagnostics and analytics.
-- Embeddings are generated via Google Gemini (REST API) using 256‑dimensional vectors by default.
+- Embeddings: pipeline uses AWS Bedrock batch (Amazon Titan Embeddings) to precompute vectors; the runtime API uses Google Gemini to embed user queries.
 - A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
 ## Project Status
@@ -68,6 +68,13 @@ npm install
 # Build the search Lambda bootstrap (required before API deploy)
 (cd packages/search-lambda && npm run build)
 
+# Or build via Docker and extract bootstrap
+# docker build -t fdnix-search-lambda packages/search-lambda
+# cid=$(docker create fdnix-search-lambda) && \
+#   mkdir -p packages/search-lambda/dist && \
+#   docker cp "$cid":/bootstrap packages/search-lambda/dist/bootstrap && \
+#   docker rm "$cid"
+
 # Run CDK commands from the CDK folder
 cd packages/cdk
 
@@ -84,17 +91,27 @@ npm run diff
 npm run synth
 ```
 
-### Environment Variables (Gemini)
-- `GEMINI_API_KEY`: API key used by the indexer and the search Lambda to call the Gemini Embeddings API.
-- `GEMINI_MODEL_ID`: Embedding model id (default: `gemini-embedding-001`).
-- `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
-- `GEMINI_TASK_TYPE`: Embedding task type (default: `SEMANTIC_SIMILARITY`).
+### Embeddings Configuration
 
-Rate limits used by the pipeline:
-- `GEMINI_MAX_CONCURRENT_REQUESTS` (default: `10`)
-- `GEMINI_REQUESTS_PER_MINUTE` (default: `3000`)
-- `GEMINI_TOKENS_PER_MINUTE` (default: `1000000`)
-- `GEMINI_INTER_BATCH_DELAY` seconds (default: `0.02`)
+- Runtime (API, Gemini):
+  - `GEMINI_API_KEY`: API key used by the search Lambda to call the Gemini Embeddings API.
+  - `GEMINI_MODEL_ID`: Embedding model id (default: `gemini-embedding-001`).
+  - `GEMINI_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
+  - `GEMINI_TASK_TYPE`: Embedding task type (default: `SEMANTIC_SIMILARITY`).
+  - Rate limits (client safeguards):
+    - `GEMINI_MAX_CONCURRENT_REQUESTS` (default: `10`)
+    - `GEMINI_REQUESTS_PER_MINUTE` (default: `3000`)
+    - `GEMINI_TOKENS_PER_MINUTE` (default: `1000000`)
+    - `GEMINI_INTER_BATCH_DELAY` seconds (default: `0.02`)
+
+- Pipeline (Bedrock batch):
+  - `BEDROCK_MODEL_ID` (default: `amazon.titan-embed-text-v2:0`)
+  - `BEDROCK_OUTPUT_DIMENSIONS` (default: `256`)
+  - `BEDROCK_ROLE_ARN` (required for batch inference)
+  - `BEDROCK_INPUT_BUCKET` and `BEDROCK_OUTPUT_BUCKET` (or a single `ARTIFACTS_BUCKET`)
+  - `BEDROCK_BATCH_SIZE` (default: `50000`)
+  - `BEDROCK_POLL_INTERVAL` (default: `60`)
+  - `BEDROCK_MAX_WAIT_TIME` (default: `7200`)
 
 Secrets: Store sensitive values (e.g., `GEMINI_API_KEY`) in AWS SSM Parameter Store or Secrets Manager and inject them at deploy/runtime. IAM policies across stacks follow least-privilege.
 
@@ -107,12 +124,12 @@ Secrets: Store sensitive values (e.g., `GEMINI_API_KEY`) in AWS SSM Parameter St
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)
   - `containers/` (unified `nixpkgs-indexer/` container for metadata → embeddings → minified + optional layer publish)
-  - `search-lambda/` (C++ Lambda backend)
+- `search-lambda/` (C++ Lambda backend)
   - `frontend/` (SolidJS)
 - CDK commands must be run from the `packages/cdk` workspace
 - Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
 
-Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs a three-phase pipeline: metadata → embeddings → minified. The minified DuckDB is uploaded to S3 and used by the Lambda layer; the container can optionally publish the layer in the same ECS task. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
+Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs a three-phase pipeline: metadata → embeddings → minified. The minified DuckDB is uploaded to S3 and used by the Lambda layer; the container can optionally publish the layer in the same ECS task. Embeddings are generated via AWS Bedrock batch (Amazon Titan) in the pipeline. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
 

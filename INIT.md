@@ -38,7 +38,7 @@ graph TD
         B --> C[Nixpkgs GitHub Repo];
         B --> D[/Build .duckdb/];
         D -- Input --> E{Embedding Fargate Task};
-        E --> F[Google Gemini API];
+        E --> F[AWS Bedrock];
         F --> E;
         E --> G[/Finalize .duckdb (FTS+VSS indexes)/];
         G --> H[S3 Artifacts Bucket];
@@ -66,7 +66,7 @@ graph TD
 | API | Amazon API Gateway (REST API) |
 | Infrastructure as Code | AWS CDK (TypeScript) |
 | Primary Data Store | DuckDB file in a Lambda Layer (read-only) |
-| Vector Embeddings | Google Gemini Embeddings (REST API) |
+| Vector Embeddings | AWS Bedrock (Amazon Titan) for pipeline; Google Gemini for runtime |
 | Vector Storage | DuckDB VSS index within the database file |
 | Traditional Search | DuckDB FTS index within the database file |
 | Data Processing | AWS Fargate |
@@ -176,7 +176,7 @@ Phase 2: Data Ingestion & Processing Pipeline
 
                 For each package row, constructs a text document from metadata (e.g., "Package: cowsay. Version: 3.03. Description: ...").
 
-                Calls the Google Gemini Embeddings API (e.g., `gemini-embedding-001`) to generate a 256‑dimensional vector embedding (configurable 128–3072).
+                Submits a Bedrock batch inference job (Amazon Titan Embeddings) to generate 256‑dimensional vectors; manages S3 input/output prefixes and polling.
 
                 Writes embeddings into the same DuckDB file (e.g., table `embeddings(package_id, vector)`), and builds/refreshes a VSS index using the DuckDB `vss` extension.
 
