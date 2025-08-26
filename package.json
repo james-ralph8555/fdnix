@@ -9,7 +9,9 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm run test --workspaces",
-    "lint": "npm run lint --workspaces"
+    "lint": "npm run lint --workspaces",
+    "destroy": "npm run destroy --workspace @fdnix/cdk",
+    "destroy:all": "npm run destroy:all --workspace @fdnix/cdk"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

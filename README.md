@@ -43,11 +43,6 @@ Note: If you’re looking for the implementation details and deployment plan, se
 - Status: Early development. Core architecture and plan are defined.
 - Roadmap: See `INIT.md` for the step‑by‑step implementation plan.
 
-## Contributing
-
-- Feedback: File issues with feature ideas or rough edges you hit while searching.
-- Code: Contributions are welcome once the initial scaffolding lands. The project uses a monorepo with workspaces for infrastructure, data processing containers, the search API, and the frontend.
-
 ## Development & Deployment
 
 ### Quick Start
@@ -79,7 +74,7 @@ npm run synth
   - `containers/` (`metadata-generator/`, `embedding-generator/`)
   - `search-lambda/` (Lambda backend)
   - `frontend/` (SolidJS)
-- All CDK commands can be run from the repository root
+- cdk commands must be run from cdk root
 - Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
