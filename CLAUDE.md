@@ -111,3 +111,6 @@ See INIT.md for detailed implementation steps and architecture diagrams.
 - The nixpkgs directory follows standard Nixpkgs contribution guidelines
 - The project targets AWS serverless deployment with daily automated data updates
 - Use `nix develop` or `nix-shell` for consistent development environments
+- Prefix all AWS resources for this project with `fdnix-`.
+ - DNS is managed via Cloudflare (not Route53). For the frontend, create CNAMEs in Cloudflare pointing `fdnix.com` (apex, flattened) and `www` to the CloudFront distribution domain, and set SSL/TLS to Full (strict).
+ - CloudFront certificates must be in `us-east-1`. Validate ACM certificates via DNS by adding the ACM‑provided CNAME records in Cloudflare.

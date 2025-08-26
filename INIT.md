@@ -13,6 +13,8 @@ This plan is designed to be executed by an autonomous coding agent. Each section
 
     Automation: Data ingestion and index generation will be fully automated, running on a daily schedule.
 
+    Resource Naming: Prefix all AWS resources with "fdnix-".
+
 2. High-Level Architecture
 
 The system is composed of three main parts: a data processing pipeline, a backend search API, and a static frontend.

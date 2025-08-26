@@ -64,3 +64,10 @@ While the code is being scaffolded, the following is the expected layout and too
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
 
+## Custom Domain (Cloudflare)
+
+- DNS: Managed in Cloudflare. Point `fdnix.com` and `www` to the CloudFront distribution domain using CNAMEs (Cloudflare will CNAME‑flatten the apex record).
+- TLS: CloudFront uses an ACM certificate in `us-east-1`. The CDK requests a DNS‑validated certificate when a domain is provided; add the ACM validation CNAMEs to Cloudflare to complete issuance, then traffic will serve over HTTPS.
+- Settings: In Cloudflare, set SSL/TLS mode to “Full (strict)”.
+
+See `packages/cdk/README.md` for step‑by‑step DNS and validation instructions.

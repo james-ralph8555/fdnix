@@ -1,0 +1,6 @@
+{
+  "name": "fdnix-search-layer",
+  "version": "1.0.0",
+  "description": "Lambda layer dependencies for fdnix search",
+  "dependencies": {}
+}

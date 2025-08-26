@@ -42,11 +42,17 @@ Planned monorepo layout (see INIT.md):
 
 ## Security & Configuration Tips
 
+- AWS resource naming: Prefix all AWS resources with `fdnix-`.
 - Do not commit secrets. Use AWS SSM Parameter Store/Secrets Manager.
 - Principle of least privilege for IAM; CDK stacks should scope permissions narrowly.
 - Local AWS access: prefer `aws-vault` or environment profiles; never hardcode keys.
 
+### DNS & Certificates
+
+- DNS is managed in Cloudflare (not Route53). Do not introduce Route53 hosted zones or records.
+- CloudFront requires ACM certificates in `us-east-1`; validate via DNS by adding ACM‑provided CNAMEs in Cloudflare.
+- Use CNAME flattening at the apex: point `fdnix.com` and `www` to the CloudFront distribution domain.
+
 ## Architecture Overview
 
 fdnix performs hybrid search over nixpkgs: semantic vectors (Faiss in S3) + keyword relevance (OpenSearch). The API (Lambda) fuses results and hydrates from DynamoDB; a SolidJS static UI queries the API. See `INIT.md` for implementation details.
-
