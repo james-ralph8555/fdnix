@@ -16,29 +16,29 @@ The infrastructure consists of four main stacks, a certificate stack, and a set 
 
 ```mermaid
 graph TD
-    subgraph "fdnix-certificate-stack"
+    subgraph "FdnixCertificateStack"
         cert[ACM Certificate]
     end
 
-    subgraph "fdnix-database-stack"
+    subgraph "FdnixDatabaseStack"
         s3_artifacts[(S3 Artifacts)]
         db_layer[[Lambda Layer: DuckDB File]]
         db_lib_layer[[Lambda Layer: DuckDB Library]]
     end
 
-    subgraph "fdnix-pipeline-stack"
+    subgraph "FdnixPipelineStack"
         sfn[Step Functions Pipeline]
         ecs[ECS Fargate]
         ecr[ECR Repositories]
     end
 
-    subgraph "fdnix-search-api-stack"
+    subgraph "FdnixSearchApiStack"
         api[API Gateway]
         lambda[C++ Lambda]
         bedrock[Bedrock]
     end
 
-    subgraph "fdnix-frontend-stack"
+    subgraph "FdnixFrontendStack"
         cf[CloudFront]
         s3_hosting[(S3 Hosting)]
     end
@@ -64,7 +64,7 @@ The data pipeline is orchestrated by a Step Functions state machine that runs a 
 
 ```mermaid
 graph TD
-    subgraph "fdnix-pipeline-stack"
+    subgraph "FdnixPipelineStack"
         direction LR
         start((Start)) --> metadata_task{Metadata Task}
         metadata_task --> embedding_task{Embedding Task}
@@ -81,7 +81,7 @@ graph TD
         end
     end
 
-    subgraph "fdnix-database-stack"
+    subgraph "FdnixDatabaseStack"
         direction LR
         s3_artifacts[(S3 Artifacts)]
         db_layer[[Lambda Layer: DuckDB File]]
@@ -99,13 +99,13 @@ The search API is a C++ Lambda function fronted by an API Gateway. It uses two L
 
 ```mermaid
 graph TD
-    subgraph "fdnix-search-api-stack"
+    subgraph "FdnixSearchApiStack"
         direction LR
         api[API Gateway] --> lambda[C++ Lambda]
         lambda --> bedrock[Bedrock for Embeddings]
     end
 
-    subgraph "fdnix-database-stack"
+    subgraph "FdnixDatabaseStack"
         direction LR
         db_layer[[DB Layer]]
         db_lib_layer[[DB Library Layer]]
@@ -217,7 +217,7 @@ npm run synth
 
 ## Stack Details
 
-### Certificate Stack (`fdnix-certificate-stack`)
+### Certificate Stack (`FdnixCertificateStack`)
 
 **Resources:**
 
@@ -228,7 +228,7 @@ npm run synth
 -   Provisions a certificate in `us-east-1` for use with CloudFront.
 -   DNS validation records must be created in your DNS provider.
 
-### Database Stack (`fdnix-database-stack`)
+### Database Stack (`FdnixDatabaseStack`)
 
 **Resources:**
 
@@ -244,7 +244,7 @@ npm run synth
 -   The `databaseLayer` is initially empty and is populated by the pipeline.
 -   The `duckdbLibraryLayer` is built from the `lib/duckdb-build` directory using Docker and CMake.
 
-### Pipeline Stack (`fdnix-pipeline-stack`)
+### Pipeline Stack (`FdnixPipelineStack`)
 
 **Resources:**
 
@@ -264,7 +264,7 @@ npm run synth
 -   Automatic Lambda layer publishing from S3 artifacts.
 -   CloudWatch logging and monitoring.
 
-### Search API Stack (`fdnix-search-api-stack`)
+### Search API Stack (`FdnixSearchApiStack`)
 
 **Resources:**
 
@@ -291,7 +291,7 @@ npm run synth
     -   `offset` (optional): The offset for pagination.
 -   `GET /v1/health` - Health check.
 
-### Frontend Stack (`fdnix-frontend-stack`)
+### Frontend Stack (`FdnixFrontendStack`)
 
 **Resources:**
 
@@ -399,7 +399,7 @@ After deployment, configure Cloudflare to point your domain to CloudFront and co
     -   **CNAME (flattened) for apex**: Name `@` (fdnix.com) -> target the CloudFront domain. Cloudflare will apply CNAME flattening at the apex. Enable proxy (orange cloud) if desired.
     -   **CNAME for www**: Name `www` -> target the CloudFront domain. Enable proxy (orange cloud) if desired.
 3.  **ACM certificate (us-east-1)**:
-    -   The dedicated `fdnix-certificate-stack` is created automatically.
+    -   The dedicated `FdnixCertificateStack` is created automatically.
     -   Open the certificate in ACM and copy the DNS validation CNAMEs.
     -   Add those CNAME validation records in your Cloudflare zone. Validation usually completes within minutes.
 4.  **Cloudflare SSL/TLS mode**: Set to "Full (strict)".

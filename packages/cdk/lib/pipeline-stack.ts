@@ -1,4 +1,4 @@
-import { Stack, StackProps, Duration, RemovalPolicy } from 'aws-cdk-lib';
+import { Stack, StackProps, Duration, RemovalPolicy, Arn, ArnFormat, Fn } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
@@ -103,7 +103,21 @@ export class FdnixPipelineStack extends Stack {
       ],
     }));
 
-    // Grant Lambda layer publishing permissions
+    // Grant Lambda layer publishing permissions using safe ARN handling
+    const dbLayerParts = Arn.split(databaseStack.databaseLayer.layerVersionArn, ArnFormat.COLON_RESOURCE_NAME);
+    const dbLayerBaseName = Fn.select(0, Fn.split(':', dbLayerParts.resourceName!));
+    const dbLayerUnversionedArn = Arn.format(
+      {
+        service: 'lambda',
+        resource: 'layer',
+        region: dbLayerParts.region,
+        account: dbLayerParts.account,
+        resourceName: dbLayerBaseName,
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      },
+      this,
+    );
+
     fargateTaskRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
@@ -112,7 +126,9 @@ export class FdnixPipelineStack extends Stack {
         'lambda:ListLayerVersions',
       ],
       resources: [
-        `${databaseStack.databaseLayer.layerVersionArn.split(':').slice(0, -1).join(':')}:*`,
+        // Unversioned for publish/list, versioned for get
+        dbLayerUnversionedArn,
+        databaseStack.databaseLayer.layerVersionArn,
       ],
     }));
 
@@ -236,7 +252,7 @@ def handler(event, context):
       payload: stepfunctions.TaskInput.fromObject({
         bucket_name: databaseStack.artifactsBucket.bucketName,
         key: 'snapshots/fdnix.duckdb',
-        layer_arn: `${databaseStack.databaseLayer.layerVersionArn.split(':').slice(0, -1).join(':')}`,
+        layer_arn: dbLayerUnversionedArn,
       }),
     });
 

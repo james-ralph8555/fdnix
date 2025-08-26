@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Arn, ArnFormat, Fn } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
@@ -61,20 +61,53 @@ export class FdnixDatabaseStack extends Stack {
     this.artifactsBucket.grantReadWrite(this.databaseAccessRole);
 
     // Grant Lambda layer permissions for publishing new versions
-    this.databaseAccessRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'lambda:PublishLayerVersion',
-        'lambda:GetLayerVersion',
-        'lambda:ListLayerVersions',
-      ],
-      resources: [
-        this.databaseLayer.layerVersionArn,
-        `${this.databaseLayer.layerVersionArn.split(':').slice(0, -1).join(':')}:*`,
-        this.duckdbLibraryLayer.layerVersionArn,
-        `${this.duckdbLibraryLayer.layerVersionArn.split(':').slice(0, -1).join(':')}:*`,
-      ],
-    }));
+    // Use safe ARN splitting/formatting to derive unversioned layer ARNs
+    const dbLayerComponents = Arn.split(this.databaseLayer.layerVersionArn, ArnFormat.COLON_RESOURCE_NAME);
+    const dbLayerName = Fn.select(0, Fn.split(':', dbLayerComponents.resourceName!));
+    const dbLayerUnversionedArn = Arn.format(
+      {
+        service: 'lambda',
+        resource: 'layer',
+        region: dbLayerComponents.region,
+        account: dbLayerComponents.account,
+        resourceName: dbLayerName,
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      },
+      this,
+    );
+
+    const libLayerComponents = Arn.split(this.duckdbLibraryLayer.layerVersionArn, ArnFormat.COLON_RESOURCE_NAME);
+    const libLayerName = Fn.select(0, Fn.split(':', libLayerComponents.resourceName!));
+    const libLayerUnversionedArn = Arn.format(
+      {
+        service: 'lambda',
+        resource: 'layer',
+        region: libLayerComponents.region,
+        account: libLayerComponents.account,
+        resourceName: libLayerName,
+        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
+      },
+      this,
+    );
+
+    this.databaseAccessRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'lambda:PublishLayerVersion',
+          'lambda:GetLayerVersion',
+          'lambda:ListLayerVersions',
+        ],
+        resources: [
+          // Versioned ARNs for GetLayerVersion
+          this.databaseLayer.layerVersionArn,
+          this.duckdbLibraryLayer.layerVersionArn,
+          // Unversioned ARNs for PublishLayerVersion and ListLayerVersions
+          dbLayerUnversionedArn,
+          libLayerUnversionedArn,
+        ],
+      }),
+    );
 
     // Grant Bedrock access for embeddings
     this.databaseAccessRole.addToPolicy(new iam.PolicyStatement({
