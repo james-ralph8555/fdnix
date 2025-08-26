@@ -11,6 +11,67 @@ The infrastructure consists of four main stacks:
 3. **Search API Stack** - Lambda-based search API
 4. **Frontend Stack** - Static site hosting with CloudFront
 
+## Architecture Diagram
+
+```mermaid
+flowchart LR
+  %% Stacks
+  subgraph DB[fdnix-database-stack]
+    dynamo[(DynamoDB: fdnix-packages)]
+    vectors[S3: fdnix-vector-index]
+    os[(OpenSearch Serverless: fdnix-search)]
+  end
+
+  subgraph API[fdnix-search-api-stack]
+    apigw[API Gateway: fdnix-search-api-gateway]
+    lambda[Lambda: fdnix-search-api]
+    layer[[Lambda Layer: fdnix-search-dependencies]]
+  end
+
+  subgraph FE[fdnix-frontend-stack]
+    s3fe[S3: fdnix-frontend-hosting]
+    cf[CloudFront: fdnix-cdn]
+  end
+
+  subgraph PIPE[fdnix-pipeline-stack]
+    ecs[ECS Fargate Cluster]
+    ecr1[(ECR: fdnix-metadata-generator)]
+    ecr2[(ECR: fdnix-embedding-generator)]
+    sfn[Step Functions: fdnix-daily-pipeline]
+  end
+
+  %% Data/API flows
+  apigw --> lambda
+  lambda --> dynamo
+  lambda --> os
+  lambda --> vectors
+
+  %% Frontend access
+  cf --> s3fe
+  cf --> apigw
+
+  %% External entry
+  user[(Users)] --> cf
+```
+
+If Mermaid is unavailable, here is a compact textual view:
+
+```
+Users -> CloudFront (fdnix-cdn)
+         ├─ S3 (fdnix-frontend-hosting)
+         └─ API Gateway (fdnix-search-api-gateway)
+                └─ Lambda (fdnix-search-api)
+                       ├─ DynamoDB (fdnix-packages)
+                       ├─ OpenSearch Serverless (fdnix-search)
+                       └─ S3 (fdnix-vector-index)
+
+Data Pipeline (fdnix-pipeline-stack)
+  ├─ ECS Fargate Cluster
+  ├─ ECR: fdnix-metadata-generator
+  ├─ ECR: fdnix-embedding-generator
+  └─ Step Functions: fdnix-daily-pipeline
+```
+
 ## Prerequisites
 
 - Node.js 18+ and npm
@@ -141,7 +202,7 @@ npm run synth
 - Custom domain support (fdnix.com, www.fdnix.com)
 - SPA routing support (404 → index.html)
 - API proxying through CloudFront
-- DNS managed via Cloudflare (not Route53)
+ - DNS managed via Cloudflare
 
 ## Stack Dependencies
 

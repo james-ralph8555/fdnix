@@ -49,7 +49,7 @@ Planned monorepo layout (see INIT.md):
 
 ### DNS & Certificates
 
-- DNS is managed in Cloudflare (not Route53). Do not introduce Route53 hosted zones or records.
+- DNS is managed in Cloudflare. Do not add AWS DNS resources in this project.
 - CloudFront requires ACM certificates in `us-east-1`; validate via DNS by adding ACM‑provided CNAMEs in Cloudflare.
 - Use CNAME flattening at the apex: point `fdnix.com` and `www` to the CloudFront distribution domain.
 
