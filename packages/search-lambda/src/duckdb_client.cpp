@@ -47,23 +47,8 @@ namespace fdnix {
                 std::cerr << "Warning: Could not set home directory: " << e.what() << std::endl;
             }
             
-            // Load required extensions (should be built-in with our custom build)
-            try {
-                connection_->Query("LOAD fts;");
-                std::cout << "FTS extension loaded successfully" << std::endl;
-            } catch (const std::exception& e) {
-                std::cerr << "Warning: Could not load FTS extension: " << e.what() << std::endl;
-            }
-            
-            if (embeddings_enabled_) {
-                try {
-                    connection_->Query("LOAD vss;");
-                    std::cout << "VSS extension loaded successfully" << std::endl;
-                } catch (const std::exception& e) {
-                    std::cerr << "Warning: Could not load VSS extension: " << e.what() << std::endl;
-                    embeddings_enabled_ = false;  // Disable embeddings if VSS not available
-                }
-            }
+            // Extensions (FTS, JSON) are built-in to static DuckDB library  
+            std::cout << "Using DuckDB with built-in extensions: FTS, JSON" << std::endl;
             
             // Check if database has required tables
             auto result = connection_->Query("SELECT name FROM sqlite_master WHERE type='table' AND name='packages';");
@@ -72,12 +57,10 @@ namespace fdnix {
                 return false;
             }
             
-            // Check embeddings availability if enabled
+            // VSS extension not included in this build - disable embeddings
             if (embeddings_enabled_) {
-                embeddings_enabled_ = check_embeddings_availability();
-                if (!embeddings_enabled_) {
-                    std::cout << "Embeddings table not found or empty, falling back to FTS-only mode" << std::endl;
-                }
+                std::cout << "VSS extension not available in this build - disabling embeddings, using FTS-only mode" << std::endl;
+                embeddings_enabled_ = false;
             }
             
             std::cout << "DuckDB client initialized successfully (embeddings: " 

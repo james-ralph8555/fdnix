@@ -1,0 +1,30 @@
+{
+  "resource": "/search",
+  "path": "/search",
+  "httpMethod": "GET",
+  "headers": {
+    "Accept": "application/json",
+    "Content-Type": "application/json"
+  },
+  "multiValueHeaders": {},
+  "queryStringParameters": {
+    "q": "nodejs",
+    "limit": "10",
+    "offset": "0"
+  },
+  "multiValueQueryStringParameters": {},
+  "pathParameters": null,
+  "stageVariables": null,
+  "requestContext": {
+    "requestId": "test-request-id",
+    "stage": "test",
+    "resourcePath": "/search",
+    "httpMethod": "GET",
+    "path": "/test/search",
+    "protocol": "HTTP/1.1",
+    "requestTime": "27/Aug/2025:12:00:00 +0000",
+    "requestTimeEpoch": 1724760000
+  },
+  "body": null,
+  "isBase64Encoded": false
+}

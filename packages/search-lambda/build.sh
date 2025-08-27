@@ -15,12 +15,10 @@ mkdir -p "${DIST_DIR}"
 echo "Building Docker image with builder target..."
 docker build --target builder -t fdnix-lambda-builder .
 
-# Extract the built bootstrap binary and DuckDB library from the Docker image
-echo "Extracting bootstrap binary and DuckDB library from Docker image..."
+# Extract the statically linked bootstrap binary from the Docker image
+echo "Extracting statically linked bootstrap binary from Docker image..."
 docker run --rm -v "${DIST_DIR}:/output" fdnix-lambda-builder sh -c "
-    cp /build/lambda/build/bootstrap /output/bootstrap && 
-    mkdir -p /output/lib && 
-    cp /usr/local/lib64/libduckdb.so /output/lib/libduckdb.so
+    cp /build/lambda/build/bootstrap /output/bootstrap
 "
 
 # Ensure bootstrap is executable
@@ -36,6 +34,11 @@ if command -v file >/dev/null 2>&1; then
 fi
 
 if command -v ldd >/dev/null 2>&1; then
-    echo "Library dependencies:"
-    ldd "${DIST_DIR}/bootstrap" || echo "Static binary or dependencies not found"
+    echo "Verifying static linking:"
+    if ldd "${DIST_DIR}/bootstrap" 2>&1 | grep -q "not a dynamic executable"; then
+        echo "✓ Successfully built static binary"
+    else
+        echo "⚠ Binary has dynamic dependencies:"
+        ldd "${DIST_DIR}/bootstrap"
+    fi
 fi

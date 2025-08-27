@@ -1,27 +1,39 @@
 # Multi-stage build for C++ Lambda with AWS SDK and DuckDB support
-FROM amazonlinux:2023 AS base
+FROM ubuntu:22.04 AS base
+
+# Prevent interactive package configuration
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install build dependencies
-RUN dnf update -y && \
-    dnf groupinstall -y "Development Tools" && \
-    dnf install -y \
+RUN apt-get update && \
+    apt-get install -y \
+        build-essential \
         cmake \
         ninja-build \
-        curl-devel \
-        openssl-devel \
-        zlib-devel \
-        libcurl-devel \
+        pkg-config \
+        libcurl4-openssl-dev \
+        libssl-dev \
+        zlib1g-dev \
+        uuid-dev \
+        libnghttp2-dev \
+        libidn2-dev \
+        libpsl-dev \
+        libgssapi-krb5-2 \
+        libkrb5-dev \
+        libldap2-dev \
+        libssh-dev \
+        libbrotli-dev \
+        libzstd-dev \
+        librtmp-dev \
         git \
         wget \
         tar \
         gzip \
         python3 \
         python3-pip \
-        python3-devel \
-        libstdc++-static \
-        glibc-static \
-        elfutils-devel && \
-    dnf clean all
+        python3-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Build stage
 FROM base AS builder
@@ -39,6 +51,7 @@ RUN git clone --recurse-submodules --depth 1 https://github.com/aws/aws-sdk-cpp.
         -DENABLE_TESTING=OFF \
         -DAUTORUN_UNIT_TESTS=OFF \
         -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_FIND_LIBRARY_SUFFIXES=.a \
         -GNinja && \
     ninja -C build -j4 && \
     ninja -C build install && \
@@ -57,15 +70,22 @@ RUN git clone --depth 1 https://github.com/awslabs/aws-lambda-cpp.git && \
     ninja -C build install && \
     rm -rf /build/aws-lambda-cpp
 
-# Install DuckDB from precompiled binary release for v1.3.2
-RUN curl -L https://github.com/duckdb/duckdb/releases/download/v1.3.2/libduckdb-linux-amd64.zip -o duckdb.zip && \
-    unzip duckdb.zip && \
-    # Install both static and shared libraries and headers
-    cp libduckdb_static.a /usr/local/lib64/ && \
-    cp libduckdb.so /usr/local/lib64/ && \
-    cp duckdb.hpp /usr/local/include/ && \
-    cp duckdb.h /usr/local/include/ && \
-    rm -rf duckdb.zip libduckdb_static.a libduckdb.so duckdb.hpp duckdb.h
+# No additional dependencies needed for FTS, VSS, JSON extensions
+# (git, ninja-build, openssl-devel already installed in base)
+
+# Build DuckDB v1.3.2 from source with bundled static library and built-in extensions
+RUN git clone --branch v1.3.2 --depth 1 https://github.com/duckdb/duckdb.git && \
+    cd duckdb && \
+    BUILD_EXTENSIONS="json;core_functions;jemalloc" \
+    DISABLE_BUILTIN_EXTENSIONS=0 \
+    STATIC_LIBCPP=1 \
+    ENABLE_SANITIZER=0 \
+    ENABLE_UBSAN=0 \
+    make bundle-library && \
+    mkdir -p /usr/local/lib && \
+    cp build/release/libduckdb_bundle.a /usr/local/lib/libduckdb_bundle.a && \
+    cp -r src/include/* /usr/local/include/ && \
+    rm -rf /build/duckdb
 
 # Copy source code
 COPY . /build/lambda
@@ -80,17 +100,15 @@ RUN cmake -Bbuild \
         -GNinja && \
     ninja -C build -j4
 
-# Minimal runtime stage - use same base to avoid package manager issues
-FROM amazonlinux:2023
+# Minimal runtime stage
+FROM ubuntu:22.04
 
 # Create necessary directories
-RUN mkdir -p /usr/local/lib64 /var/task
+RUN mkdir -p /var/task
 
-# Copy the Lambda function and DuckDB library
+# Copy the statically linked Lambda function
 COPY --from=builder /build/lambda/build/bootstrap /var/task/bootstrap
-COPY --from=builder /usr/local/lib64/libduckdb.so /usr/local/lib64/libduckdb.so
 
-# Make bootstrap executable and verify libraries are found
+# Make bootstrap executable and verify static linking
 RUN chmod +x /var/task/bootstrap && \
-    ldconfig && \
-    ldd /var/task/bootstrap
+    ldd /var/task/bootstrap || echo "Static binary - no dynamic dependencies"

@@ -15,43 +15,26 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 
-# Prefer static linking where possible
-set(CMAKE_EXE_LINKER_FLAGS "-Wl,--as-needed")
+# Configure for fully static linking
+set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++ -Wl,--as-needed")
 set(BUILD_SHARED_LIBS OFF)
+set(CMAKE_FIND_LIBRARY_SUFFIXES .a)
 
-# Find required packages
-find_package(CURL REQUIRED)
-find_package(PkgConfig REQUIRED)
+# Find required packages with modern CMake targets
+find_package(AWSSDK REQUIRED COMPONENTS core bedrock-runtime)
+find_package(aws-lambda-runtime REQUIRED)
 find_package(ZLIB REQUIRED)
 
-# Find AWS SDK for C++ (for HTTP client utilities)
-find_package(AWSSDK REQUIRED COMPONENTS core bedrock-runtime)
-
-# Find AWS Lambda Runtime
-find_package(aws-lambda-runtime REQUIRED)
-
-# Find DuckDB library - use shared lib for now, fix runtime later
+# Find DuckDB bundled static library with all dependencies
 find_library(DUCKDB_LIBRARY
-    NAMES libduckdb.so libduckdb_static.a libduckdb.a duckdb_static libduckdb_static
-    PATHS /usr/local/lib64 /usr/local/lib /opt/lib64 /opt/lib
+    NAMES libduckdb_bundle.a
+    PATHS /usr/local/lib
     REQUIRED
 )
 find_path(DUCKDB_INCLUDE_DIR
     NAMES duckdb.hpp
-    PATHS /usr/local/include /opt/include
+    PATHS /usr/local/include
     REQUIRED
-)
-
-# Find DuckDB extension libraries if they exist separately
-find_library(DUCKDB_FTS_LIBRARY
-    NAMES libduckdb_fts.a duckdb_fts
-    PATHS /usr/local/lib /opt/lib
-    QUIET
-)
-find_library(DUCKDB_VSS_LIBRARY
-    NAMES libduckdb_vss.a duckdb_vss
-    PATHS /usr/local/lib /opt/lib
-    QUIET
 )
 
 # Include directories
@@ -71,50 +54,62 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 # Set the output name to 'bootstrap' for Lambda custom runtime
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME bootstrap)
 
-# Set RPATH to look for libraries in lib directory relative to binary
-set_target_properties(${PROJECT_NAME} PROPERTIES 
-    BUILD_RPATH "/usr/local/lib64"
-    INSTALL_RPATH "$ORIGIN/lib:/usr/local/lib64"
-    BUILD_WITH_INSTALL_RPATH FALSE
-    INSTALL_RPATH_USE_LINK_PATH TRUE
-)
-
-# Precompiled DuckDB binary includes all dependencies - no need to search for separate libraries
+# Add DuckDB static build definition
+target_compile_definitions(${PROJECT_NAME} PRIVATE DUCKDB_STATIC_BUILD)
 
 # Link libraries with proper order for static linking
+# Higher-level libraries are listed first, followed by their dependencies.
 target_link_libraries(${PROJECT_NAME}
-    AWS::aws-lambda-runtime
-    ${AWSSDK_LINK_LIBRARIES}
-    ${CURL_LIBRARIES}
-    ZLIB::ZLIB
+    # --- Main Application Libraries ---
     ${DUCKDB_LIBRARY}
-)
+    AWS::aws-lambda-runtime
+    aws-cpp-sdk-bedrock-runtime
+    aws-cpp-sdk-core
 
-# Precompiled DuckDB includes all internal dependencies
+    # --- AWS CRT Libraries (Dependencies of AWS SDK) ---
+    aws-crt-cpp
+    aws-c-http
+    aws-c-mqtt
+    aws-c-s3
+    aws-c-auth
+    aws-c-cal
+    aws-c-io
+    aws-c-compression
+    aws-c-sdkutils
+    aws-checksums
+    aws-c-event-stream
+    aws-c-common
 
-# Add system libraries and DuckDB dependencies
-target_link_libraries(${PROJECT_NAME}
-    stdc++
+    # --- System Libraries (let pkg-config and find_package handle paths) ---
+    curl
+    ssl
+    crypto
+    gssapi_krb5
+    krb5
+    k5crypto
+    com_err
+    krb5support
+    ldap
+    lber
+    ssh
+    nghttp2
+    idn2
+    psl
+    brotlidec
+    brotlicommon
+    zstd
+    rtmp
+    z
+    
+    # --- System Libraries ---
+    uuid
     dl
     pthread
     m
     rt
 )
 
-# Link DuckDB extensions if found separately
-if(DUCKDB_FTS_LIBRARY)
-    target_link_libraries(${PROJECT_NAME} ${DUCKDB_FTS_LIBRARY})
-    message(STATUS "Linking with separate FTS library: ${DUCKDB_FTS_LIBRARY}")
-else()
-    message(STATUS "Using FTS extension built into DuckDB library")
-endif()
-
-if(DUCKDB_VSS_LIBRARY)
-    target_link_libraries(${PROJECT_NAME} ${DUCKDB_VSS_LIBRARY})
-    message(STATUS "Linking with separate VSS library: ${DUCKDB_VSS_LIBRARY}")
-else()
-    message(STATUS "Using VSS extension built into DuckDB library")
-endif()
+message(STATUS "Using DuckDB bundled library: ${DUCKDB_LIBRARY}")
 
 # Install the bootstrap binary
 install(TARGETS ${PROJECT_NAME} DESTINATION bin)
