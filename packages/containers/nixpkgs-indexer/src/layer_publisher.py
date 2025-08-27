@@ -46,7 +46,7 @@ class LayerPublisher:
                 Description="Minified DuckDB database with search indexes for fdnix search API",
                 Content={"S3Bucket": bucket, "S3Key": key},
                 CompatibleRuntimes=["provided.al2023"],
-                CompatibleArchitectures=["arm64"],
+                CompatibleArchitectures=["x86_64"],
             )
         except Exception as e:  # noqa: BLE001
             logger.error("Failed to publish layer version: %s", e)

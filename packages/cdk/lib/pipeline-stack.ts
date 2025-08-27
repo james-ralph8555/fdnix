@@ -39,7 +39,7 @@ export class FdnixPipelineStack extends Stack {
     // ECS Cluster
     this.cluster = new ecs.Cluster(this, 'ProcessingCluster', {
       vpc,
-      containerInsights: true,
+      containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
     // ECR Repository for nixpkgs-indexer
@@ -148,6 +148,11 @@ export class FdnixPipelineStack extends Stack {
         'iam:PassRole',
       ],
       resources: [this.bedrockBatchRole.roleArn],
+      conditions: {
+        StringEquals: {
+          'iam:PassedToService': 'bedrock.amazonaws.com',
+        },
+      },
     }));
 
     // Grant Lambda layer publishing permissions using safe ARN handling

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -266,6 +267,15 @@ class MinifiedDuckDBWriter:
         if not (boto3 and self.region and self.s3_bucket and self.s3_key):
             logger.info("S3 upload not configured; skipping.")
             return
+            
+        # Create a zip file with proper Lambda layer structure
+        zip_path = self.output_path.with_suffix('.zip')
+        logger.info("Creating Lambda layer zip at %s", zip_path)
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Add the DuckDB file to the /opt/fdnix/ directory in the zip
+            zipf.write(str(self.output_path), f'fdnix/{self.output_path.name}')
+            
         logger.info(
             "Uploading minified artifact to s3://%s/%s (region=%s)",
             self.s3_bucket,
@@ -273,5 +283,8 @@ class MinifiedDuckDBWriter:
             self.region,
         )
         s3 = boto3.client("s3", region_name=self.region)
-        s3.upload_file(str(self.output_path), self.s3_bucket, self.s3_key)
+        s3.upload_file(str(zip_path), self.s3_bucket, self.s3_key)
+        
+        # Clean up the zip file
+        zip_path.unlink()
         logger.info("Minified database upload complete.")
