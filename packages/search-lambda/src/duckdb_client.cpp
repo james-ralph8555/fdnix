@@ -33,10 +33,21 @@ namespace fdnix {
             // Create DuckDB database instance with read-only config
             duckdb::DBConfig config;
             config.options.access_mode = duckdb::AccessMode::READ_ONLY;
+            // Disable auto-installation in Lambda environment
+            config.options.autoinstall_known_extensions = false;
+            config.options.autoload_known_extensions = false;
+            
             database_ = std::make_unique<duckdb::DuckDB>(db_path_, &config);
             connection_ = std::make_unique<duckdb::Connection>(*database_);
             
-            // Load required extensions
+            // Set home directory to prevent extension loading issues
+            try {
+                connection_->Query("SET home_directory = '/tmp';");
+            } catch (const std::exception& e) {
+                std::cerr << "Warning: Could not set home directory: " << e.what() << std::endl;
+            }
+            
+            // Load required extensions (should be built-in with our custom build)
             try {
                 connection_->Query("LOAD fts;");
                 std::cout << "FTS extension loaded successfully" << std::endl;
