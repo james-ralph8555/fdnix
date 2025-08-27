@@ -71,6 +71,14 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 # Set the output name to 'bootstrap' for Lambda custom runtime
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME bootstrap)
 
+# Set RPATH to look for libraries in lib directory relative to binary
+set_target_properties(${PROJECT_NAME} PROPERTIES 
+    BUILD_RPATH "/usr/local/lib64"
+    INSTALL_RPATH "$ORIGIN/lib:/usr/local/lib64"
+    BUILD_WITH_INSTALL_RPATH FALSE
+    INSTALL_RPATH_USE_LINK_PATH TRUE
+)
+
 # Precompiled DuckDB binary includes all dependencies - no need to search for separate libraries
 
 # Link libraries with proper order for static linking

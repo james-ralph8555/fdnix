@@ -15,9 +15,13 @@ mkdir -p "${DIST_DIR}"
 echo "Building Docker image with builder target..."
 docker build --target builder -t fdnix-lambda-builder .
 
-# Extract the built bootstrap binary from the Docker image
-echo "Extracting bootstrap binary from Docker image..."
-docker run --rm -v "${DIST_DIR}:/output" fdnix-lambda-builder sh -c "cp /build/lambda/build/bootstrap /output/bootstrap"
+# Extract the built bootstrap binary and DuckDB library from the Docker image
+echo "Extracting bootstrap binary and DuckDB library from Docker image..."
+docker run --rm -v "${DIST_DIR}:/output" fdnix-lambda-builder sh -c "
+    cp /build/lambda/build/bootstrap /output/bootstrap && 
+    mkdir -p /output/lib && 
+    cp /usr/local/lib64/libduckdb.so /output/lib/libduckdb.so
+"
 
 # Ensure bootstrap is executable
 chmod +x "${DIST_DIR}/bootstrap"
