@@ -8,7 +8,6 @@ import * as path from 'path';
 export class FdnixDatabaseStack extends Stack {
   public readonly artifactsBucket: s3.Bucket;
   public readonly databaseLayer: lambda.LayerVersion;
-  public readonly duckdbLibraryLayer: lambda.LayerVersion;
   public readonly databaseAccessRole: iam.Role;
 
   constructor(scope: Construct, id: string, props?: StackProps) {
@@ -37,14 +36,6 @@ export class FdnixDatabaseStack extends Stack {
       compatibleArchitectures: [lambda.Architecture.X86_64],
     });
 
-    // Lambda Layer for DuckDB shared library with extensions
-    // This layer will contain the DuckDB library with FTS and VSS extensions
-    this.duckdbLibraryLayer = new lambda.LayerVersion(this, 'DuckdbLibraryLayer', {
-      code: lambda.Code.fromAsset(path.join(__dirname, 'duckdb-build')),
-      description: 'DuckDB shared library with FTS and VSS extensions for C++ Lambda',
-      compatibleRuntimes: [lambda.Runtime.PROVIDED_AL2023],
-      compatibleArchitectures: [lambda.Architecture.X86_64],
-    });
 
     // IAM role for database access
     this.databaseAccessRole = new iam.Role(this, 'DatabaseAccessRole', {
@@ -76,19 +67,6 @@ export class FdnixDatabaseStack extends Stack {
       this,
     );
 
-    const libLayerComponents = Arn.split(this.duckdbLibraryLayer.layerVersionArn, ArnFormat.COLON_RESOURCE_NAME);
-    const libLayerName = Fn.select(0, Fn.split(':', libLayerComponents.resourceName!));
-    const libLayerUnversionedArn = Arn.format(
-      {
-        service: 'lambda',
-        resource: 'layer',
-        region: libLayerComponents.region,
-        account: libLayerComponents.account,
-        resourceName: libLayerName,
-        arnFormat: ArnFormat.COLON_RESOURCE_NAME,
-      },
-      this,
-    );
 
     this.databaseAccessRole.addToPolicy(
       new iam.PolicyStatement({
@@ -101,10 +79,8 @@ export class FdnixDatabaseStack extends Stack {
         resources: [
           // Versioned ARNs for GetLayerVersion
           this.databaseLayer.layerVersionArn,
-          this.duckdbLibraryLayer.layerVersionArn,
           // Unversioned ARNs for PublishLayerVersion and ListLayerVersions
           dbLayerUnversionedArn,
-          libLayerUnversionedArn,
         ],
       }),
     );
@@ -124,10 +100,5 @@ export class FdnixDatabaseStack extends Stack {
       exportName: 'FdnixDatabaseLayerArn',
     });
 
-    new CfnOutput(this, 'DuckdbLibraryLayerArn', {
-      value: this.duckdbLibraryLayer.layerVersionArn,
-      description: 'ARN of the DuckDB library Lambda Layer',
-      exportName: 'FdnixDuckdbLibraryLayerArn',
-    });
   }
 }

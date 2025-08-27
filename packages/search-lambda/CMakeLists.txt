@@ -26,9 +26,9 @@ find_package(AWSSDK REQUIRED COMPONENTS core bedrock-runtime)
 # Find AWS Lambda Runtime
 find_package(aws-lambda-runtime REQUIRED)
 
-# Find DuckDB - check both build-time and Lambda layer paths
+# Find DuckDB static library - prioritize static linking
 find_library(DUCKDB_LIBRARY
-    NAMES duckdb libduckdb
+    NAMES libduckdb.a duckdb_static libduckdb_static libduckdb
     PATHS /usr/local/lib /opt/lib
     REQUIRED
 )
@@ -55,14 +55,17 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 # Set the output name to 'bootstrap' for Lambda custom runtime
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME bootstrap)
 
-# Link libraries
+# Link libraries statically where possible
 target_link_libraries(${PROJECT_NAME}
     AWS::aws-lambda-runtime
     ${AWSSDK_LINK_LIBRARIES}
     ${CURL_LIBRARIES}
     ZLIB::ZLIB
     ${DUCKDB_LIBRARY}
+    -static-libgcc
+    -static-libstdc++
     dl  # For dynamic loading
+    pthread  # Required for threading
 )
 
 # Install the bootstrap binary

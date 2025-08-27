@@ -7,9 +7,9 @@ This package contains the AWS CDK infrastructure definitions for the fdnix hybri
 The infrastructure consists of four main stacks, a certificate stack, and a set of constructs for building Docker images and Lambda layers.
 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
-2.  **Database Stack** - S3 artifact storage + Lambda Layers for the DuckDB file (minified) and the DuckDB shared library.
+2.  **Database Stack** - S3 artifact storage + Lambda Layer for the DuckDB file (minified).
 3.  **Pipeline Stack** - Data processing pipeline that builds the DuckDB file and publishes the Lambda layer.
-4.  **Search API Stack** - A C++ Lambda-based search API using the DuckDB layers and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
+4.  **Search API Stack** - A C++ Lambda-based search API with self-contained DuckDB dependencies and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
 5.  **Frontend Stack** - Static site hosting with CloudFront (no CDK-managed custom domain).
 
 ## Architecture Diagram
@@ -24,7 +24,6 @@ graph TD
     subgraph FdnixDatabaseStack
         s3_artifacts["S3 Artifacts"]
         db_layer["Lambda Layer - DuckDB file (minified)"]
-        db_lib_layer["Lambda Layer - DuckDB library"]
     end
 
     subgraph FdnixPipelineStack
@@ -49,7 +48,6 @@ graph TD
     cf --> api
     api --> lambda
     lambda --> db_layer
-    lambda --> db_lib_layer
     lambda --> bedrock
 
     sfn --> ecs
@@ -101,11 +99,9 @@ graph TD
     subgraph "FdnixDatabaseStack"
         direction LR
         db_layer[[DB Layer]]
-        db_lib_layer[[DB Library Layer]]
     end
 
     lambda -- uses --> db_layer
-    lambda -- uses --> db_lib_layer
 ```
 
 ## Prerequisites
@@ -194,13 +190,13 @@ From this folder (`packages/cdk`):
 
 ```bash
 # Build the C++ Lambda bootstrap first (required for API)
-(cd ../search-lambda && npm run build)
+(cd ../search-lambda && ./build.sh)
 
-# Or build via Docker and extract bootstrap
+# Or build manually with Docker
 # docker build -t fdnix-search-lambda ../search-lambda
 # cid=$(docker create fdnix-search-lambda) && \
 #   mkdir -p ../search-lambda/dist && \
-#   docker cp "$cid":/bootstrap ../search-lambda/dist/bootstrap && \
+#   docker cp "$cid":/var/task/bootstrap ../search-lambda/dist/bootstrap && \
 #   docker rm "$cid"
 
 # Then deploy all stacks
@@ -254,7 +250,6 @@ npm run synth
 
 -   `fdnix-artifacts` - S3 bucket for pipeline artifacts (stores both main and minified `.duckdb` files).
 -   `fdnix-db-layer` - Lambda Layer that packages the minified `.duckdb` file under `/opt/fdnix/fdnix.duckdb`.
--   `fdnix-db-lib-layer` - Lambda Layer that packages the DuckDB shared library and extensions.
 -   `fdnix-database-access-role` - IAM role for artifact access and layer publishing.
 
 **Key Features:**
@@ -262,7 +257,6 @@ npm run synth
 -   S3 versioning with lifecycle management (30-day retention).
 -   Encryption at rest with S3-managed keys.
 -   The `databaseLayer` is populated by the pipeline with the minified database.
--   The `duckdbLibraryLayer` is built from the `lib/duckdb-build` directory using Docker and CMake.
 
 ### Pipeline Stack (`FdnixPipelineStack`)
 
@@ -288,7 +282,7 @@ npm run synth
 
 -   `fdnix-search-api` - C++ Lambda function for hybrid search.
 -   `fdnix-search-api-gateway` - API Gateway REST API.
--   Lambda Layers attached from Database Stack (contains DuckDB file and library).
+-   Lambda Layer attached from Database Stack (contains DuckDB data file only).
 
 **Key Features:**
 
@@ -300,6 +294,7 @@ npm run synth
 -   Health check endpoint.
 -   Implemented in C++ using AWS Lambda custom runtime (`provided.al2023`).
 -   DuckDB file accessed read-only at `/opt/fdnix/fdnix.duckdb`.
+-   All DuckDB dependencies statically compiled into the function binary for optimal performance.
 
 **API Endpoints:**
 

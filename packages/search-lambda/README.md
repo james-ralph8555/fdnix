@@ -4,15 +4,16 @@ Planned C++ implementation of the fdnix hybrid search Lambda.
 
 - Runtime: AWS Lambda custom runtime (`provided.al2023`).
 - Packaging: Compile to a binary named `bootstrap` and zip for upload.
-- Query Engine: DuckDB opened read-only from a Lambda Layer (see below).
+- Query Engine: DuckDB statically compiled into the function binary.
 - Embeddings: AWS Bedrock Runtime (Amazon Titan Embeddings) for real-time query embeddings.
-- Libraries: DuckDB (C/C++ API), AWS SDK for C++ (core, bedrock-runtime), AWS Lambda C++ runtime.
+- Libraries: DuckDB (statically linked), AWS SDK for C++ (core, bedrock-runtime), AWS Lambda C++ runtime.
 
 Status: C++ implementation in progress. The repo provides a Dockerfile and build script to produce the `bootstrap` binary expected by the CDK.
 
 ## Runtime Data Model
 
 - Lambda Layer: `fdnix-db-layer` provides `/opt/fdnix/fdnix.duckdb` (minified database).
+- DuckDB Dependencies: All DuckDB libraries are statically compiled into the function binary (no separate library layer needed).
 - Minified database contents (essential for search):
   - `packages(...)` with essential columns only (name, version, attr path, description, homepage, simplified license/maintainers, flags)
   - `packages_fts_source(...)` and FTS index (BM25)
@@ -52,17 +53,22 @@ Two options are provided.
 2) Docker build (recommended for reproducible output):
 
 ```bash
-# Build a multi-stage image that compiles the Lambda binary
-docker build -t fdnix-search-lambda packages/search-lambda
+# Use the provided build script (recommended)
+cd packages/search-lambda
+./build.sh
+
+# Or build manually with Docker
+docker build -t fdnix-search-lambda .
 
 # Extract the bootstrap from the final image into dist/
 cid=$(docker create fdnix-search-lambda) && \
-  mkdir -p packages/search-lambda/dist && \
-  docker cp "$cid":/bootstrap packages/search-lambda/dist/bootstrap && \
+  mkdir -p dist && \
+  docker cp "$cid":/var/task/bootstrap dist/bootstrap && \
   docker rm "$cid"
 
-# Verify binary exists
-ls -l packages/search-lambda/dist/bootstrap
+# Verify binary exists and is self-contained
+ls -l dist/bootstrap
+ldd dist/bootstrap || echo "Static binary - no dynamic dependencies"
 ```
 
 ## Build Tips
@@ -74,7 +80,7 @@ ls -l packages/search-lambda/dist/bootstrap
 ## DuckDB Extensions in Lambda
 
 - The pipeline prebuilds FTS/VSS indexes in the DuckDB file.
-- If runtime queries require loading extensions, bundle them in the layer and `LOAD` at startup (or statically compile them into the DuckDB library used by the function).
+- All DuckDB extensions and dependencies are statically compiled into the function binary for optimal performance and cold start times.
 
 ## Deploy Flow
 

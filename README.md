@@ -50,6 +50,7 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 
 - Frontend provides a fast, static UI.
 - A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only minified DuckDB bundled in a Lambda layer; the full database is retained in S3 for diagnostics and analytics.
+- Self-contained Lambda: All DuckDB dependencies are statically compiled into the function binary for optimal performance and faster cold starts.
 - Embeddings: both the pipeline and runtime use AWS Bedrock (Amazon Titan Embeddings) — batch for indexing, real-time for user queries.
 - A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
@@ -66,13 +67,13 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 npm install
 
 # Build the search Lambda bootstrap (required before API deploy)
-(cd packages/search-lambda && npm run build)
+(cd packages/search-lambda && ./build.sh)
 
-# Or build via Docker and extract bootstrap
+# Or build manually with Docker
 # docker build -t fdnix-search-lambda packages/search-lambda
 # cid=$(docker create fdnix-search-lambda) && \
 #   mkdir -p packages/search-lambda/dist && \
-#   docker cp "$cid":/bootstrap packages/search-lambda/dist/bootstrap && \
+#   docker cp "$cid":/var/task/bootstrap packages/search-lambda/dist/bootstrap && \
 #   docker rm "$cid"
 
 # Run CDK commands from the CDK folder

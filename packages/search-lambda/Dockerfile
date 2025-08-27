@@ -54,36 +54,54 @@ RUN git clone --depth 1 https://github.com/awslabs/aws-lambda-cpp.git && \
     ninja -C build install && \
     rm -rf /build/aws-lambda-cpp
 
-# Install DuckDB precompiled library for x86_64
-RUN curl -L "https://github.com/duckdb/duckdb/releases/download/v1.3.2/libduckdb-linux-amd64.zip" -o /tmp/libduckdb.zip && \
-    unzip -q /tmp/libduckdb.zip -d /tmp/duckdb && \
-    find /tmp/duckdb -maxdepth 2 -type f -name 'libduckdb.so*' -exec cp {} /usr/local/lib/libduckdb.so \; && \
-    if ls /tmp/duckdb/*duckdb*.h* >/dev/null 2>&1; then cp /tmp/duckdb/*duckdb*.h* /usr/local/include/; fi && \
-    if [ -d /tmp/duckdb/include ]; then cp -r /tmp/duckdb/include/. /usr/local/include/; fi && \
-    ldconfig && \
-    rm -rf /tmp/duckdb /tmp/libduckdb.zip
+# Build DuckDB from source as static library with all dependencies
+RUN git clone --depth 1 --branch v1.3.2 https://github.com/duckdb/duckdb.git && \
+    cd duckdb && \
+    cmake -Bbuild \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/usr/local \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DBUILD_SHARED_LIBS=OFF \
+        -DBUILD_UNITTESTS=OFF \
+        -DBUILD_SHELL=OFF \
+        -DENABLE_SANITIZER=OFF \
+        -DENABLE_UBSAN=OFF \
+        -DFORCE_COLORED_OUTPUT=OFF \
+        -DSTATIC_LIBCPP=ON \
+        -GNinja && \
+    ninja -C build -j4 && \
+    ninja -C build install && \
+    rm -rf /build/duckdb
 
 # Copy source code
 COPY . /build/lambda
 
 WORKDIR /build/lambda
 
-# Build the Lambda function
+# Build the Lambda function with static linking
 RUN cmake -Bbuild \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH=/usr/local \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
         -GNinja && \
     ninja -C build -j4
 
-# Runtime stage
+# Minimal runtime stage for self-contained binary
 FROM amazonlinux:2023
 
-# Copy the built Lambda function
-COPY --from=builder /build/lambda/dist/bootstrap /bootstrap
+# Install minimal runtime dependencies
+RUN dnf update -y && \
+    dnf install -y glibc && \
+    dnf clean all
 
-# Make sure bootstrap is executable
-RUN chmod +x /bootstrap
+# Copy the self-contained Lambda function
+COPY --from=builder /build/lambda/build/bootstrap /var/task/bootstrap
 
-# Set the Lambda runtime handler (not used with custom runtime but good practice)
-CMD ["bootstrap"]
+# Make bootstrap executable and verify it's self-contained
+RUN chmod +x /var/task/bootstrap && \
+    ldd /var/task/bootstrap || echo "Static binary - no dynamic dependencies"
+
+# Set working directory and entry point for Lambda
+WORKDIR /var/task
+CMD ["/var/task/bootstrap"]

@@ -51,7 +51,7 @@ export class FdnixSearchApiStack extends Stack {
       timeout: Duration.seconds(30),
       memorySize: 1024,
       role: this.lambdaExecutionRole,
-      layers: [databaseStack.databaseLayer, databaseStack.duckdbLibraryLayer],
+      layers: [databaseStack.databaseLayer],
       environment: {
         DUCKDB_PATH: '/opt/fdnix/fdnix.duckdb',
         BEDROCK_MODEL_ID: bedrockModelId,
