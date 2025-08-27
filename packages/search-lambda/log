@@ -1,0 +1,169 @@
+Building fdnix C++ Lambda function...
+Building Docker image with builder target...
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 3.00kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/amazonlinux:2023
+#2 DONE 0.1s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [base 1/2] FROM docker.io/library/amazonlinux:2023@sha256:f5077958231a41decbd60c59c48cdb30519b77fdd326e829893470e3a8aa2e55
+#4 DONE 0.0s
+
+#5 [builder 1/7] WORKDIR /build
+#5 CACHED
+
+#6 [builder 2/7] RUN git clone --recurse-submodules --depth 1 https://github.com/aws/aws-sdk-cpp.git &&     cd aws-sdk-cpp &&     cmake -Bbuild         -DCMAKE_BUILD_TYPE=Release         -DCMAKE_PREFIX_PATH=/usr/local         -DCMAKE_INSTALL_PREFIX=/usr/local         -DBUILD_ONLY="core;bedrock-runtime"         -DENABLE_TESTING=OFF         -DAUTORUN_UNIT_TESTS=OFF         -DBUILD_SHARED_LIBS=OFF         -GNinja &&     ninja -C build -j4 &&     ninja -C build install &&     rm -rf /build/aws-sdk-cpp
+#6 CACHED
+
+#7 [base 2/2] RUN dnf update -y &&     dnf groupinstall -y "Development Tools" &&     dnf install -y         cmake         ninja-build         curl-devel         openssl-devel         zlib-devel         libcurl-devel         git         wget         tar         gzip         python3         python3-pip         python3-devel         libstdc++-static         glibc-static         elfutils-devel &&     dnf clean all
+#7 CACHED
+
+#8 [builder 3/7] RUN git clone --depth 1 https://github.com/awslabs/aws-lambda-cpp.git &&     cd aws-lambda-cpp &&     cmake -Bbuild         -DCMAKE_BUILD_TYPE=Release         -DCMAKE_PREFIX_PATH=/usr/local         -DCMAKE_INSTALL_PREFIX=/usr/local         -DBUILD_SHARED_LIBS=OFF         -GNinja &&     ninja -C build -j4 &&     ninja -C build install &&     rm -rf /build/aws-lambda-cpp
+#8 CACHED
+
+#9 [internal] load build context
+#9 transferring context: 2.50kB done
+#9 DONE 0.0s
+
+#10 [builder 4/7] RUN git clone --depth 1 --branch v1.3.2 https://github.com/duckdb/duckdb.git &&     cd duckdb &&     make release &&     cp build/release/src/libduckdb_static.a /usr/local/lib64/ &&     cp src/include/duckdb.hpp /usr/local/include/ &&     cp src/include/duckdb.h /usr/local/include/ &&     rm -rf /build/duckdb
+#10 0.113 Cloning into 'duckdb'...
+#10 5.220 Note: switching to '0b83e5d2f68bc02dfefde74b846bd039f078affa'.
+#10 5.220 
+#10 5.220 You are in 'detached HEAD' state. You can look around, make experimental
+#10 5.220 changes and commit them, and you can discard any commits you make in this
+#10 5.220 state without impacting any branches by switching back to a branch.
+#10 5.220 
+#10 5.220 If you want to create a new branch to retain commits you create, you may
+#10 5.220 do so (now or later) by using -c with the switch command. Example:
+#10 5.220 
+#10 5.220   git switch -c <new-branch-name>
+#10 5.220 
+#10 5.220 Or undo this operation with:
+#10 5.220 
+#10 5.220   git switch -
+#10 5.220 
+#10 5.220 Turn off this advice by setting config variable advice.detachedHead to false
+#10 5.220 
+#10 6.230 mkdir -p ./build/release && \
+#10 6.230 cd build/release && \
+#10 6.230 cmake          -DENABLE_EXTENSION_AUTOLOADING= -DENABLE_EXTENSION_AUTOINSTALL= -DLOCAL_EXTENSION_REPO=""  -DOVERRIDE_GIT_DESCRIBE="" -DDUCKDB_EXPLICIT_VERSION=""  -DCMAKE_BUILD_TYPE=Release ../.. && \
+#10 6.230 cmake --build . --config Release
+#10 6.308 -- Found Python3: /usr/bin/python3.9 (found version "3.9.23") found components: Interpreter 
+#10 6.347 -- The C compiler identification is GNU 11.5.0
+#10 6.397 -- The CXX compiler identification is GNU 11.5.0
+#10 6.402 -- Detecting C compiler ABI info
+#10 6.450 -- Detecting C compiler ABI info - done
+#10 6.455 -- Check for working C compiler: /usr/bin/cc - skipped
+#10 6.455 -- Detecting C compile features
+#10 6.455 -- Detecting C compile features - done
+#10 6.457 -- Detecting CXX compiler ABI info
+#10 6.526 -- Detecting CXX compiler ABI info - done
+#10 6.530 -- Check for working CXX compiler: /usr/bin/c++ - skipped
+#10 6.530 -- Detecting CXX compile features
+#10 6.531 -- Detecting CXX compile features - done
+#10 6.532 -- Looking for pthread.h
+#10 6.581 -- Looking for pthread.h - found
+#10 6.581 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+#10 6.631 -- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+#10 6.632 -- Found Threads: TRUE  
+#10 6.636 -- Found Git: /usr/bin/git (found version "2.50.1") 
+#10 6.639 -- GIT_COMMIT_HASH has length 7 different than the expected 10
+#10 6.639 -- git hash 0b83e5d, version v1.3.2, extension folder v1.3.2
+#10 6.639 -- Extensions will be deployed to: /build/duckdb/build/release/repository
+#10 6.640 -- Load extension 'core_functions' from '/build/duckdb/extensions' @ v1.3.2
+#10 6.640 -- Load extension 'parquet' from '/build/duckdb/extensions' @ v1.3.2
+#10 6.640 -- Load extension 'jemalloc' from '/build/duckdb/extensions' @ v1.3.2
+#10 7.534 -- Extensions linked into DuckDB: [core_functions, parquet, jemalloc]
+#10 7.701 -- Configuring done
+#10 8.031 -- Generating done
+#10 8.064 -- Build files have been written to: /build/duckdb/build/release
+#10 8.094 gmake[1]: Entering directory '/build/duckdb/build/release'
+#10 8.116 gmake[2]: Entering directory '/build/duckdb/build/release'
+#10 8.117 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 8.122 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 8.124 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 8.129 [  1%] Building CXX object CMakeFiles/duckdb_platform_binary.dir/tools/utils/test_platform.cpp.o
+#10 8.283 [  1%] Linking CXX executable duckdb_platform_binary
+#10 8.321 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 8.326 [  1%] Built target duckdb_platform_binary
+#10 8.328 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 8.333 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 8.335 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 8.339 [  1%] Generating duckdb_platform_out
+#10 8.342 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 8.346 [  1%] Built target duckdb_platform
+#10 8.348 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 8.353 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 8.354 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 8.359 [  1%] Building CXX object test/extension/CMakeFiles/loadable_extension_optimizer_demo_loadable_extension.dir/loadable_extension_optimizer_demo.cpp.o
+#10 11.37 [  1%] Linking CXX shared library loadable_extension_optimizer_demo.duckdb_extension
+#10 11.42 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 11.42 [  1%] Built target loadable_extension_optimizer_demo_loadable_extension
+#10 11.43 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 11.43 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 11.43 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 11.44 [  1%] Building CXX object third_party/skiplist/CMakeFiles/duckdb_skiplistlib.dir/SkipList.cpp.o
+#10 11.68 [  1%] Linking CXX static library libduckdb_skiplistlib.a
+#10 11.69 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 11.69 [  1%] Built target duckdb_skiplistlib
+#10 11.70 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 11.70 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 11.70 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 11.71 [  1%] Building CXX object extension/core_functions/aggregate/algebraic/CMakeFiles/duckdb_core_functions_algebraic.dir/ub_duckdb_core_functions_algebraic.cpp.o
+#10 14.13 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 14.14 [  1%] Built target duckdb_core_functions_algebraic
+#10 14.14 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 14.15 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 14.15 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 14.15 [  1%] Building CXX object extension/core_functions/aggregate/distributive/CMakeFiles/duckdb_core_functions_distributive.dir/ub_duckdb_core_functions_distributive.cpp.o
+#10 38.38 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 38.39 [  1%] Built target duckdb_core_functions_distributive
+#10 38.39 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 38.40 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 38.40 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 38.40 [  1%] Building CXX object extension/core_functions/aggregate/holistic/CMakeFiles/duckdb_core_functions_holistic.dir/ub_duckdb_core_functions_holistic.cpp.o
+#10 61.17 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 61.17 [  1%] Built target duckdb_core_functions_holistic
+#10 61.17 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 61.18 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 61.18 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 61.18 [  1%] Building CXX object extension/core_functions/aggregate/nested/CMakeFiles/duckdb_core_functions_nested.dir/ub_duckdb_core_functions_nested.cpp.o
+#10 68.83 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 68.84 [  1%] Built target duckdb_core_functions_nested
+#10 68.84 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 68.85 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 68.85 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 68.85 [  1%] Building CXX object extension/core_functions/aggregate/regression/CMakeFiles/duckdb_core_functions_regression.dir/ub_duckdb_core_functions_regression.cpp.o
+#10 70.43 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 70.43 [  1%] Built target duckdb_core_functions_regression
+#10 70.43 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 70.44 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 70.44 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 70.45 [  1%] Building CXX object extension/core_functions/scalar/array/CMakeFiles/duckdb_core_functions_array.dir/ub_duckdb_core_functions_array.cpp.o
+#10 73.85 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 73.85 [  1%] Built target duckdb_core_functions_array
+#10 73.85 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 73.86 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 73.86 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 73.87 [  1%] Building CXX object extension/core_functions/scalar/bit/CMakeFiles/duckdb_core_functions_bit.dir/ub_duckdb_core_functions_bit.cpp.o
+#10 75.54 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 75.55 [  1%] Built target duckdb_core_functions_bit
+#10 75.55 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 75.55 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 75.55 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 75.56 [  2%] Building CXX object extension/core_functions/scalar/blob/CMakeFiles/duckdb_core_functions_blob.dir/ub_duckdb_core_functions_blob.cpp.o
+#10 76.60 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 76.60 [  2%] Built target duckdb_core_functions_blob
+#10 76.61 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 76.61 gmake[3]: Leaving directory '/build/duckdb/build/release'
+#10 76.61 gmake[3]: Entering directory '/build/duckdb/build/release'
+#10 76.62 [  2%] Building CXX object extension/core_functions/scalar/date/CMakeFiles/duckdb_core_functions_date.dir/ub_duckdb_core_functions_date.cpp.o
+#10 CANCELED
+ERROR: failed to build: failed to solve: Canceled: context canceled

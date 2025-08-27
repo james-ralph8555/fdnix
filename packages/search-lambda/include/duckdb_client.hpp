@@ -4,11 +4,9 @@
 #include <vector>
 #include <memory>
 #include <optional>
+#include <duckdb.hpp>
 
 namespace fdnix {
-
-    // Forward declaration for DuckDB connection (to be implemented)
-    class DuckDBConnection;
 
     /**
      * @brief Package metadata structure
@@ -97,15 +95,26 @@ namespace fdnix {
 
     private:
         std::string db_path_;
-        std::unique_ptr<DuckDBConnection> connection_;
+        std::unique_ptr<duckdb::DuckDB> database_;
+        std::unique_ptr<duckdb::Connection> connection_;
+        bool embeddings_enabled_;
         
-        // Helper methods (to be implemented)
+        // Helper methods
         std::vector<Package> combine_and_rank_results(
             const std::vector<Package>& vector_results,
             const std::vector<Package>& fts_results,
             double vector_weight = 0.6,
             double fts_weight = 0.4
         );
+        
+        // RRF (Reciprocal Rank Fusion) implementation
+        std::vector<Package> reciprocal_rank_fusion(
+            const std::vector<Package>& vector_results,
+            const std::vector<Package>& fts_results,
+            double k = 60.0
+        );
+        
+        bool check_embeddings_availability();
     };
 
 } // namespace fdnix

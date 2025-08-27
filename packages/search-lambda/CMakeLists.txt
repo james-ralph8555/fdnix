@@ -30,16 +30,28 @@ find_package(AWSSDK REQUIRED COMPONENTS core bedrock-runtime)
 # Find AWS Lambda Runtime
 find_package(aws-lambda-runtime REQUIRED)
 
-# Find DuckDB static library - prioritize static linking
+# Find DuckDB library - use shared lib for now, fix runtime later
 find_library(DUCKDB_LIBRARY
-    NAMES libduckdb.a duckdb_static libduckdb_static libduckdb
-    PATHS /usr/local/lib /opt/lib
+    NAMES libduckdb.so libduckdb_static.a libduckdb.a duckdb_static libduckdb_static
+    PATHS /usr/local/lib64 /usr/local/lib /opt/lib64 /opt/lib
     REQUIRED
 )
 find_path(DUCKDB_INCLUDE_DIR
     NAMES duckdb.hpp
     PATHS /usr/local/include /opt/include
     REQUIRED
+)
+
+# Find DuckDB extension libraries if they exist separately
+find_library(DUCKDB_FTS_LIBRARY
+    NAMES libduckdb_fts.a duckdb_fts
+    PATHS /usr/local/lib /opt/lib
+    QUIET
+)
+find_library(DUCKDB_VSS_LIBRARY
+    NAMES libduckdb_vss.a duckdb_vss
+    PATHS /usr/local/lib /opt/lib
+    QUIET
 )
 
 # Include directories
@@ -59,16 +71,42 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 # Set the output name to 'bootstrap' for Lambda custom runtime
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME bootstrap)
 
-# Link libraries
+# Precompiled DuckDB binary includes all dependencies - no need to search for separate libraries
+
+# Link libraries with proper order for static linking
 target_link_libraries(${PROJECT_NAME}
     AWS::aws-lambda-runtime
     ${AWSSDK_LINK_LIBRARIES}
     ${CURL_LIBRARIES}
     ZLIB::ZLIB
     ${DUCKDB_LIBRARY}
+)
+
+# Precompiled DuckDB includes all internal dependencies
+
+# Add system libraries and DuckDB dependencies
+target_link_libraries(${PROJECT_NAME}
+    stdc++
     dl
     pthread
+    m
+    rt
 )
+
+# Link DuckDB extensions if found separately
+if(DUCKDB_FTS_LIBRARY)
+    target_link_libraries(${PROJECT_NAME} ${DUCKDB_FTS_LIBRARY})
+    message(STATUS "Linking with separate FTS library: ${DUCKDB_FTS_LIBRARY}")
+else()
+    message(STATUS "Using FTS extension built into DuckDB library")
+endif()
+
+if(DUCKDB_VSS_LIBRARY)
+    target_link_libraries(${PROJECT_NAME} ${DUCKDB_VSS_LIBRARY})
+    message(STATUS "Linking with separate VSS library: ${DUCKDB_VSS_LIBRARY}")
+else()
+    message(STATUS "Using VSS extension built into DuckDB library")
+endif()
 
 # Install the bootstrap binary
 install(TARGETS ${PROJECT_NAME} DESTINATION bin)

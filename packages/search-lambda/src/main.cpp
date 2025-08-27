@@ -44,65 +44,77 @@ invocation_response handler(invocation_request const& request)
         }
         
         // Handle search request
-        if (!query_param.empty() && g_duckdb_client && g_bedrock_client) {
-            // Generate embedding for the query
-            auto query_embedding = g_bedrock_client->generate_embedding(query_param);
+        if (!query_param.empty() && g_duckdb_client) {
+            // Prepare search parameters
+            fdnix::SearchParams search_params;
+            search_params.query = query_param;
+            search_params.limit = limit;
+            search_params.offset = offset;
             
-            if (!query_embedding.empty()) {
-                // Perform hybrid search
-                fdnix::SearchParams search_params;
-                search_params.query = query_param;
-                search_params.limit = limit;
-                search_params.offset = offset;
-                // Optional filters
-                if (event.View().ValueExists("queryStringParameters") && !event.View().GetObject("queryStringParameters").IsNull()) {
-                    auto qps = event.View().GetObject("queryStringParameters");
-                    if (qps.ValueExists("license")) {
-                        search_params.license_filter = qps.GetString("license");
-                    }
-                    if (qps.ValueExists("category")) {
-                        search_params.category_filter = qps.GetString("category");
-                    }
+            // Optional filters
+            if (event.View().ValueExists("queryStringParameters") && !event.View().GetObject("queryStringParameters").IsNull()) {
+                auto qps = event.View().GetObject("queryStringParameters");
+                if (qps.ValueExists("license")) {
+                    search_params.license_filter = qps.GetString("license");
                 }
-                
-                auto results = g_duckdb_client->hybrid_search(search_params, query_embedding);
-                
-                // Create response JSON
-                JsonValue response_body;
-                response_body.WithString("message", "Search completed");
-                response_body.WithString("query", query_param);
-                response_body.WithInteger("total_count", results.total_count);
-                response_body.WithDouble("query_time_ms", results.query_time_ms);
-                response_body.WithString("search_type", results.search_type);
-                
-                // Add packages array
-                Aws::Utils::Array<JsonValue> packages_array(results.packages.size());
-                for (size_t i = 0; i < results.packages.size(); ++i) {
-                    JsonValue pkg;
-                    pkg.WithString("packageId", results.packages[i].packageId);
-                    pkg.WithString("packageName", results.packages[i].packageName);
-                    pkg.WithString("version", results.packages[i].version);
-                    pkg.WithString("description", results.packages[i].description);
-                    pkg.WithString("homepage", results.packages[i].homepage);
-                    pkg.WithString("license", results.packages[i].license);
-                    pkg.WithString("attributePath", results.packages[i].attributePath);
-                    pkg.WithDouble("relevanceScore", results.packages[i].relevanceScore);
-                    packages_array[i] = pkg;
+                if (qps.ValueExists("category")) {
+                    search_params.category_filter = qps.GetString("category");
                 }
-                response_body.WithArray("packages", packages_array);
-                
-                // Create API Gateway response
-                JsonValue api_response;
-                api_response.WithInteger("statusCode", 200);
-                api_response.WithString("body", response_body.View().WriteCompact());
-                
-                JsonValue headers;
-                headers.WithString("Content-Type", "application/json");
-                headers.WithString("Access-Control-Allow-Origin", "*");
-                api_response.WithObject("headers", headers);
-                
-                return invocation_response::success(api_response.View().WriteCompact(), "application/json");
             }
+            
+            // Check if embeddings are enabled and generate if needed
+            std::vector<double> query_embedding;
+            const char* enable_embeddings = std::getenv("ENABLE_EMBEDDINGS");
+            bool embeddings_enabled = enable_embeddings && 
+                                     (std::string(enable_embeddings) == "1" || 
+                                      std::string(enable_embeddings) == "true" || 
+                                      std::string(enable_embeddings) == "yes");
+            
+            if (embeddings_enabled && g_bedrock_client) {
+                query_embedding = g_bedrock_client->generate_embedding(query_param);
+                if (query_embedding.empty()) {
+                    std::cerr << "Warning: Failed to generate query embedding, falling back to FTS-only" << std::endl;
+                }
+            }
+            
+            // Perform search (hybrid if embeddings available, FTS-only otherwise)
+            auto results = g_duckdb_client->hybrid_search(search_params, query_embedding);
+            
+            // Create response JSON
+            JsonValue response_body;
+            response_body.WithString("message", "Search completed");
+            response_body.WithString("query", query_param);
+            response_body.WithInteger("total_count", results.total_count);
+            response_body.WithDouble("query_time_ms", results.query_time_ms);
+            response_body.WithString("search_type", results.search_type);
+            
+            // Add packages array
+            Aws::Utils::Array<JsonValue> packages_array(results.packages.size());
+            for (size_t i = 0; i < results.packages.size(); ++i) {
+                JsonValue pkg;
+                pkg.WithString("packageId", results.packages[i].packageId);
+                pkg.WithString("packageName", results.packages[i].packageName);
+                pkg.WithString("version", results.packages[i].version);
+                pkg.WithString("description", results.packages[i].description);
+                pkg.WithString("homepage", results.packages[i].homepage);
+                pkg.WithString("license", results.packages[i].license);
+                pkg.WithString("attributePath", results.packages[i].attributePath);
+                pkg.WithDouble("relevanceScore", results.packages[i].relevanceScore);
+                packages_array[i] = pkg;
+            }
+            response_body.WithArray("packages", packages_array);
+            
+            // Create API Gateway response
+            JsonValue api_response;
+            api_response.WithInteger("statusCode", 200);
+            api_response.WithString("body", response_body.View().WriteCompact());
+            
+            JsonValue headers;
+            headers.WithString("Content-Type", "application/json");
+            headers.WithString("Access-Control-Allow-Origin", "*");
+            api_response.WithObject("headers", headers);
+            
+            return invocation_response::success(api_response.View().WriteCompact(), "application/json");
         }
         
         // Default stub response
@@ -121,6 +133,7 @@ invocation_response handler(invocation_request const& request)
         const char* duckdb_lib_path = std::getenv("DUCKDB_LIB_PATH");
         const char* bedrock_model = std::getenv("BEDROCK_MODEL_ID");
         const char* aws_region = std::getenv("AWS_REGION");
+        const char* enable_embeddings = std::getenv("ENABLE_EMBEDDINGS");
         
         if (duckdb_path) {
             response_body.WithString("duckdb_path", duckdb_path);
@@ -133,6 +146,9 @@ invocation_response handler(invocation_request const& request)
         }
         if (aws_region) {
             response_body.WithString("aws_region", aws_region);
+        }
+        if (enable_embeddings) {
+            response_body.WithString("enable_embeddings", enable_embeddings);
         }
         
         // Add client status
@@ -201,14 +217,26 @@ int main()
         } else {
             std::cerr << "DUCKDB_PATH environment variable not set" << std::endl;
         }
-        std::cout << "Initializing Bedrock client with model: "
-                  << (bedrock_model ? bedrock_model : "amazon.titan-embed-text-v2:0")
-                  << ", region: " << (aws_region ? aws_region : "us-east-1")
-                  << std::endl;
-        g_bedrock_client = std::make_unique<fdnix::BedrockClient>(
-            aws_region ? std::string(aws_region) : std::string("us-east-1"),
-            bedrock_model ? std::string(bedrock_model) : std::string("amazon.titan-embed-text-v2:0")
-        );
+        
+        // Initialize Bedrock client only if embeddings are enabled
+        const char* enable_embeddings = std::getenv("ENABLE_EMBEDDINGS");
+        bool embeddings_enabled = enable_embeddings && 
+                                 (std::string(enable_embeddings) == "1" || 
+                                  std::string(enable_embeddings) == "true" || 
+                                  std::string(enable_embeddings) == "yes");
+        
+        if (embeddings_enabled) {
+            std::cout << "Initializing Bedrock client with model: "
+                      << (bedrock_model ? bedrock_model : "amazon.titan-embed-text-v2:0")
+                      << ", region: " << (aws_region ? aws_region : "us-east-1")
+                      << std::endl;
+            g_bedrock_client = std::make_unique<fdnix::BedrockClient>(
+                aws_region ? std::string(aws_region) : std::string("us-east-1"),
+                bedrock_model ? std::string(bedrock_model) : std::string("amazon.titan-embed-text-v2:0")
+            );
+        } else {
+            std::cout << "Embeddings disabled, skipping Bedrock client initialization" << std::endl;
+        }
         
     } catch (const std::exception& e) {
         std::cerr << "Error initializing clients: " << e.what() << std::endl;

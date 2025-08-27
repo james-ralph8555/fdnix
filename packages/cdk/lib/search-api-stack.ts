@@ -56,6 +56,7 @@ export class FdnixSearchApiStack extends Stack {
         DUCKDB_PATH: '/opt/fdnix/fdnix.duckdb',
         BEDROCK_MODEL_ID: bedrockModelId,
         BEDROCK_OUTPUT_DIMENSIONS: '256',
+        ENABLE_EMBEDDINGS: 'true', // Set to 'false' for FTS-only mode
       },
     });
 

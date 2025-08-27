@@ -57,24 +57,15 @@ RUN git clone --depth 1 https://github.com/awslabs/aws-lambda-cpp.git && \
     ninja -C build install && \
     rm -rf /build/aws-lambda-cpp
 
-# Build DuckDB from source as static library with all dependencies
-RUN git clone --depth 1 --branch v1.3.2 https://github.com/duckdb/duckdb.git && \
-    cd duckdb && \
-    cmake -Bbuild \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH=/usr/local \
-        -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DBUILD_SHARED_LIBS=OFF \
-        -DBUILD_UNITTESTS=OFF \
-        -DBUILD_SHELL=OFF \
-        -DENABLE_SANITIZER=OFF \
-        -DENABLE_UBSAN=OFF \
-        -DFORCE_COLORED_OUTPUT=OFF \
-        -DSTATIC_LIBCPP=ON \
-        -GNinja && \
-    ninja -C build -j4 && \
-    ninja -C build install && \
-    rm -rf /build/duckdb
+# Install DuckDB from precompiled binary release for v1.3.2
+RUN curl -L https://github.com/duckdb/duckdb/releases/download/v1.3.2/libduckdb-linux-amd64.zip -o duckdb.zip && \
+    unzip duckdb.zip && \
+    # Install both static and shared libraries and headers
+    cp libduckdb_static.a /usr/local/lib64/ && \
+    cp libduckdb.so /usr/local/lib64/ && \
+    cp duckdb.hpp /usr/local/include/ && \
+    cp duckdb.h /usr/local/include/ && \
+    rm -rf duckdb.zip libduckdb_static.a libduckdb.so duckdb.hpp duckdb.h
 
 # Copy source code
 COPY . /build/lambda
@@ -89,27 +80,17 @@ RUN cmake -Bbuild \
         -GNinja && \
     ninja -C build -j4
 
-# Minimal runtime stage for self-contained binary
+# Minimal runtime stage - use same base to avoid package manager issues
 FROM amazonlinux:2023
 
-# Install runtime dependencies including elfutils for libdw
-RUN dnf update -y && \
-    dnf install -y \
-        glibc \
-        libstdc++ \
-        elfutils-libs \
-        libcurl \
-        openssl-libs \
-        zlib && \
-    dnf clean all
+# Create necessary directories
+RUN mkdir -p /usr/local/lib64 /var/task
 
-# Copy the self-contained Lambda function
+# Copy the Lambda function and DuckDB library
 COPY --from=builder /build/lambda/build/bootstrap /var/task/bootstrap
+COPY --from=builder /usr/local/lib64/libduckdb.so /usr/local/lib64/libduckdb.so
 
-# Make bootstrap executable and verify it's self-contained
+# Make bootstrap executable and verify libraries are found
 RUN chmod +x /var/task/bootstrap && \
-    ldd /var/task/bootstrap || echo "Static binary - no dynamic dependencies"
-
-# Set working directory and entry point for Lambda
-WORKDIR /var/task
-CMD ["/var/task/bootstrap"]
+    ldconfig && \
+    ldd /var/task/bootstrap

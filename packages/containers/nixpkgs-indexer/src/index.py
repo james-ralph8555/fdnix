@@ -94,8 +94,9 @@ async def main() -> int:
             main_writer.write_artifact(packages)
             logger.info("Main database generation completed successfully!")
         
-        # Phase 2: Embedding Generation (if needed)
-        if processing_mode in ("embedding", "both"):
+        # Phase 2: Embedding Generation (if needed and enabled)
+        enable_embeddings = _truthy(os.environ.get("ENABLE_EMBEDDINGS", "true"))  # Default to enabled
+        if processing_mode in ("embedding", "both") and enable_embeddings:
             logger.info("=== EMBEDDING GENERATION PHASE ===")
             
             # Set required environment for embedding generator
@@ -120,6 +121,9 @@ async def main() -> int:
             generator = EmbeddingGenerator()
             await generator.run(force_rebuild=force_rebuild)
             logger.info("Embedding generation completed successfully!")
+        elif processing_mode in ("embedding", "both"):
+            logger.info("=== EMBEDDING GENERATION SKIPPED (EMBEDDINGS DISABLED) ===")
+            logger.info("ENABLE_EMBEDDINGS is set to false, skipping embedding generation")
 
         # Phase 3: Minified Database Generation (if requested)
         if processing_mode in ("minified", "both"):

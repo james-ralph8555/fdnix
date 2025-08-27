@@ -86,3 +86,11 @@ ldd dist/bootstrap || echo "Static binary - no dynamic dependencies"
 
 - Build `bootstrap` (one of the methods above)
 - Deploy (from CDK folder): `(cd packages/cdk && npm run deploy)`
+
+## TODO
+
+- [ ] **Secure API access**: Implement proper API security to restrict access to only authorized domains:
+  - Add CORS configuration to only allow requests from fdnix.com domain
+  - Consider implementing API key authentication for additional security
+  - Add rate limiting to prevent abuse
+  - Consider using AWS WAF for additional protection against common web exploits

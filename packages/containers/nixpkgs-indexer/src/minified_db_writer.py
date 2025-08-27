@@ -276,6 +276,7 @@ class MinifiedDuckDBWriter:
             # Add the DuckDB file to the /opt/fdnix/ directory in the zip
             zipf.write(str(self.output_path), f'fdnix/{self.output_path.name}')
             
+        # Upload the raw DuckDB file to S3 (for direct access/testing)
         logger.info(
             "Uploading minified artifact to s3://%s/%s (region=%s)",
             self.s3_bucket,
@@ -283,7 +284,7 @@ class MinifiedDuckDBWriter:
             self.region,
         )
         s3 = boto3.client("s3", region_name=self.region)
-        s3.upload_file(str(zip_path), self.s3_bucket, self.s3_key)
+        s3.upload_file(str(self.output_path), self.s3_bucket, self.s3_key)
         
         # Clean up the zip file
         zip_path.unlink()
