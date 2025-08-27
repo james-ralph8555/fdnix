@@ -45,7 +45,7 @@ export class FdnixSearchApiStack extends Stack {
     // The build places a `bootstrap` binary in `packages/search-lambda/dist`.
     this.searchFunction = new lambda.Function(this, 'SearchFunction', {
       runtime: lambda.Runtime.PROVIDED_AL2023,
-      architecture: lambda.Architecture.ARM_64,
+      architecture: lambda.Architecture.X86_64,
       handler: 'bootstrap',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/dist')),
       timeout: Duration.seconds(30),

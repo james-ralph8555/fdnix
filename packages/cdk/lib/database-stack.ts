@@ -34,7 +34,7 @@ export class FdnixDatabaseStack extends Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, 'empty-layer')),
       description: 'Minified DuckDB file optimized for Lambda with search indexes and essential data only',
       compatibleRuntimes: [lambda.Runtime.PROVIDED_AL2023],
-      compatibleArchitectures: [lambda.Architecture.ARM_64],
+      compatibleArchitectures: [lambda.Architecture.X86_64],
     });
 
     // Lambda Layer for DuckDB shared library with extensions
@@ -43,7 +43,7 @@ export class FdnixDatabaseStack extends Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, 'duckdb-build')),
       description: 'DuckDB shared library with FTS and VSS extensions for C++ Lambda',
       compatibleRuntimes: [lambda.Runtime.PROVIDED_AL2023],
-      compatibleArchitectures: [lambda.Architecture.ARM_64],
+      compatibleArchitectures: [lambda.Architecture.X86_64],
     });
 
     // IAM role for database access

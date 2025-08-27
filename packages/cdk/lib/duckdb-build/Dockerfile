@@ -16,7 +16,8 @@ RUN apt-get update && \
         g++-aarch64-linux-gnu \
         wget \
         curl \
-        ca-certificates && \
+        ca-certificates \
+        unzip && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -43,32 +44,32 @@ COPY build-config.cmake .
 # Stage 2: Build DuckDB with extensions
 FROM builder AS duckdb-build
 
-# Configure CMake build with static extensions and cross-compilation
-## TODO(optimizations): Consider enabling LTO/PGO and tuning -O flags for size/speed.
-## Also consider pruning unused extensions at configure-time to reduce lib size.
-RUN cmake -B build \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DEXTENSION_CONFIGS=build-config.cmake \
-    -DCMAKE_SYSTEM_NAME=Linux \
-    -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-    -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
-    -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++ \
-    -DCMAKE_SHARED_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
-    -DBUILD_SHARED_LIBS=ON \
-    -GNinja \
-    .
+# Replace source compilation with prebuilt ARM64 DuckDB binary
+ENV DUCKDB_VERSION=v1.3.2
+ENV DUCKDB_ZIP_URL=https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/libduckdb-linux-arm64.zip
 
-# Build with parallel jobs
-## TODO(optimizations): Pass appropriate flags to enable Thin/Full LTO and PGO if adopted.
-RUN ninja -C build -j$(nproc)
+WORKDIR /build
+
+# Download and extract precompiled DuckDB library and headers
+RUN mkdir -p /build/duckdb-prebuilt /build/out/lib /build/out/include && \
+    curl -L "$DUCKDB_ZIP_URL" -o /build/duckdb-prebuilt/libduckdb.zip && \
+    unzip -q /build/duckdb-prebuilt/libduckdb.zip -d /build/duckdb-prebuilt && \
+    # Copy shared library
+    find /build/duckdb-prebuilt -maxdepth 2 -type f -name 'libduckdb.so*' -exec cp {} /build/out/lib/libduckdb.so \; && \
+    # Copy headers (duckdb.h / duckdb.hpp) if present
+    if ls /build/duckdb-prebuilt/*duckdb*.h* >/dev/null 2>&1; then cp /build/duckdb-prebuilt/*duckdb*.h* /build/out/include/; fi && \
+    # Fallback if headers are in an include/ directory in the archive
+    if [ -d /build/duckdb-prebuilt/include ]; then cp -r /build/duckdb-prebuilt/include/. /build/out/include/; fi
 
 # Stage 3: Package for Lambda Layer
 FROM scratch AS layer
 
 # Copy the built shared library
 ## TODO(optimizations): Ensure final binary is stripped to minimize layer size.
-COPY --from=duckdb-build /build/duckdb/build/src/libduckdb.so /opt/lib/libduckdb.so
+COPY --from=duckdb-build /build/out/lib/libduckdb.so /opt/lib/libduckdb.so
+
+# Include headers in the Lambda layer for potential native builds
+COPY --from=duckdb-build /build/out/include/ /opt/include/
 
 # Copy any additional required libraries (if needed)
 # The ARM64 shared library will be used by the C++ Lambda function

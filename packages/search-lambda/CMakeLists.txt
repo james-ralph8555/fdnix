@@ -26,15 +26,15 @@ find_package(AWSSDK REQUIRED COMPONENTS core bedrock-runtime)
 # Find AWS Lambda Runtime
 find_package(aws-lambda-runtime REQUIRED)
 
-# Find DuckDB
+# Find DuckDB - check both build-time and Lambda layer paths
 find_library(DUCKDB_LIBRARY
     NAMES duckdb libduckdb
-    PATHS /usr/local/lib
+    PATHS /usr/local/lib /opt/lib
     REQUIRED
 )
 find_path(DUCKDB_INCLUDE_DIR
     NAMES duckdb.hpp
-    PATHS /usr/local/include
+    PATHS /usr/local/include /opt/include
     REQUIRED
 )
 

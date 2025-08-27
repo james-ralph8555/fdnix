@@ -37,7 +37,7 @@ RUN git clone --recurse-submodules --depth 1 https://github.com/aws/aws-sdk-cpp.
         -DAUTORUN_UNIT_TESTS=OFF \
         -DBUILD_SHARED_LIBS=OFF \
         -GNinja && \
-    ninja -C build -j$(nproc) && \
+    ninja -C build -j4 && \
     ninja -C build install && \
     rm -rf /build/aws-sdk-cpp
 
@@ -50,20 +50,18 @@ RUN git clone --depth 1 https://github.com/awslabs/aws-lambda-cpp.git && \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DBUILD_SHARED_LIBS=OFF \
         -GNinja && \
-    ninja -C build -j$(nproc) && \
+    ninja -C build -j4 && \
     ninja -C build install && \
     rm -rf /build/aws-lambda-cpp
 
-# Build DuckDB from source for ARM64
-RUN git clone https://github.com/duckdb/duckdb.git && \
-    cd duckdb && \
-    CORE_EXTENSIONS='autocomplete;httpfs;icu;json;tpch' GEN=ninja make && \
-    cp build/release/src/libduckdb.so /usr/local/lib/ && \
-    cp src/include/duckdb.hpp /usr/local/include/ && \
-    cp src/include/duckdb.h /usr/local/include/ && \
-    cp -r src/include/duckdb /usr/local/include/ && \
+# Install DuckDB precompiled library for x86_64
+RUN curl -L "https://github.com/duckdb/duckdb/releases/download/v1.3.2/libduckdb-linux-amd64.zip" -o /tmp/libduckdb.zip && \
+    unzip -q /tmp/libduckdb.zip -d /tmp/duckdb && \
+    find /tmp/duckdb -maxdepth 2 -type f -name 'libduckdb.so*' -exec cp {} /usr/local/lib/libduckdb.so \; && \
+    if ls /tmp/duckdb/*duckdb*.h* >/dev/null 2>&1; then cp /tmp/duckdb/*duckdb*.h* /usr/local/include/; fi && \
+    if [ -d /tmp/duckdb/include ]; then cp -r /tmp/duckdb/include/. /usr/local/include/; fi && \
     ldconfig && \
-    rm -rf /build/duckdb
+    rm -rf /tmp/duckdb /tmp/libduckdb.zip
 
 # Copy source code
 COPY . /build/lambda
@@ -76,7 +74,7 @@ RUN cmake -Bbuild \
         -DCMAKE_PREFIX_PATH=/usr/local \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -GNinja && \
-    ninja -C build -j$(nproc)
+    ninja -C build -j4
 
 # Runtime stage
 FROM amazonlinux:2023
