@@ -11,9 +11,13 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # Compiler flags for optimization and security
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -flto")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -fPIC")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+
+# Prefer static linking where possible
+set(CMAKE_EXE_LINKER_FLAGS "-Wl,--as-needed")
+set(BUILD_SHARED_LIBS OFF)
 
 # Find required packages
 find_package(CURL REQUIRED)
@@ -55,17 +59,15 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 # Set the output name to 'bootstrap' for Lambda custom runtime
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME bootstrap)
 
-# Link libraries statically where possible
+# Link libraries
 target_link_libraries(${PROJECT_NAME}
     AWS::aws-lambda-runtime
     ${AWSSDK_LINK_LIBRARIES}
     ${CURL_LIBRARIES}
     ZLIB::ZLIB
     ${DUCKDB_LIBRARY}
-    -static-libgcc
-    -static-libstdc++
-    dl  # For dynamic loading
-    pthread  # Required for threading
+    dl
+    pthread
 )
 
 # Install the bootstrap binary

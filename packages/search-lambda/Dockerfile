@@ -17,7 +17,10 @@ RUN dnf update -y && \
         gzip \
         python3 \
         python3-pip \
-        python3-devel && \
+        python3-devel \
+        libstdc++-static \
+        glibc-static \
+        elfutils-devel && \
     dnf clean all
 
 # Build stage
@@ -78,21 +81,26 @@ COPY . /build/lambda
 
 WORKDIR /build/lambda
 
-# Build the Lambda function with static linking
+# Build the Lambda function
 RUN cmake -Bbuild \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH=/usr/local \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
         -GNinja && \
     ninja -C build -j4
 
 # Minimal runtime stage for self-contained binary
 FROM amazonlinux:2023
 
-# Install minimal runtime dependencies
+# Install runtime dependencies including elfutils for libdw
 RUN dnf update -y && \
-    dnf install -y glibc && \
+    dnf install -y \
+        glibc \
+        libstdc++ \
+        elfutils-libs \
+        libcurl \
+        openssl-libs \
+        zlib && \
     dnf clean all
 
 # Copy the self-contained Lambda function
