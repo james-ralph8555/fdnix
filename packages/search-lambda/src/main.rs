@@ -98,7 +98,7 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayRespons
                 }
             } else {
                 // Default health check response
-                let response_body = create_health_check_response(query_param);
+                let response_body = create_health_check_response(query_param).await;
                 let body = serde_json::to_string(&response_body)?;
                 Ok(ApiGatewayResponse {
                     status_code: 200,
@@ -251,7 +251,7 @@ async fn handle_search_request(
     })
 }
 
-fn create_health_check_response(query_param: String) -> SearchResponseBody {
+async fn create_health_check_response(query_param: String) -> SearchResponseBody {
     let mut response = SearchResponseBody {
         message: "fdnix search API (Rust) — stub active".to_string(),
         note: Some("This is a Rust Lambda stub. DuckDB integration ready.".to_string()),

@@ -1,8 +1,8 @@
 use aws_config::meta::region::RegionProviderChain;
+use aws_config::Region;
 use aws_sdk_bedrockruntime::primitives::Blob;
 use aws_sdk_bedrockruntime::{Client, Error as BedrockError};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::env;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -66,7 +66,7 @@ impl BedrockClient {
             .unwrap_or(output_dimensions);
 
         // Configure AWS SDK with retry logic and timeouts
-        let region_provider = RegionProviderChain::first_try(region.clone().into())
+        let region_provider = RegionProviderChain::first_try(Region::new(region.clone()))
             .or_default_provider();
         
         let config = aws_config::defaults(aws_config::BehaviorVersion::latest())

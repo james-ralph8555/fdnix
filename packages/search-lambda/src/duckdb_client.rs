@@ -1,4 +1,4 @@
-use duckdb::{Connection, Result as DuckDBResult};
+use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -52,6 +52,11 @@ pub struct DuckDBClient {
     connection: Option<Connection>,
     embeddings_enabled: bool,
 }
+
+// SAFETY: AWS Lambda functions run in single-threaded environments,
+// so this is safe for static storage in Lambda context
+unsafe impl Send for DuckDBClient {}
+unsafe impl Sync for DuckDBClient {}
 
 impl DuckDBClient {
     pub fn new(db_path: &str) -> Result<Self, DuckDBClientError> {
