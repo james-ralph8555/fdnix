@@ -6,7 +6,7 @@ Status: Three-phase pipeline with S3 artifacts (metadata → embeddings → mini
 
 - Nixpkgs Indexer (`packages/containers/nixpkgs-indexer/`)
   - Phases: Metadata, Embeddings, Minified (run individually or all)
-  - Outputs: Main dataset `fdnix-data.lancedb` (metadata + embeddings) → Minified dataset `fdnix.lancedb` (Tantivy FTS, essential columns)
+  - Outputs: Main dataset `fdnix-data.lancedb` (metadata + embeddings) → Minified dataset `fdnix.lancedb` (FTS, essential columns)
   - Modes: `metadata`, `embedding`, `minified`, or `both`/`full` (all phases; default)
   - S3 integration for upload/download of LanceDB directory trees under key prefixes
   - Runs as non-root; dependencies installed via Nix on `nixos/nix` (Python, LanceDB, pydantic, pandas, pyarrow, boto3, httpx, etc.)
@@ -83,7 +83,7 @@ For AWS runs, provide `ARTIFACTS_BUCKET` and prefixes for one or both artifacts 
 ## Outputs and Schema
 
 - Main dataset: `fdnix-data.lancedb` (complete metadata + embeddings once generated)
-- Minified dataset: `fdnix.lancedb` (only essential columns + Tantivy FTS; simplified license/maintainers; used by Lambda layer)
+- Minified dataset: `fdnix.lancedb` (only essential columns + FTS; simplified license/maintainers; used by Lambda layer)
 - Core table present in both:
   - `packages(...)` with typed columns and a `vector` field; FTS over key text fields; IVF‑PQ vector index when embeddings are present.
 
@@ -104,7 +104,7 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
   - Optionally uploads the updated main dataset to S3.
 - Minified phase:
   - Creates `fdnix.lancedb` by copying essential data and embeddings from the main dataset.
-  - Builds the FTS index in the minified dataset using Tantivy.
+  - Builds the FTS index in the minified dataset.
   - Uploads the minified dataset to S3 for use by the Lambda layer.
 
 ## Legacy Support Removal

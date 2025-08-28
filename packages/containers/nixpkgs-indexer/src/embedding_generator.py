@@ -9,17 +9,24 @@ from typing import List, Dict, Any, Tuple
 import lancedb
 import pandas as pd
 from botocore.exceptions import ClientError
-from bedrock_client import BedrockBatchClient
+from bedrock_client import BedrockBatchClient, BedrockIndividualClient
 
 logger = logging.getLogger(__name__)
 
 class EmbeddingGenerator:
     def __init__(self):
         self.validate_environment()
-        self.bedrock_client = BedrockBatchClient(
+        
+        # Initialize both batch and individual clients
+        self.bedrock_batch_client = BedrockBatchClient(
             region=os.environ.get('AWS_REGION'),
             model_id=os.environ.get('BEDROCK_MODEL_ID')
         )
+        self.bedrock_individual_client = BedrockIndividualClient(
+            region=os.environ.get('AWS_REGION'),
+            model_id=os.environ.get('BEDROCK_MODEL_ID')
+        )
+        self.use_batch_api = True  # Start with batch, fall back to individual if needed
         
         # Use Bedrock batch size for processing (up to 50,000)
         self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '10000'))
@@ -302,10 +309,20 @@ class EmbeddingGenerator:
                 content_hashes.append(package.get('content_hash'))
             
             try:
-                # Generate embeddings using Bedrock batch inference
+                # Generate embeddings using appropriate client
                 logger.info(f"Generating embeddings for {len(texts)} new/changed texts...")
                 texts_with_ids = [(pkg_id, text) for pkg_id, text in zip(new_package_ids, texts)]
-                embeddings_with_ids = await self.bedrock_client.generate_embeddings_batch(texts_with_ids)
+                
+                if self.use_batch_api:
+                    try:
+                        embeddings_with_ids = await self.bedrock_batch_client.generate_embeddings_batch(texts_with_ids)
+                    except Exception as e:
+                        logger.error(f"Batch embedding generation failed: {e}")
+                        logger.info("Falling back to individual API...")
+                        self.use_batch_api = False
+                        embeddings_with_ids = await self.bedrock_individual_client.generate_embeddings_batch(texts_with_ids)
+                else:
+                    embeddings_with_ids = await self.bedrock_individual_client.generate_embeddings_batch(texts_with_ids)
                 
                 # Convert to list indexed by original order
                 embeddings_dict = {record_id: embedding for record_id, embedding in embeddings_with_ids}
@@ -350,11 +367,17 @@ class EmbeddingGenerator:
         logger.info("Starting fdnix embedding generation process...")
         
         try:
-            # Test Bedrock access first
+            # Test Bedrock access first - try batch, then individual
             logger.info("Validating Bedrock model access...")
-            if not self.bedrock_client.validate_model_access():
+            if self.use_batch_api and self.bedrock_batch_client.validate_model_access():
+                logger.info("Batch API model access validated successfully")
+            elif self.bedrock_individual_client.validate_model_access():
+                logger.info("Individual API model access validated successfully")
+                if self.use_batch_api:
+                    logger.info("Falling back to individual API due to batch API access issues")
+                    self.use_batch_api = False
+            else:
                 raise RuntimeError("Cannot access Bedrock model. Check IAM permissions and model availability.")
-            logger.info("Bedrock model access validated successfully")
             
             # Connect to LanceDB, downloading current artifact from S3 if missing
             downloaded_current = False

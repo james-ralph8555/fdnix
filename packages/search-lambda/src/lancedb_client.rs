@@ -1,7 +1,7 @@
-use lancedb::{Connection, Table};
-use lancedb::query::{QueryBase, ExecutableQuery, Select};
+use lancedb::{Connection, Table, DistanceType};
+use lancedb::query::{QueryBase, ExecutableQuery, Select, QueryExecutionOptions};
 use lance_index::scalar::FullTextSearchQuery;
-use arrow::array::{RecordBatch, StringArray};
+use arrow::array::{RecordBatch, StringArray, Float64Array, Float32Array};
 use futures_util::stream::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -165,16 +165,18 @@ impl LanceDBClient {
             .ok_or(LanceDBClientError::NotInitialized)?;
 
         if self.embeddings_enabled && query_embedding.is_some() && !query_embedding.unwrap().is_empty() {
-            // Hybrid search mode using LanceDB's built-in hybrid search
+            // True hybrid search mode using LanceDB's built-in hybrid search
             results.search_type = "hybrid".to_string();
             
             let query_vec: Vec<f32> = query_embedding.unwrap().iter().map(|&x| x as f32).collect();
             
             let search_results = table
                 .query()
+                .full_text_search(FullTextSearchQuery::new(params.query.clone()))
                 .nearest_to(query_vec)?
+                .distance_type(DistanceType::Cosine)
                 .limit(params.limit as usize)
-                .execute()
+                .execute_hybrid(QueryExecutionOptions::default())
                 .await?;
 
             let batches: Vec<RecordBatch> = search_results.try_collect().await?;
@@ -214,6 +216,7 @@ impl LanceDBClient {
     }
 
     pub async fn vector_search(&self, query_embedding: &[f64], limit: i32) -> Result<SearchResults, LanceDBClientError> {
+        let start_time = Instant::now();
         let mut results = SearchResults {
             packages: Vec::new(),
             total_count: 0,
@@ -233,6 +236,7 @@ impl LanceDBClient {
         let search_results = table
             .query()
             .nearest_to(query_vec)?
+            .distance_type(DistanceType::Cosine)
             .limit(limit as usize)
             .execute()
             .await?;
@@ -240,11 +244,13 @@ impl LanceDBClient {
         let batches: Vec<RecordBatch> = search_results.try_collect().await?;
         results.packages = self.arrow_batches_to_packages(batches)?;
         results.total_count = results.packages.len() as i32;
+        results.query_time_ms = start_time.elapsed().as_millis() as f64;
 
         Ok(results)
     }
 
     pub async fn fts_search(&self, query: &str, limit: i32) -> Result<SearchResults, LanceDBClientError> {
+        let start_time = Instant::now();
         let mut results = SearchResults {
             packages: Vec::new(),
             total_count: 0,
@@ -280,14 +286,17 @@ impl LanceDBClient {
                 // Fallback to basic filter search
                 let fallback_results = self.fallback_search(query, limit).await?;
                 results.packages = fallback_results.packages;
+                results.search_type = "fallback".to_string();
             }
         }
 
         results.total_count = results.packages.len() as i32;
+        results.query_time_ms = start_time.elapsed().as_millis() as f64;
         Ok(results)
     }
 
     async fn fallback_search(&self, query: &str, limit: i32) -> Result<SearchResults, LanceDBClientError> {
+        let start_time = Instant::now();
         let mut results = SearchResults {
             packages: Vec::new(),
             total_count: 0,
@@ -311,12 +320,10 @@ impl LanceDBClient {
         let batches: Vec<RecordBatch> = search_results.try_collect().await?;
         results.packages = self.arrow_batches_to_packages(batches)?;
         
-        // Assign decreasing scores for fallback results
-        for (i, pkg) in results.packages.iter_mut().enumerate() {
-            pkg.relevance_score = 1.0 - (i as f64 * 0.1);
-        }
+        // Note: arrow_to_packages now handles scoring, including fallback scoring for missing score columns
 
         results.total_count = results.packages.len() as i32;
+        results.query_time_ms = start_time.elapsed().as_millis() as f64;
         Ok(results)
     }
 
@@ -389,7 +396,47 @@ impl LanceDBClient {
         let attribute_path_col = batch.column_by_name("attribute_path")
             .and_then(|col| col.as_any().downcast_ref::<StringArray>());
 
+        // Extract LanceDB score columns (try different possible names)
+        let score_col = batch.column_by_name("_distance")
+            .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+            .or_else(|| batch.column_by_name("_score")
+                .and_then(|col| col.as_any().downcast_ref::<Float32Array>()))
+            .or_else(|| batch.column_by_name("score")
+                .and_then(|col| col.as_any().downcast_ref::<Float32Array>()))
+            .or_else(|| batch.column_by_name("_relevance")
+                .and_then(|col| col.as_any().downcast_ref::<Float32Array>()));
+            
+        // Also try Float64 columns
+        let score_col_f64 = if score_col.is_none() {
+            batch.column_by_name("_distance")
+                .and_then(|col| col.as_any().downcast_ref::<Float64Array>())
+                .or_else(|| batch.column_by_name("_score")
+                    .and_then(|col| col.as_any().downcast_ref::<Float64Array>()))
+                .or_else(|| batch.column_by_name("score")
+                    .and_then(|col| col.as_any().downcast_ref::<Float64Array>()))
+                .or_else(|| batch.column_by_name("_relevance")
+                    .and_then(|col| col.as_any().downcast_ref::<Float64Array>()))
+        } else { None };
+
         for i in 0..num_rows {
+            // Extract relevance score from LanceDB results
+            let relevance_score = if let Some(col) = score_col {
+                if col.is_null(i) { 1.0 } else {
+                    let distance = col.value(i) as f64;
+                    // Convert distance to relevance (lower distance = higher relevance)
+                    if distance > 0.0 { 1.0 / (1.0 + distance) } else { 1.0 }
+                }
+            } else if let Some(col) = score_col_f64 {
+                if col.is_null(i) { 1.0 } else {
+                    let distance = col.value(i);
+                    // Convert distance to relevance (lower distance = higher relevance)
+                    if distance > 0.0 { 1.0 / (1.0 + distance) } else { 1.0 }
+                }
+            } else {
+                // If no score column found, assign decreasing relevance based on result order
+                1.0 - (i as f64 * 0.001)
+            };
+            
             let package = Package {
                 package_id: package_id_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
                 package_name: package_name_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
@@ -398,7 +445,7 @@ impl LanceDBClient {
                 homepage: homepage_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
                 license: license_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
                 attribute_path: attribute_path_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
-                relevance_score: 1.0, // Will be computed based on search results
+                relevance_score,
             };
             packages.push(package);
         }
