@@ -2,12 +2,15 @@
   "name": "fdnix-search-lambda",
   "version": "0.1.0",
   "private": true,
-  "description": "C++ AWS Lambda for fdnix hybrid search with DuckDB (custom runtime)",
+  "description": "Rust AWS Lambda for fdnix hybrid search with DuckDB (custom runtime)",
   "scripts": {
-    "build": "./build.sh",
+    "build": "cargo build --release --target x86_64-unknown-linux-musl && mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/bootstrap dist/",
+    "build-dev": "cargo build --target x86_64-unknown-linux-musl && mkdir -p dist && cp target/x86_64-unknown-linux-musl/release/bootstrap dist/",
     "docker-build": "docker build -t fdnix-search-lambda .",
-    "test": "echo \"C++ tests not implemented yet\"",
-    "clean": "rm -rf build dist"
+    "test": "cargo test",
+    "clean": "cargo clean && rm -rf dist",
+    "fmt": "cargo fmt",
+    "lint": "cargo clippy"
   }
 }
 
