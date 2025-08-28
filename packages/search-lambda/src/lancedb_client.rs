@@ -265,10 +265,10 @@ impl LanceDBClient {
         let filter = format!("package_name LIKE '%{}%' OR description LIKE '%{}%'", query, query);
         
         let search_results = table
-            .scan()
-            .filter(&filter)
-            .limit(Some(limit as usize), None)
-            .to_arrow()
+            .query()
+            .filter(&filter)?
+            .limit(limit as usize)
+            .execute()
             .await?;
 
         results.packages = self.arrow_to_packages(search_results)?;
@@ -299,7 +299,7 @@ impl LanceDBClient {
 
     async fn check_embeddings_availability(&self, table: &Table) -> bool {
         // Check if vector column exists and has data
-        match table.scan().limit(Some(1), None).to_arrow().await {
+        match table.query().limit(1).execute().await {
             Ok(batch) => {
                 let schema = batch.schema();
                 let has_vector_col = schema.fields().iter().any(|field| field.name() == "vector");
@@ -309,7 +309,7 @@ impl LanceDBClient {
                 }
 
                 // Check if we have any non-null vectors
-                match table.count_rows(Some("vector IS NOT NULL")).await {
+                match table.count_rows(Some("vector IS NOT NULL".to_string())).await {
                     Ok(count) => count > 0,
                     Err(_) => false,
                 }
@@ -340,13 +340,13 @@ impl LanceDBClient {
 
         for i in 0..num_rows {
             let package = Package {
-                package_id: package_id_col.and_then(|col| col.value(i).parse().ok()).unwrap_or_default(),
-                package_name: package_name_col.and_then(|col| col.value(i).parse().ok()).unwrap_or_default(),
-                version: version_col.and_then(|col| col.value(i).parse().ok()).unwrap_or_default(),
-                description: description_col.and_then(|col| col.value(i).parse().ok()).unwrap_or_default(),
-                homepage: homepage_col.and_then(|col| col.value(i).parse().ok()).unwrap_or_default(),
-                license: license_col.and_then(|col| col.value(i).parse().ok()).unwrap_or_default(),
-                attribute_path: attribute_path_col.and_then(|col| col.value(i).parse().ok()).unwrap_or_default(),
+                package_id: package_id_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
+                package_name: package_name_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
+                version: version_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
+                description: description_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
+                homepage: homepage_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
+                license: license_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
+                attribute_path: attribute_path_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
                 relevance_score: 1.0, // Will be computed based on search results
             };
             packages.push(package);

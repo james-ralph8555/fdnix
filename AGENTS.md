@@ -8,7 +8,7 @@ Planned monorepo layout (see INIT.md):
 - `packages/containers/` — Data pipeline containers:
   - `metadata-generator/`
   - `embedding-generator/`
-- `packages/search-lambda/` — Hybrid search API (Node.js/TypeScript).
+- `packages/search-lambda/` — Hybrid search API (Rust).
 - `packages/frontend/` — SolidJS app (SSG via Vite).
 - `INIT.md` — implementation plan; `README.md` — user-facing overview.
 - Note: `nixpkgs/` is vendored documentation; do not modify.
@@ -26,12 +26,12 @@ Planned monorepo layout (see INIT.md):
 
 - TypeScript/JavaScript: 2-space indent, Prettier formatting, ESLint for linting.
 - Naming: `camelCase` for vars/functions, `PascalCase` for types/classes, `kebab-case` for file/dir names.
-- Commit to TypeScript where possible; keep Lambda and CDK strictly typed.
+- Commit to TypeScript where possible for CDK/frontend; Lambda is Rust and should follow idiomatic Rust patterns with strict typing.
 
 ## Testing Guidelines
 
 - Frontend: Vitest + Testing Library; name tests `*.test.ts(x)` next to sources.
-- Lambda: Jest; name tests `*.test.ts` under `src/` or `__tests__/`.
+- Lambda: Rust `cargo test` (invoked via `npm run test`).
 - Run all tests (from repo root): `npm run test`. Target a minimum of smoke tests per package.
 
 ## Commit & Pull Request Guidelines
@@ -55,4 +55,4 @@ Planned monorepo layout (see INIT.md):
 
 ## Architecture Overview
 
-fdnix performs hybrid search over nixpkgs: semantic vectors (Faiss in S3 bucket `fdnix-vec`) + keyword relevance (OpenSearch). The API (Lambda) fuses results and hydrates from DynamoDB; a SolidJS static UI queries the API. See `INIT.md` for implementation details.
+fdnix performs hybrid search over nixpkgs using LanceDB for both full‑text (BM25) and vector ANN search, fused via reciprocal rank fusion in a Rust AWS Lambda. The LanceDB dataset is packaged in a Lambda layer (read‑only) and refreshed by a daily indexing pipeline. The SolidJS static UI queries the API. See `INIT.md` for implementation details.

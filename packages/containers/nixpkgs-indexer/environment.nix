@@ -4,6 +4,8 @@ in
 [
   # System-level dependencies
   pkgs.gcc
+  pkgs.rustc
+  pkgs.cargo
 
   # Unified Python environment with its packages
   (pkgs.python313.withPackages (ps: with ps; [

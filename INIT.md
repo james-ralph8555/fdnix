@@ -2,18 +2,18 @@ INIT: fdnix - A Hybrid Search Engine for nixpkgs
 
 This document outlines the development plan for fdnix, a serverless, JAMstack-based search engine for the Nix packages collection (nixpkgs). The goal is to provide fast, relevant, and filterable search results using a hybrid approach that combines traditional text search with modern vector-based semantic search.
 
-Important update: The storage and query architecture now centers on a minified DuckDB database embedded in a Lambda Layer, queried directly from the search Lambda. The pipeline also produces a full database for analytics/debugging stored in S3. We no longer use S3 Vectors, S3 Tables/Athena, or a Rust runtime for the search function.
+Important update: The storage and query architecture now centers on a minified LanceDB dataset embedded in a Lambda Layer, queried directly from a Rust search Lambda. The pipeline also produces a full LanceDB dataset for analytics/debugging stored in S3. We no longer use the prior DuckDB-based runtime; all functionality remains intact with LanceDB providing FTS (BM25) and vector ANN.
 
-Implementation Summary (Minified Database)
+Implementation Summary (Minified Dataset)
 
-- MinifiedDuckDBWriter: Constructs a stripped-down DuckDB with only essential columns for search and presentation. License and maintainer data are flattened to strings. Non-essential metadata fields (e.g., positions, outputsToInstall, lastUpdated, content_hash) are omitted. An FTS index is built on the minified text.
-- Indexing Workflow: The pipeline generates the full database first (`fdnix-data.duckdb`) and uploads it; then creates the minified database (`fdnix.duckdb`) and uploads it; embeddings are generated against the minified DB; the Lambda layer is published from the minified artifact.
-- Environment Variables: `DUCKDB_DATA_KEY` (full DB key), `DUCKDB_MINIFIED_KEY` (minified DB key used by the Lambda layer).
-- Infrastructure: CDK descriptions and the layer publisher reference the minified database; the artifacts bucket stores both DBs at different keys.
+- Minified dataset builder: Constructs a stripped‑down LanceDB dataset with only essential columns for search and presentation. License and maintainer data are flattened to strings. Non‑essential metadata fields (e.g., positions, outputsToInstall, lastUpdated, content_hash) are omitted. FTS (BM25) and vector indexes are prepared.
+- Indexing Workflow: The pipeline generates the full dataset first (e.g., `fdnix-data.lancedb`) and uploads it; then creates the minified dataset (`fdnix.lancedb`) and uploads it; embeddings are generated against the minified dataset; the Lambda layer is published from the minified artifact.
+- Environment Variables: `LANCEDB_DATA_KEY` (full dataset key/prefix), `LANCEDB_MINIFIED_KEY` (minified dataset key/prefix used by the Lambda layer).
+- Infrastructure: CDK descriptions and the layer publisher reference the minified dataset; the artifacts bucket stores both datasets at different keys.
 
 Legacy Support Removal
 
-- Removed backward compatibility for `DUCKDB_KEY`. Validation and publishing now require `DUCKDB_DATA_KEY`/`DUCKDB_MINIFIED_KEY` explicitly. `DUCKDB_MINIFIED_KEY` is required for layer publishing.
+- Removed backward compatibility for `DUCKDB_KEY`. Validation and publishing now require `LANCEDB_DATA_KEY`/`LANCEDB_MINIFIED_KEY` explicitly. `LANCEDB_MINIFIED_KEY` is required for layer publishing.
 
 This plan is designed to be executed by an autonomous coding agent. Each section details a phase of the project, broken down into specific, actionable tasks.
 1. Core Principles
@@ -36,11 +36,11 @@ graph TD
     subgraph "Data Processing Pipeline (Daily Cron)"
         A[EventBridge Cron] --> B{Metadata Fargate Task};
         B --> C[Nixpkgs GitHub Repo];
-        B --> D[/Build .duckdb/];
+        B --> D[/Build LanceDB dataset/];
         D -- Input --> E{Embedding Fargate Task};
         E --> F[AWS Bedrock];
         F --> E;
-        E --> G[/Finalize .duckdb (FTS+VSS indexes)/];
+        E --> G[/Finalize LanceDB (FTS+ANN indexes)/];
         G --> H[S3 Artifacts Bucket];
         H --> I[Publish Lambda Layer Version];
     end
@@ -51,10 +51,10 @@ graph TD
     end
 
     subgraph "Backend API"
-        K --> L{Search Lambda (C++)};
+        K --> L{Search Lambda (Rust)};
         L --> M[[Lambda Layer: fdnix-db]];
         L --> N[AWS Bedrock Runtime];
-        M --> O[(DuckDB file: /opt/fdnix/fdnix.duckdb)];
+        M --> O[(LanceDB path: /opt/fdnix/fdnix.lancedb)];
     end
 
 3. Technology Stack
@@ -62,13 +62,13 @@ graph TD
 | Category | Technology / Service |
 |----------|---------------------|
 | Frontend | SolidJS (with SSG) |
-| Backend | AWS Lambda (C++, custom runtime) |
+| Backend | AWS Lambda (Rust, custom runtime) |
 | API | Amazon API Gateway (REST API) |
 | Infrastructure as Code | AWS CDK (TypeScript) |
-| Primary Data Store | DuckDB file in a Lambda Layer (read-only) |
+| Primary Data Store | LanceDB dataset in a Lambda Layer (read-only) |
 | Vector Embeddings | AWS Bedrock (Amazon Titan) for both pipeline (batch) and runtime (real-time) |
-| Vector Storage | DuckDB VSS index within the database file |
-| Traditional Search | DuckDB FTS index within the database file |
+| Vector Storage | LanceDB vector index within the dataset |
+| Traditional Search | LanceDB FTS (BM25) within the dataset |
 | Data Processing | AWS Fargate |
 | Orchestration | Amazon EventBridge (Cron) |
 | Containerization | Docker |
@@ -96,7 +96,7 @@ The project will be organized as follows:
 │   ├── frontend/             # SolidJS application
 │   │   ├── src/
 │   │   └── package.json
-│   └── search-lambda/        # C++ source/binary for the backend search API
+│   └── search-lambda/        # Rust source/binary for the backend search API
 │       ├── src/
 │       └── package.json
 ├── .gitignore
@@ -108,7 +108,7 @@ Phase 1: Foundation & Infrastructure (CDK) ✅ **COMPLETED**
 
     Objective: Set up the monorepo and define all core AWS resources using the CDK.
 
-    Status: **COMPLETED** - All infrastructure stacks have been implemented with the DuckDB architecture.
+    Status: **COMPLETED** - All infrastructure stacks have been implemented with the LanceDB architecture.
 
     Implemented:
 
@@ -118,11 +118,11 @@ Phase 1: Foundation & Infrastructure (CDK) ✅ **COMPLETED**
 
         ✅ Core Stacks Implemented:
 
-            ✅ database-stack.ts: S3 artifacts bucket (`fdnix-artifacts`) and Lambda Layer (`fdnix-db-layer`) for DuckDB file storage
+            ✅ database-stack.ts: S3 artifacts bucket (`fdnix-artifacts`) and Lambda Layer (`fdnix-db-layer`) for LanceDB dataset storage
 
             ✅ pipeline-stack.ts: ECS Fargate cluster, ECR repositories, task definitions, and EventBridge daily trigger for data processing pipeline
 
-            ✅ search-api-stack.ts: C++ Lambda function with custom runtime, API Gateway, and DuckDB layer attachment with Bedrock permissions for real-time embeddings
+            ✅ search-api-stack.ts: Rust Lambda function with custom runtime, API Gateway, and LanceDB layer attachment with Bedrock permissions for real-time embeddings
 
             ✅ frontend-stack.ts: S3 static hosting and CloudFront distribution with custom domain support
 
@@ -162,31 +162,31 @@ Phase 2: Data Ingestion & Processing Pipeline
 
                 Uses `nix-env -qaP --json` or a similar command to extract metadata for all packages (name, version, description, homepage, license).
 
-                Writes normalized rows into a DuckDB file (e.g., tables `packages`, `packages_fts_source`).
+                Writes normalized rows into a LanceDB dataset (e.g., table `packages`).
 
-                Prepares data for FTS by materializing a text column and building an FTS index (DuckDB `fts` extension) over relevant fields.
+                Prepares data for FTS by materializing a text column and building an FTS (BM25) index over relevant fields.
 
         Develop Embedding Generator (embedding-generator):
 
-            Create a Dockerfile based on a Python image with DuckDB + `vss`/`fts` extensions available.
+            Create a Dockerfile based on a Python image with LanceDB and Arrow libraries available.
 
             Write a script that:
 
-                Runs after the metadata job, consuming the intermediate DuckDB file.
+                Runs after the metadata job, consuming the intermediate LanceDB dataset.
 
                 For each package row, constructs a text document from metadata (e.g., "Package: cowsay. Version: 3.03. Description: ...").
 
                 Submits a Bedrock batch inference job (Amazon Titan Embeddings) to generate 256‑dimensional vectors; manages S3 input/output prefixes and polling.
 
-                Writes embeddings into the same DuckDB file (e.g., table `embeddings(package_id, vector)`), and builds/refreshes a VSS index using the DuckDB `vss` extension.
+                Writes embeddings into the same LanceDB dataset (e.g., a `vector` column on `packages`), and builds/refreshes an ANN index.
 
                 Finalizes indexes: ensure FTS index (BM25) and VSS index (e.g., HNSW/IVF) are created and analyzable in read-only mode.
 
-                Uploads the finalized `.duckdb` artifact to an S3 artifacts bucket.
+                Uploads the finalized LanceDB dataset directory to an S3 artifacts bucket.
 
         Publish/Attach Lambda Layer:
 
-            A final Step Functions task (or a small Lambda) pulls the artifact from the S3 artifacts bucket and publishes a new Lambda Layer version (e.g., `fdnix-db-layer`). The search Lambda is configured to use the latest/aliased layer version. The DuckDB file is placed under `/opt/fdnix/fdnix.duckdb` in the layer.
+            A final Step Functions task (or a small Lambda) pulls the artifact from the S3 artifacts bucket and publishes a new Lambda Layer version (e.g., `fdnix-db-layer`). The search Lambda is configured to use the latest/aliased layer version. The LanceDB dataset is placed under `/opt/fdnix/fdnix.lancedb` in the layer.
 
 Phase 3: Backend Search API
 
@@ -194,7 +194,7 @@ Phase 3: Backend Search API
 
     Tasks:
 
-        Initialize Lambda Project (search-lambda): Scaffold a C++ Lambda targeting the custom runtime (`provided.al2023`). Package the compiled binary as `bootstrap` for deployment. Link to DuckDB (C API/C++ API) to query the database file bundled in the Lambda Layer. Use AWS SDK for C++ Bedrock Runtime to generate query embeddings in real time.
+        Initialize Lambda Project (search-lambda): Scaffold a Rust Lambda targeting the custom runtime (`provided.al2023`). Package the compiled binary as `bootstrap` for deployment. Use LanceDB via Rust crates to query the dataset bundled in the Lambda Layer. Use AWS SDK for Rust (Bedrock Runtime) to generate query embeddings in real time.
 
         Implement API Handler:
 
@@ -208,11 +208,11 @@ Phase 3: Backend Search API
 
                 Call AWS Bedrock Runtime to generate an embedding for the user's search term.
 
-                Query the DuckDB VSS index in `/opt/fdnix/fdnix.duckdb` using the embedding to retrieve top-K similar package IDs.
+                Query the LanceDB vector index in `/opt/fdnix/fdnix.lancedb` using the embedding to retrieve top-K similar package IDs.
 
             Traditional Search (FTS):
 
-                Use DuckDB FTS to query the same database file and return a list of relevant package IDs based on keyword/BM25 scoring.
+                Use LanceDB FTS to query the same dataset and return a list of relevant package IDs based on keyword/BM25 scoring.
 
             Combine & Rank:
 
@@ -220,7 +220,7 @@ Phase 3: Backend Search API
 
             Hydrate Results:
 
-                Read full metadata for the ranked package IDs directly from DuckDB tables.
+                Read full metadata for the ranked package IDs directly from LanceDB tables.
 
                 Return the results as a JSON array.
 
@@ -248,14 +248,12 @@ Phase 4: Frontend Application
 
         Deployment: Configure the build process to generate a static site in a dist folder, which will be deployed by the CDK.
 
-6. Notes on DuckDB in Lambda
+6. Notes on LanceDB in Lambda
 
-    - The DuckDB file is packaged in a Lambda Layer at `/opt/fdnix/fdnix.duckdb` and opened read-only.
-    - Required DuckDB extensions (`fts`, `vss`) must be either:
-        - Pre-installed in the layer and LOADed at runtime, or
-        - Statically compiled into the DuckDB library used by the Lambda binary.
-    - The pipeline ensures indexes are built offline; the Lambda never mutates the database file.
-    - Layer updates are published by the pipeline and attached to the function via an alias to avoid code deploys for data-only changes.
+    - The LanceDB dataset is packaged in a Lambda Layer at `/opt/fdnix/fdnix.lancedb` and opened read‑only.
+    - No external database extensions are required in the runtime; LanceDB capabilities are provided by crates and prebuilt indexes in the dataset.
+    - The pipeline ensures indexes are built offline; the Lambda never mutates the dataset.
+    - Layer updates are published by the pipeline and attached to the function via an alias to avoid code deploys for data‑only changes.
 
 7. Roadmap Addendum
 
@@ -265,8 +263,8 @@ Phase 4: Frontend Application
 
     Metadata fidelity (TODO):
 
-        Minified DB currently simplifies `license` and `maintainers` to avoid DuckDB `list_transform`/lambda binding errors. Bring back full metadata extraction (arrays/objects → concise strings) once a stable approach is validated, preferably by pre-flattening during metadata ingestion to keep SQL simple and the Lambda layer robust.
+        Minified dataset currently simplifies `license` and `maintainers`. Bring back richer metadata extraction (arrays/objects → concise strings) once a stable approach is validated, preferably by pre‑flattening during metadata ingestion to keep queries simple and the Lambda layer robust.
 
-    DuckDB layer build optimizations (TODO):
+    Runtime and packaging optimizations (TODO):
 
-        Optimize the DuckDB shared library used by the Lambda runtime: enable Link Time Optimization (LTO), evaluate Profile-Guided Optimization (PGO) with representative workloads, strip symbols, and remove unused extensions (e.g., `parquet` if not needed in Lambda). Update the Dockerfile/CMake flags in `packages/cdk/lib/duckdb-build/` to minimize cold start, memory, and layer size while preserving FTS/VSS functionality.
+        Optimize the Rust binary size and cold‑start (e.g., LTO, strip symbols) and right‑size the LanceDB dataset and indexes to minimize layer size while preserving FTS/ANN functionality.

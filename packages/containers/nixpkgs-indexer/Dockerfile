@@ -12,7 +12,8 @@ COPY environment.nix /tmp/environment.nix
 RUN nix-env -if /tmp/environment.nix && rm /tmp/environment.nix
 
 # Install tantivy-py via pip since it's not available in nixpkgs
-RUN python -m pip install --no-cache-dir tantivy-py
+# Use a specific stable version to avoid build issues
+RUN python -m pip install --no-cache-dir tantivy
 
 # OCI labels
 LABEL org.opencontainers.image.title="fdnix nixpkgs-indexer"

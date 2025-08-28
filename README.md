@@ -28,16 +28,16 @@ Note: If you’re looking for the implementation details and deployment plan, se
 
 ## Implementation Summary
 
-- Complete Minified DuckDB: Lambda ships a minified DuckDB containing only essential columns for search (name, version, attr path, description, homepage, simplified license/maintainers, flags). The full metadata database is still produced for analytics/debugging and stored in S3.
-- Updated Indexing Workflow: The container builds the full database first (`fdnix-data.duckdb`), then derives a minified database (`fdnix.duckdb`) from it, builds FTS, and publishes the minified artifact to the Lambda layer.
-- Env Configuration: `DUCKDB_DATA_KEY` stores the full database; `DUCKDB_MINIFIED_KEY` stores the minified database used by the layer.
-- Infra Alignment: CDK descriptions and the layer publisher reference the minified database; the artifacts bucket stores both DBs using different keys.
+- Minified LanceDB: Lambda ships a minified LanceDB dataset containing only essential columns for search (name, version, attr path, description, homepage, simplified license/maintainers, flags). The full dataset is still produced for analytics/debugging and stored in S3.
+- Updated Indexing Workflow: The container builds the full dataset first (e.g., `fdnix-data.lancedb`), then derives a minified dataset (`fdnix.lancedb`) from it, builds FTS/ANN indexes, and publishes the minified artifact to the Lambda layer.
+- Env Configuration: `LANCEDB_DATA_KEY` stores the full dataset; `LANCEDB_MINIFIED_KEY` stores the minified dataset used by the layer.
+- Infra Alignment: CDK descriptions and the layer publisher reference the minified dataset; the artifacts bucket stores both datasets using different keys.
 
 Benefits: smaller Lambda layer, faster cold starts, improved query latency, lower storage/transfer costs, and preserved inspectability via the full database in S3.
 
 Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed. Use only:
-- `DUCKDB_DATA_KEY`: S3 key for the full database upload
-- `DUCKDB_MINIFIED_KEY`: S3 key for the minified database and layer publishing
+- `LANCEDB_DATA_KEY`: S3 key/prefix for the full dataset upload
+- `LANCEDB_MINIFIED_KEY`: S3 key/prefix for the minified dataset and layer publishing
 - `ARTIFACTS_BUCKET` and `AWS_REGION` are required when uploading/publishing
 
 ## Search Tips
@@ -49,8 +49,8 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 ## How It Works (High‑Level)
 
 - Frontend provides a fast, static UI.
-- A serverless API blends semantic understanding and keyword signals to rank results over a compact, read‑only minified DuckDB bundled in a Lambda layer; the full database is retained in S3 for diagnostics and analytics.
-- Self-contained Lambda: All DuckDB dependencies are statically compiled into the function binary for optimal performance and faster cold starts.
+- A serverless API (Rust Lambda) blends semantic understanding and keyword signals to rank results over a compact, read‑only LanceDB dataset bundled in a Lambda layer; the full dataset is retained in S3 for diagnostics and analytics.
+- Rust binary + LanceDB crates: No external database libraries in the runtime; LanceDB handles FTS (BM25) and vector ANN.
 - Embeddings: both the pipeline and runtime use AWS Bedrock (Amazon Titan Embeddings) — batch for indexing, real-time for user queries.
 - A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
@@ -67,7 +67,7 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 npm install
 
 # Build the search Lambda bootstrap (required before API deploy)
-(cd packages/search-lambda && ./build.sh)
+(cd packages/search-lambda && npm run build)
 
 # Or build manually with Docker
 # docker build -t fdnix-search-lambda packages/search-lambda
@@ -119,12 +119,12 @@ Secrets: No external API keys required for embeddings. Store any sensitive value
 - Monorepo with workspaces under `packages/`:
   - `cdk/` (AWS CDK in TypeScript)
   - `containers/` (unified `nixpkgs-indexer/` container for metadata → embeddings → minified + optional layer publish)
-- `search-lambda/` (C++ Lambda backend)
+- `search-lambda/` (Rust Lambda backend)
   - `frontend/` (SolidJS)
 - CDK commands must be run from the `packages/cdk` workspace
 - Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
 
-Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs a three-phase pipeline: metadata → embeddings → minified. The minified DuckDB is uploaded to S3 and used by the Lambda layer; the container can optionally publish the layer in the same ECS task. Embeddings are generated via AWS Bedrock batch (Amazon Titan) in the pipeline. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
+Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs a three-phase pipeline: metadata → embeddings → minified. The minified LanceDB dataset is uploaded to S3 and used by the Lambda layer; the container can optionally publish the layer in the same ECS task. Embeddings are generated via AWS Bedrock batch (Amazon Titan) in the pipeline. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
 
 If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
 
