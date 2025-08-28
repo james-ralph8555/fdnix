@@ -21,6 +21,7 @@
     "strictPropertyInitialization": false,
     "moduleResolution": "node",
     "typeRoots": ["./node_modules/@types", "./types"],
+    "types": ["node"],
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,

@@ -273,18 +273,18 @@ class MinifiedDuckDBWriter:
         logger.info("Creating Lambda layer zip at %s", zip_path)
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Add the DuckDB file to the /opt/fdnix/ directory in the zip
-            zipf.write(str(self.output_path), f'fdnix/{self.output_path.name}')
+            # Add the DuckDB file to the proper Lambda layer structure (/opt/fdnix/)
+            zipf.write(str(self.output_path), f'opt/fdnix/{self.output_path.name}')
             
-        # Upload the raw DuckDB file to S3 (for direct access/testing)
+        # Upload the zip file to S3 (Lambda layers require zip format)
         logger.info(
-            "Uploading minified artifact to s3://%s/%s (region=%s)",
+            "Uploading Lambda layer zip to s3://%s/%s (region=%s)",
             self.s3_bucket,
             self.s3_key,
             self.region,
         )
         s3 = boto3.client("s3", region_name=self.region)
-        s3.upload_file(str(self.output_path), self.s3_bucket, self.s3_key)
+        s3.upload_file(str(zip_path), self.s3_bucket, self.s3_key)
         
         # Clean up the zip file
         zip_path.unlink()
