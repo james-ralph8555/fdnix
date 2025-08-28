@@ -1,7 +1,7 @@
 use lancedb::{Connection, Table, DistanceType};
 use lancedb::query::{QueryBase, ExecutableQuery, Select, QueryExecutionOptions};
 use lance_index::scalar::FullTextSearchQuery;
-use arrow::array::{RecordBatch, StringArray, Float64Array, Float32Array};
+use arrow::array::{Array, RecordBatch, StringArray, Float64Array, Float32Array};
 use futures_util::stream::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::env;
