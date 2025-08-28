@@ -18,6 +18,7 @@ in
     pandas
     pyarrow
     lancedb
+    pylance
     pip
   ]))
 ]

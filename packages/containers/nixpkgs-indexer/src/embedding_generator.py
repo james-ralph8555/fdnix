@@ -120,11 +120,10 @@ class EmbeddingGenerator:
             
             # Create IVF-PQ index on vector column
             table.create_index(
-                column="vector",
+                "vector",
                 index_type="IVF_PQ",
                 num_partitions=self.vector_index_partitions,
-                num_sub_vectors=self.vector_index_sub_vectors,
-                distance_type="cosine"
+                num_sub_vectors=self.vector_index_sub_vectors
             )
             
             logger.info("Vector index created successfully")
@@ -137,17 +136,17 @@ class EmbeddingGenerator:
         parts = []
         
         # Package name and version
-        parts.append(f"Package: {package.get('packageName', '')}")
+        parts.append(f"Package: {package.get('package_name', '')}")
         if package.get('version'):
             parts.append(f"Version: {package['version']}")
         
         # Main program for better searchability
-        if package.get('mainProgram'):
-            parts.append(f"Main Program: {package['mainProgram']}")
+        if package.get('main_program'):
+            parts.append(f"Main Program: {package['main_program']}")
         
-        # Description - concatenate both description and longDescription for richer content
+        # Description - concatenate both description and long_description for richer content
         description = package.get('description', '').strip()
-        long_description = package.get('longDescription', '').strip()
+        long_description = package.get('long_description', '').strip()
         
         description_parts = []
         if description:
@@ -180,8 +179,8 @@ class EmbeddingGenerator:
                 parts.append(f"Platforms: {', '.join(platforms)}")
         
         # Attribute path for technical context
-        if package.get('attributePath'):
-            parts.append(f"Attribute: {package['attributePath']}")
+        if package.get('attribute_path'):
+            parts.append(f"Attribute: {package['attribute_path']}")
         
         text = '. '.join(parts)
         
@@ -245,7 +244,7 @@ class EmbeddingGenerator:
         package_keys: List[Tuple[str, str]] = []
         
         for package in packages:
-            package_keys.append((package['packageName'], package['version']))
+            package_keys.append((package['package_name'], package['version']))
             content_hash = package.get('content_hash')
             
             if content_hash:
@@ -459,12 +458,33 @@ class EmbeddingGenerator:
             logger.info(f"Attempting to download previous main DB artifact from s3://{self.artifacts_bucket}/{self.lancedb_key}")
             
             # For LanceDB, we need to download the entire directory structure
-            # Check if the key exists (this might be a prefix)
+            # Look for the most recent artifact by listing with prefix pattern
             try:
-                response = s3.list_objects_v2(Bucket=self.artifacts_bucket, Prefix=self.lancedb_key, MaxKeys=1)
-                if 'Contents' not in response:
-                    logger.info(f"No previous main DB artifact exists at s3://{self.artifacts_bucket}/{self.lancedb_key}. Starting fresh build.")
-                    return False
+                # If key is timestamped (contains snapshots/), look for latest
+                if "snapshots/" in self.lancedb_key and "fdnix-data-" in self.lancedb_key:
+                    base_prefix = "snapshots/"
+                    response = s3.list_objects_v2(Bucket=self.artifacts_bucket, Prefix=base_prefix)
+                    if 'Contents' not in response:
+                        logger.info(f"No previous main DB artifacts exist in s3://{self.artifacts_bucket}/{base_prefix}. Starting fresh build.")
+                        return False
+                    
+                    # Find the most recent fdnix-data artifact
+                    data_artifacts = [obj for obj in response['Contents'] if 'fdnix-data-' in obj['Key'] and obj['Key'].endswith('/')]
+                    if not data_artifacts:
+                        logger.info(f"No previous main DB artifacts found in s3://{self.artifacts_bucket}/{base_prefix}. Starting fresh build.")
+                        return False
+                    
+                    # Use the most recent one (objects are sorted by key name, timestamp is in the key)
+                    latest_artifact = sorted(data_artifacts, key=lambda x: x['Key'])[-1]
+                    self.lancedb_key = latest_artifact['Key'].rstrip('/')
+                    logger.info(f"Found latest main DB artifact: s3://{self.artifacts_bucket}/{self.lancedb_key}")
+                else:
+                    # Check if the specific key exists
+                    response = s3.list_objects_v2(Bucket=self.artifacts_bucket, Prefix=self.lancedb_key, MaxKeys=1)
+                    if 'Contents' not in response:
+                        logger.info(f"No previous main DB artifact exists at s3://{self.artifacts_bucket}/{self.lancedb_key}. Starting fresh build.")
+                        return False
+                        
             except Exception as e:
                 logger.info(f"Could not check for previous main DB artifact: {e}. Starting fresh build.")
                 return False

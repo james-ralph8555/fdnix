@@ -151,8 +151,17 @@ class LanceDBWriter:
             stopwords = os.environ.get("FTS_STOPWORDS", "english").strip() or "english"
             stemmer = os.environ.get("FTS_STEMMER", "english").strip()
             
-            # Create FTS index on text fields
-            fts_fields = ["package_name", "description", "long_description", "main_program", "license", "maintainers"]
+            # Get table schema to check which fields exist
+            schema = self._table.schema
+            available_fields = [field.name for field in schema]
+            
+            # Create FTS index on text fields that actually exist
+            potential_fts_fields = ["package_name", "description", "long_description", "main_program", "license", "maintainers"]
+            fts_fields = [field for field in potential_fts_fields if field in available_fields]
+            
+            if not fts_fields:
+                logger.warning("No suitable text fields found for FTS index")
+                return
             
             logger.info("Creating FTS index on fields: %s (stopwords=%s, stemmer=%s)", 
                        fts_fields, stopwords, stemmer or "<none>")
@@ -181,11 +190,10 @@ class LanceDBWriter:
             
             # Create IVF-PQ index on vector column
             self._table.create_index(
-                column="vector",
+                "vector",
                 index_type="IVF_PQ",
                 num_partitions=num_partitions,
-                num_sub_vectors=num_sub_vectors,
-                distance_type="cosine"
+                num_sub_vectors=num_sub_vectors
             )
             
             logger.info("Vector index created successfully")

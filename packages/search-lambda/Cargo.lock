@@ -2008,8 +2008,10 @@ dependencies = [
  "arrow",
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "futures-util",
  "lambda_runtime",
  "lancedb",
+ "lzma-sys",
  "reqwest 0.11.27",
  "serde",
  "serde_json",
@@ -3554,6 +3556,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08ab2867e3eeeca90e844d1940eab391c9dc5228783db2ed999acbc0a9ed375a"
 dependencies = [
  "twox-hash",
+]
+
+[[package]]
+name = "lzma-sys"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fda04ab3764e6cde78b9974eec4f779acaba7c4e84b36eca3cf77c581b85d27"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]

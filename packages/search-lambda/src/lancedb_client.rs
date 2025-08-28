@@ -1,6 +1,8 @@
 use lancedb::{Connection, Table};
+use lancedb::query::{QueryBase, ExecutableQuery, FullTextSearchQuery};
 use arrow::array::{Float32Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use futures_util::stream::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
@@ -140,13 +142,14 @@ impl LanceDBClient {
             let query_vec: Vec<f32> = query_embedding.unwrap().iter().map(|&x| x as f32).collect();
             
             let search_results = table
-                .search(&query_vec)
-                .fts(&params.query)
+                .query()
+                .nearest_to(query_vec)?
                 .limit(params.limit as usize)
-                .to_arrow()
+                .execute()
                 .await?;
 
-            results.packages = self.arrow_to_packages(search_results)?;
+            let batches: Vec<RecordBatch> = search_results.try_collect().await?;
+            results.packages = self.arrow_batches_to_packages(batches)?;
         } else {
             // FTS-only search mode
             results.search_type = "fts".to_string();
@@ -199,12 +202,14 @@ impl LanceDBClient {
         let query_vec: Vec<f32> = query_embedding.iter().map(|&x| x as f32).collect();
         
         let search_results = table
-            .search(&query_vec)
+            .query()
+            .nearest_to(query_vec)?
             .limit(limit as usize)
-            .to_arrow()
+            .execute()
             .await?;
 
-        results.packages = self.arrow_to_packages(search_results)?;
+        let batches: Vec<RecordBatch> = search_results.try_collect().await?;
+        results.packages = self.arrow_batches_to_packages(batches)?;
         results.total_count = results.packages.len() as i32;
 
         Ok(results)
@@ -226,9 +231,10 @@ impl LanceDBClient {
         }
 
         let search_results = table
-            .search_fts(query)
+            .query()
+            .full_text_search(FullTextSearchQuery::new(query.to_owned()))
             .limit(limit as usize)
-            .to_arrow()
+            .execute()
             .await
             .map_err(|e| {
                 error!("FTS search failed: {}, falling back to filter search", e);
@@ -236,8 +242,9 @@ impl LanceDBClient {
             });
 
         match search_results {
-            Ok(arrow_data) => {
-                results.packages = self.arrow_to_packages(arrow_data)?;
+            Ok(stream) => {
+                let batches: Vec<RecordBatch> = stream.try_collect().await?;
+                results.packages = self.arrow_batches_to_packages(batches)?;
             }
             Err(_) => {
                 // Fallback to basic filter search
@@ -266,12 +273,13 @@ impl LanceDBClient {
         
         let search_results = table
             .query()
-            .filter(&filter)?
+            .only_if(&filter)
             .limit(limit as usize)
             .execute()
             .await?;
 
-        results.packages = self.arrow_to_packages(search_results)?;
+        let batches: Vec<RecordBatch> = search_results.try_collect().await?;
+        results.packages = self.arrow_batches_to_packages(batches)?;
         
         // Assign decreasing scores for fallback results
         for (i, pkg) in results.packages.iter_mut().enumerate() {
@@ -300,22 +308,35 @@ impl LanceDBClient {
     async fn check_embeddings_availability(&self, table: &Table) -> bool {
         // Check if vector column exists and has data
         match table.query().limit(1).execute().await {
-            Ok(batch) => {
-                let schema = batch.schema();
-                let has_vector_col = schema.fields().iter().any(|field| field.name() == "vector");
+            Ok(mut stream) => {
+                if let Ok(Some(batch)) = stream.try_next().await {
+                    let schema = batch.schema();
+                    let has_vector_col = schema.fields().iter().any(|field| field.name() == "vector");
                 
-                if !has_vector_col {
-                    return false;
-                }
+                    if !has_vector_col {
+                        return false;
+                    }
 
-                // Check if we have any non-null vectors
-                match table.count_rows(Some("vector IS NOT NULL".to_string())).await {
-                    Ok(count) => count > 0,
-                    Err(_) => false,
+                    // Check if we have any non-null vectors
+                    match table.count_rows(Some("vector IS NOT NULL".to_string())).await {
+                        Ok(count) => count > 0,
+                        Err(_) => false,
+                    }
+                } else {
+                    false
                 }
             }
             Err(_) => false,
         }
+    }
+
+    fn arrow_batches_to_packages(&self, batches: Vec<RecordBatch>) -> Result<Vec<Package>, LanceDBClientError> {
+        let mut all_packages = Vec::new();
+        for batch in batches {
+            let mut packages = self.arrow_to_packages(batch)?;
+            all_packages.append(&mut packages);
+        }
+        Ok(all_packages)
     }
 
     fn arrow_to_packages(&self, batch: RecordBatch) -> Result<Vec<Package>, LanceDBClientError> {

@@ -41,10 +41,13 @@ def validate_env() -> None:
             )
         
         # Set default keys if not provided but S3 upload is configured
-        if not has_data_key:
-            os.environ["LANCEDB_DATA_KEY"] = "fdnix-data.lancedb"
-        if not has_minified_key:
-            os.environ["LANCEDB_MINIFIED_KEY"] = "fdnix.lancedb"
+        if not has_data_key or not has_minified_key:
+            import time
+            timestamp = int(time.time())
+            if not has_data_key:
+                os.environ["LANCEDB_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.lancedb"
+            if not has_minified_key:
+                os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.lancedb"
 
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):

@@ -26,6 +26,9 @@
           # This tells rustc to link against the musl libc.
           target = "x86_64-unknown-linux-musl";
 
+          # Increase stack size to prevent compiler crashes
+          RUST_MIN_STACK = "67108864";
+
           # Native build tools needed for compilation
           nativeBuildInputs = with pkgs; [
             pkg-config
