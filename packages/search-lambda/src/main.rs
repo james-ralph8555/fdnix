@@ -24,12 +24,12 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayRespons
     match request {
         Ok(req) => {
             // Extract query parameters
-            let (query_param, limit, offset, license_filter, category_filter) = 
+            let (query_param, limit, offset, license_filter, category_filter, include_broken, include_unfree) = 
                 extract_query_params(&req.query_string_parameters);
             
             // Handle search request
             if !query_param.is_empty() {
-                match handle_search_request(query_param.clone(), limit, offset, license_filter, category_filter).await {
+                match handle_search_request(query_param.clone(), limit, offset, license_filter, category_filter, include_broken, include_unfree).await {
                     Ok(response_body) => {
                         let body = serde_json::to_string(&response_body)?;
                         Ok(ApiGatewayResponse {
@@ -83,7 +83,9 @@ async fn handle_search_request(
     limit: i32, 
     offset: i32, 
     license_filter: Option<String>,
-    category_filter: Option<String>
+    category_filter: Option<String>,
+    include_broken: bool,
+    include_unfree: bool
 ) -> Result<SearchResponseBody, Box<dyn std::error::Error + Send + Sync>> {
     // Get clients from static storage
     let lancedb_client = LANCEDB_CLIENT.get()
@@ -98,6 +100,8 @@ async fn handle_search_request(
         offset,
         license_filter,
         category_filter,
+        include_broken,
+        include_unfree,
     };
 
     // Check if embeddings are enabled and generate if needed
@@ -147,6 +151,10 @@ async fn handle_search_request(
             "homepage": pkg.homepage,
             "license": pkg.license,
             "attributePath": pkg.attribute_path,
+            "category": pkg.category,
+            "broken": pkg.broken,
+            "unfree": pkg.unfree,
+            "available": pkg.available,
             "relevanceScore": pkg.relevance_score
         })
     }).collect();
@@ -315,7 +323,7 @@ mod tests {
         params.insert("license".to_string(), "MIT".to_string());
         params.insert("category".to_string(), "development".to_string());
 
-        let (query, limit, offset, license_filter, category_filter) = 
+        let (query, limit, offset, license_filter, category_filter, include_broken, include_unfree) = 
             extract_query_params(&Some(params));
 
         assert_eq!(query, "rust compiler");
@@ -323,11 +331,13 @@ mod tests {
         assert_eq!(offset, 10);
         assert_eq!(license_filter, Some("MIT".to_string()));
         assert_eq!(category_filter, Some("development".to_string()));
+        assert_eq!(include_broken, false);
+        assert_eq!(include_unfree, false);
     }
 
     #[test]
     fn test_extract_query_params_with_defaults() {
-        let (query, limit, offset, license_filter, category_filter) = 
+        let (query, limit, offset, license_filter, category_filter, include_broken, include_unfree) = 
             extract_query_params(&None);
 
         assert_eq!(query, "");
@@ -335,6 +345,8 @@ mod tests {
         assert_eq!(offset, 0);
         assert_eq!(license_filter, None);
         assert_eq!(category_filter, None);
+        assert_eq!(include_broken, false);
+        assert_eq!(include_unfree, false);
     }
 
     #[test]
@@ -344,7 +356,7 @@ mod tests {
         params.insert("limit".to_string(), "invalid".to_string());
         params.insert("offset".to_string(), "not_a_number".to_string());
 
-        let (query, limit, offset, license_filter, category_filter) = 
+        let (query, limit, offset, license_filter, category_filter, include_broken, include_unfree) = 
             extract_query_params(&Some(params));
 
         assert_eq!(query, "test");
@@ -352,6 +364,8 @@ mod tests {
         assert_eq!(offset, 0); // Should use default
         assert_eq!(license_filter, None);
         assert_eq!(category_filter, None);
+        assert_eq!(include_broken, false);
+        assert_eq!(include_unfree, false);
     }
 
     #[rstest]
@@ -366,7 +380,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("limit".to_string(), limit_str.to_string());
 
-        let (_, limit, _, _, _) = extract_query_params(&Some(params));
+        let (_, limit, _, _, _, _, _) = extract_query_params(&Some(params));
         assert_eq!(limit, expected_limit);
     }
 
@@ -382,7 +396,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("offset".to_string(), offset_str.to_string());
 
-        let (_, _, offset, _, _) = extract_query_params(&Some(params));
+        let (_, _, offset, _, _, _, _) = extract_query_params(&Some(params));
         assert_eq!(offset, expected_offset);
     }
 
@@ -622,7 +636,7 @@ mod tests {
         params.insert("limit".to_string(), "0".to_string()); // Zero limit
         params.insert("offset".to_string(), "-1".to_string()); // Negative offset
         
-        let (query, limit, offset, license_filter, category_filter) = 
+        let (query, limit, offset, license_filter, category_filter, include_broken, include_unfree) = 
             extract_query_params(&Some(params));
         
         assert_eq!(query, "");
@@ -630,6 +644,8 @@ mod tests {
         assert_eq!(offset, -1);
         assert_eq!(license_filter, None);
         assert_eq!(category_filter, None);
+        assert_eq!(include_broken, false);
+        assert_eq!(include_unfree, false);
     }
 
     #[test]
@@ -639,7 +655,7 @@ mod tests {
         params.insert("license".to_string(), "GPL-2.0+".to_string());
         params.insert("category".to_string(), "devel/libs".to_string());
         
-        let (query, limit, offset, license_filter, category_filter) = 
+        let (query, limit, offset, license_filter, category_filter, include_broken, include_unfree) = 
             extract_query_params(&Some(params));
         
         assert_eq!(query, "c++/c# programming");
@@ -647,5 +663,7 @@ mod tests {
         assert_eq!(offset, 0); // default
         assert_eq!(license_filter, Some("GPL-2.0+".to_string()));
         assert_eq!(category_filter, Some("devel/libs".to_string()));
+        assert_eq!(include_broken, false);
+        assert_eq!(include_unfree, false);
     }
 }

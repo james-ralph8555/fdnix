@@ -19,6 +19,10 @@ pub struct Package {
     pub homepage: String,
     pub license: String,
     pub attribute_path: String,
+    pub category: String,
+    pub broken: bool,
+    pub unfree: bool,
+    pub available: bool,
     pub relevance_score: f64,
 }
 
@@ -29,6 +33,8 @@ pub struct SearchParams {
     pub offset: i32,
     pub license_filter: Option<String>,
     pub category_filter: Option<String>,
+    pub include_broken: bool,
+    pub include_unfree: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -189,16 +195,33 @@ impl LanceDBClient {
         }
 
         // Apply filters
-        if params.license_filter.is_some() || params.category_filter.is_some() {
-            results.packages.retain(|pkg| {
-                if let Some(license_filter) = &params.license_filter {
-                    if !pkg.license.contains(license_filter) {
-                        return false;
-                    }
+        results.packages.retain(|pkg| {
+            // License filter
+            if let Some(license_filter) = &params.license_filter {
+                if !pkg.license.to_lowercase().contains(&license_filter.to_lowercase()) {
+                    return false;
                 }
-                true
-            });
-        }
+            }
+            
+            // Category filter
+            if let Some(category_filter) = &params.category_filter {
+                if !pkg.category.to_lowercase().contains(&category_filter.to_lowercase()) {
+                    return false;
+                }
+            }
+            
+            // Broken packages filter
+            if !params.include_broken && pkg.broken {
+                return false;
+            }
+            
+            // Unfree packages filter  
+            if !params.include_unfree && pkg.unfree {
+                return false;
+            }
+            
+            true
+        });
 
         // Apply offset and limit
         if params.offset > 0 && (params.offset as usize) < results.packages.len() {
@@ -395,6 +418,17 @@ impl LanceDBClient {
             .and_then(|col| col.as_any().downcast_ref::<StringArray>());
         let attribute_path_col = batch.column_by_name("attribute_path")
             .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        let category_col = batch.column_by_name("category")
+            .and_then(|col| col.as_any().downcast_ref::<StringArray>());
+        
+        // Get boolean columns for package status
+        use arrow::array::BooleanArray;
+        let broken_col = batch.column_by_name("broken")
+            .and_then(|col| col.as_any().downcast_ref::<BooleanArray>());
+        let unfree_col = batch.column_by_name("unfree")
+            .and_then(|col| col.as_any().downcast_ref::<BooleanArray>());
+        let available_col = batch.column_by_name("available")
+            .and_then(|col| col.as_any().downcast_ref::<BooleanArray>());
 
         // Extract LanceDB score columns (try different possible names)
         let score_col = batch.column_by_name("_distance")
@@ -445,6 +479,10 @@ impl LanceDBClient {
                 homepage: homepage_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
                 license: license_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
                 attribute_path: attribute_path_col.map(|col| col.value(i).to_string()).unwrap_or_default(),
+                category: category_col.map(|col| col.value(i).to_string()).unwrap_or_else(|| "misc".to_string()),
+                broken: broken_col.map(|col| !col.is_null(i) && col.value(i)).unwrap_or(false),
+                unfree: unfree_col.map(|col| !col.is_null(i) && col.value(i)).unwrap_or(false),
+                available: available_col.map(|col| col.is_null(i) || col.value(i)).unwrap_or(true),
                 relevance_score,
             };
             packages.push(package);
@@ -471,6 +509,10 @@ mod tests {
             homepage: "https://nodejs.org".to_string(),
             license: "MIT".to_string(),
             attribute_path: "pkgs.nodejs".to_string(),
+            category: "development".to_string(),
+            broken: false,
+            unfree: false,
+            available: true,
             relevance_score: 0.95,
         }
     }
@@ -483,6 +525,8 @@ mod tests {
             offset: 0,
             license_filter: None,
             category_filter: None,
+            include_broken: false,
+            include_unfree: false,
         }
     }
 
@@ -496,6 +540,10 @@ mod tests {
             homepage: "https://nodejs.org".to_string(),
             license: "MIT".to_string(),
             attribute_path: "pkgs.nodejs".to_string(),
+            category: "development".to_string(),
+            broken: false,
+            unfree: false,
+            available: true,
             relevance_score: 0.95,
         };
         let json_str = serde_json::to_string(&sample_package).unwrap();
@@ -509,6 +557,10 @@ mod tests {
         assert_eq!(sample_package.license, deserialized.license);
         assert_eq!(sample_package.attribute_path, deserialized.attribute_path);
         assert_eq!(sample_package.relevance_score, deserialized.relevance_score);
+        assert_eq!(sample_package.category, deserialized.category);
+        assert_eq!(sample_package.broken, deserialized.broken);
+        assert_eq!(sample_package.unfree, deserialized.unfree);
+        assert_eq!(sample_package.available, deserialized.available);
     }
 
     #[test]
@@ -519,24 +571,30 @@ mod tests {
             offset: 0,
             license_filter: None,
             category_filter: None,
+            include_broken: false,
+            include_unfree: false,
         };
         assert_eq!(search_params.query, "nodejs");
         assert_eq!(search_params.limit, 10);
         assert_eq!(search_params.offset, 0);
         assert!(search_params.license_filter.is_none());
         assert!(search_params.category_filter.is_none());
+        assert_eq!(search_params.include_broken, false);
+        assert_eq!(search_params.include_unfree, false);
     }
 
     #[rstest]
-    #[case("nodejs web framework", 50, 0, None, None)]
-    #[case("python", 25, 10, Some("MIT".to_string()), None)]
-    #[case("rust compiler", 100, 0, None, Some("development".to_string()))]
+    #[case("nodejs web framework", 50, 0, None, None, false, false)]
+    #[case("python", 25, 10, Some("MIT".to_string()), None, false, false)]
+    #[case("rust compiler", 100, 0, None, Some("development".to_string()), true, true)]
     fn test_search_params_variations(
         #[case] query: &str,
         #[case] limit: i32,
         #[case] offset: i32,
         #[case] license_filter: Option<String>,
         #[case] category_filter: Option<String>,
+        #[case] include_broken: bool,
+        #[case] include_unfree: bool,
     ) {
         let params = SearchParams {
             query: query.to_string(),
@@ -544,6 +602,8 @@ mod tests {
             offset,
             license_filter: license_filter.clone(),
             category_filter: category_filter.clone(),
+            include_broken,
+            include_unfree,
         };
 
         assert_eq!(params.query, query);
@@ -551,6 +611,8 @@ mod tests {
         assert_eq!(params.offset, offset);
         assert_eq!(params.license_filter, license_filter);
         assert_eq!(params.category_filter, category_filter);
+        assert_eq!(params.include_broken, include_broken);
+        assert_eq!(params.include_unfree, include_unfree);
     }
 
     #[test]
@@ -618,6 +680,10 @@ mod tests {
                 homepage: "https://test1.com".to_string(),
                 license: "MIT".to_string(),
                 attribute_path: "pkgs.test1".to_string(),
+                category: "test".to_string(),
+                broken: false,
+                unfree: false,
+                available: true,
                 relevance_score: 0.9,
             }
         ];
@@ -671,6 +737,10 @@ mod tests {
             homepage: String::new(),
             license: String::new(),
             attribute_path: String::new(),
+            category: String::new(),
+            broken: false,
+            unfree: false,
+            available: true,
             relevance_score: 0.0,
         };
 
@@ -681,6 +751,10 @@ mod tests {
         assert!(pkg.homepage.is_empty());
         assert!(pkg.license.is_empty());
         assert!(pkg.attribute_path.is_empty());
+        assert!(pkg.category.is_empty());
+        assert_eq!(pkg.broken, false);
+        assert_eq!(pkg.unfree, false);
+        assert_eq!(pkg.available, true);
         assert_eq!(pkg.relevance_score, 0.0);
     }
 }

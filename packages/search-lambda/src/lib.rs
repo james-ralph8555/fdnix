@@ -54,12 +54,14 @@ pub struct SearchResponseBody {
     pub bedrock_healthy: Option<bool>,
 }
 
-pub fn extract_query_params(params: &Option<HashMap<String, String>>) -> (String, i32, i32, Option<String>, Option<String>) {
+pub fn extract_query_params(params: &Option<HashMap<String, String>>) -> (String, i32, i32, Option<String>, Option<String>, bool, bool) {
     let mut query = String::new();
     let mut limit = 50;
     let mut offset = 0;
     let mut license_filter = None;
     let mut category_filter = None;
+    let mut include_broken = false;
+    let mut include_unfree = false;
     
     if let Some(params) = params {
         if let Some(q) = params.get("q") {
@@ -81,9 +83,16 @@ pub fn extract_query_params(params: &Option<HashMap<String, String>>) -> (String
         if let Some(category) = params.get("category") {
             category_filter = Some(category.clone());
         }
+        // Parse boolean parameters for broken/unfree packages
+        if let Some(broken_str) = params.get("include_broken") {
+            include_broken = broken_str == "1" || broken_str.to_lowercase() == "true" || broken_str.to_lowercase() == "yes";
+        }
+        if let Some(unfree_str) = params.get("include_unfree") {
+            include_unfree = unfree_str == "1" || unfree_str.to_lowercase() == "true" || unfree_str.to_lowercase() == "yes";
+        }
     }
     
-    (query, limit, offset, license_filter, category_filter)
+    (query, limit, offset, license_filter, category_filter, include_broken, include_unfree)
 }
 
 pub fn is_embeddings_enabled() -> bool {

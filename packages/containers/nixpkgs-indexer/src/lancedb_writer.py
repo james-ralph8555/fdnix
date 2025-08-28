@@ -29,6 +29,7 @@ class Package(LanceModel):
     license: str
     platforms: str
     maintainers: str
+    category: str
     broken: bool
     unfree: bool
     available: bool

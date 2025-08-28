@@ -93,6 +93,7 @@ class NixpkgsExtractor:
                         "maintainers": self._extract_maintainers(
                             meta.get("maintainers") or pkg_info.get("maintainers")
                         ),
+                        "category": self._extract_category(pkg_path, meta),
                         "broken": bool(meta.get("broken") or pkg_info.get("broken") or False),
                         "unfree": bool(meta.get("unfree") or pkg_info.get("unfree") or False),
                         "available": meta.get("available") if "available" in meta else True,
@@ -214,3 +215,129 @@ class NixpkgsExtractor:
                     "githubId": None,
                 })
         return result[:10]
+
+    def _extract_category(self, pkg_path: str, meta: Dict[str, Any]) -> str:
+        """Extract and classify package category from metadata and attribute path."""
+        # Check if meta.category exists first
+        if meta.get("category"):
+            category = meta["category"]
+            return self._normalize_category(category)
+        
+        # Fallback to attribute path-based classification
+        return self._classify_by_attribute_path(pkg_path)
+
+    def _normalize_category(self, category: Any) -> str:
+        """Normalize category from nixpkgs metadata to user-friendly name."""
+        if not category:
+            return "misc"
+            
+        category_str = str(category).lower()
+        
+        # Map common nixpkgs categories to user-friendly names
+        category_map = {
+            "applications.editors": "editors",
+            "applications.graphics": "graphics", 
+            "applications.networking": "networking",
+            "applications.science": "science",
+            "applications.system": "system",
+            "applications.virtualization": "virtualization",
+            "applications.audio": "audio",
+            "applications.video": "video",
+            "applications.office": "office",
+            "applications.misc": "applications",
+            "development.tools": "development",
+            "development.libraries": "libraries",
+            "development.compilers": "compilers",
+            "development.interpreters": "interpreters",
+            "development.haskell-modules": "haskell",
+            "development.python-modules": "python",
+            "development.node-packages": "javascript",
+            "development.r-modules": "r",
+            "development.ocaml-modules": "ocaml",
+            "development.perl-modules": "perl",
+            "development.ruby-modules": "ruby",
+            "games": "games",
+            "servers": "servers",
+            "tools.system": "system-tools",
+            "tools.networking": "networking-tools", 
+            "tools.text": "text-tools",
+            "tools.misc": "tools",
+            "tools.security": "security",
+            "tools.filesystems": "filesystems",
+            "tools.backup": "backup",
+            "data": "data",
+            "fonts": "fonts",
+            "themes": "themes"
+        }
+        
+        return category_map.get(category_str, category_str)
+
+    def _classify_by_attribute_path(self, pkg_path: str) -> str:
+        """Classify package category based on attribute path patterns."""
+        path_lower = pkg_path.lower()
+        
+        # Language-specific packages
+        if any(x in path_lower for x in ["python", "python3packages", "python2packages"]):
+            return "python"
+        if any(x in path_lower for x in ["haskellpackages", "haskell.packages"]):
+            return "haskell"
+        if "nodepackages" in path_lower or "node_" in path_lower:
+            return "javascript"
+        if "rpackages" in path_lower:
+            return "r"
+        if any(x in path_lower for x in ["perlpackages", "perl5", "perl."]):
+            return "perl"
+        if any(x in path_lower for x in ["rubypackages", "rubygems"]):
+            return "ruby"
+        if any(x in path_lower for x in ["ocamlpackages", "ocaml-"]):
+            return "ocaml"
+        if any(x in path_lower for x in ["lua", "luapackages"]):
+            return "lua"
+        if any(x in path_lower for x in ["go-modules", "buildgomodule"]):
+            return "go"
+        if "rustpackages" in path_lower or "cargo" in path_lower:
+            return "rust"
+            
+        # Application categories  
+        if any(x in path_lower for x in ["editor", "vim", "emacs", "nano", "helix"]):
+            return "editors"
+        if any(x in path_lower for x in ["browser", "firefox", "chrome", "webkit"]):
+            return "browsers"
+        if any(x in path_lower for x in ["game", "steam", "lutris"]):
+            return "games"
+        if any(x in path_lower for x in ["server", "nginx", "apache", "httpd", "postgresql", "mysql"]):
+            return "servers"
+        if any(x in path_lower for x in ["font", "fonts", "ttf", "otf"]):
+            return "fonts"
+        if any(x in path_lower for x in ["theme", "gtk", "qt", "icon"]):
+            return "themes"
+        if any(x in path_lower for x in ["media", "video", "audio", "vlc", "ffmpeg"]):
+            return "multimedia"
+        if any(x in path_lower for x in ["office", "libreoffice", "document"]):
+            return "office"
+        if any(x in path_lower for x in ["science", "math", "research", "latex"]):
+            return "science"
+        if any(x in path_lower for x in ["graphic", "image", "gimp", "inkscape", "photo"]):
+            return "graphics"
+        if any(x in path_lower for x in ["network", "curl", "wget", "ssh", "tcp"]):
+            return "networking"
+        if any(x in path_lower for x in ["system", "systemd", "util", "coreutils"]):
+            return "system"
+        if any(x in path_lower for x in ["security", "crypto", "ssl", "gpg", "password"]):
+            return "security"
+        if any(x in path_lower for x in ["backup", "rsync", "sync"]):
+            return "backup"
+        if any(x in path_lower for x in ["filesystem", "fuse", "mount"]):
+            return "filesystems"
+        if any(x in path_lower for x in ["compiler", "gcc", "clang", "llvm"]):
+            return "compilers"
+        if any(x in path_lower for x in ["interpreter", "runtime"]):
+            return "interpreters"
+        if any(x in path_lower for x in ["lib", "library", "shared"]):
+            return "libraries"
+        if any(x in path_lower for x in ["tool", "util", "cli"]):
+            return "tools"
+        if any(x in path_lower for x in ["devel", "dev", "build", "make", "cmake"]):
+            return "development"
+        
+        return "misc"

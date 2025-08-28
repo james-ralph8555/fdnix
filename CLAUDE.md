@@ -27,7 +27,6 @@ Contains a complete copy of the Nixpkgs repository (NixOS package collection) wi
 
 ### fdnix Search Engine
 - **README.md**: User-facing documentation for the search interface
-- **INIT.md**: Detailed technical implementation plan with step-by-step roadmap
 
 ## Common Commands
 
@@ -103,7 +102,7 @@ The project follows a phased approach:
 3. **Phase 3**: Search API implementation (hybrid vector + keyword search with ranking fusion)
 4. **Phase 4**: SolidJS frontend with responsive UI and filtering
 
-See INIT.md for detailed implementation steps and architecture diagrams.
+
 
 ## Important Notes
 

@@ -24,7 +24,7 @@ Fast, relevant, filterable search for the Nix packages collection. fdnix blends 
 - Use the filters (license, category — as they are introduced) to narrow results.
 - Click a result to view metadata and jump to the package’s homepage or documentation.
 
-Note: If you’re looking for the implementation details and deployment plan, see `INIT.md`.
+ 
 
 ## Implementation Summary
 
@@ -57,7 +57,6 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 ## Project Status
 
 - Status: Early development. Core architecture and plan are defined.
-- Roadmap: See `INIT.md` for the step‑by‑step implementation plan.
 
 ## Development & Deployment
 
@@ -126,7 +125,7 @@ Secrets: No external API keys required for embeddings. Store any sensitive value
 
 Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs a three-phase pipeline: metadata → embeddings → minified. The minified LanceDB dataset is uploaded to S3 and used by the Lambda layer; the container can optionally publish the layer in the same ECS task. Embeddings are generated via AWS Bedrock batch (Amazon Titan) in the pipeline. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
 
-If you want to track progress or help prioritize features, check `INIT.md` and open an issue.
+If you want to track progress or help prioritize features, please open an issue.
 
 
 

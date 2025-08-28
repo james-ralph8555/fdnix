@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Planned monorepo layout (see INIT.md):
+Planned monorepo layout:
 
 - `packages/cdk/` — AWS CDK (TypeScript) stacks (`database-stack.ts`, `pipeline-stack.ts`, `search-api-stack.ts`, `frontend-stack.ts`).
 - `packages/containers/` — Data pipeline containers:
@@ -10,7 +10,7 @@ Planned monorepo layout (see INIT.md):
   - `embedding-generator/`
 - `packages/search-lambda/` — Hybrid search API (Rust).
 - `packages/frontend/` — SolidJS app (SSG via Vite).
-- `INIT.md` — implementation plan; `README.md` — user-facing overview.
+- `README.md` — user-facing overview.
 - Note: `nixpkgs/` is vendored documentation; do not modify.
 
 ## Build, Test, and Development Commands
@@ -37,7 +37,7 @@ Planned monorepo layout (see INIT.md):
 ## Commit & Pull Request Guidelines
 
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`, `test:`, `perf:`.
-- PRs: include description, linked issue/task from `INIT.md`, screenshots for UI changes, and rollout notes if infra touches CDK.
+- PRs: include description, linked issue/task, screenshots for UI changes, and rollout notes if infra touches CDK.
 - Keep PRs small and focused; update `README.md`/docs when behavior changes.
 
 ## Security & Configuration Tips
@@ -55,4 +55,4 @@ Planned monorepo layout (see INIT.md):
 
 ## Architecture Overview
 
-fdnix performs hybrid search over nixpkgs using LanceDB for both full‑text (BM25) and vector ANN search, fused via reciprocal rank fusion in a Rust AWS Lambda. The LanceDB dataset is packaged in a Lambda layer (read‑only) and refreshed by a daily indexing pipeline. The SolidJS static UI queries the API. See `INIT.md` for implementation details.
+fdnix performs hybrid search over nixpkgs using LanceDB for both full‑text (BM25) and vector ANN search, fused via reciprocal rank fusion in a Rust AWS Lambda. The LanceDB dataset is packaged in a Lambda layer (read‑only) and refreshed by a daily indexing pipeline. The SolidJS static UI queries the API.
