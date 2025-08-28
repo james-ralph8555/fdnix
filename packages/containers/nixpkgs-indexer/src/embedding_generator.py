@@ -123,7 +123,8 @@ class EmbeddingGenerator:
                 "vector",
                 index_type="IVF_PQ",
                 num_partitions=self.vector_index_partitions,
-                num_sub_vectors=self.vector_index_sub_vectors
+                num_sub_vectors=self.vector_index_sub_vectors,
+                distance_type="cosine"
             )
             
             logger.info("Vector index created successfully")

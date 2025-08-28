@@ -98,6 +98,9 @@
             cargo
             pkg-config
             protobuf
+            # Testing tools
+            cargo-tarpaulin  # Code coverage
+            cargo-nextest    # Faster test runner
           ];
           shellHook = ''
             echo "fdnix search lambda development environment (LanceDB)"
@@ -108,6 +111,19 @@
             echo "  cargo build --target x86_64-unknown-linux-musl    # Build for Lambda"
             echo "  nix build .#search-lambda                         # Build with Nix"
             echo "  nix build .#lambda-package                        # Build deployment package"
+            echo ""
+            echo "Testing commands:"
+            echo "  cargo test                                        # Run all tests"
+            echo "  cargo test --lib                                  # Run unit tests only"  
+            echo "  cargo test --test integration_tests               # Run integration tests only"
+            echo "  cargo nextest run                                 # Run tests with nextest (faster)"
+            echo "  cargo nextest run --lib                           # Run unit tests with nextest"
+            echo "  cargo tarpaulin --out html                        # Generate test coverage report"
+            echo "  cargo test --release                              # Run tests in release mode"
+            echo "  cargo test -- --nocapture                        # Run tests with output capture disabled"
+            echo "  cargo test lancedb                                # Run tests matching 'lancedb'"
+            echo "  cargo test bedrock                                # Run tests matching 'bedrock'"
+            echo "  cargo test main                                   # Run tests matching 'main'"
           '';
         };
       });

@@ -167,7 +167,8 @@ class LanceDBWriter:
                        fts_fields, stopwords, stemmer or "<none>")
             
             # LanceDB's native FTS index creation (Lance-based, not tantivy)
-            self._table.create_fts_index(fts_fields, use_tantivy=False)
+            # Use first field for FTS when use_tantivy=False
+            self._table.create_fts_index(fts_fields[0], use_tantivy=False)
             
             logger.info("FTS index created successfully")
         except Exception as e:
@@ -193,7 +194,8 @@ class LanceDBWriter:
                 "vector",
                 index_type="IVF_PQ",
                 num_partitions=num_partitions,
-                num_sub_vectors=num_sub_vectors
+                num_sub_vectors=num_sub_vectors,
+                distance_type="cosine"
             )
             
             logger.info("Vector index created successfully")

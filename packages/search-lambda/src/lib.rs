@@ -95,12 +95,14 @@ pub fn is_embeddings_enabled() -> bool {
 pub async fn get_lancedb_path() -> Result<String, String> {
     use std::path::Path;
     
-    // Try paths in priority order: env var, Lambda layer path, local paths
+    // Try paths in priority order: env var, Lambda layer paths, local paths
     let candidate_paths = vec![
         env::var("LANCEDB_PATH").unwrap_or_default(),
-        "/opt/packages.lance".to_string(),
-        "./packages.lance".to_string(),
-        "packages.lance".to_string(),
+        "/opt/fdnix/fdnix.lancedb".to_string(),  // Original expected path
+        "/opt".to_string(),                      // Lambda layer root where packages.lance should be extracted
+        ".".to_string(),                         // Current directory
+        "./packages.lance".to_string(),          // Fallback to packages.lance directory
+        "packages.lance".to_string(),            // Fallback to packages.lance directory
     ];
     
     for path in &candidate_paths {
@@ -111,17 +113,37 @@ pub async fn get_lancedb_path() -> Result<String, String> {
         info!("Checking database path: {}", path);
         
         let path_obj = Path::new(path);
-        if path_obj.exists() {
-            if path_obj.is_dir() {
-                // Check for required LanceDB structure
-                let data_dir = path_obj.join("data");
-                let versions_dir = path_obj.join("_versions");
+        if path_obj.exists() && path_obj.is_dir() {
+            // First, check if this directory itself has LanceDB structure (direct database)
+            let data_dir = path_obj.join("data");
+            let versions_dir = path_obj.join("_versions");
+            
+            if data_dir.exists() && versions_dir.exists() {
+                info!("Valid LanceDB structure found at: {}", path);
+                
+                // List contents for debugging
+                if let Ok(entries) = std::fs::read_dir(path) {
+                    let contents: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect();
+                    debug!("Database directory contents: {:?}", contents);
+                }
+                
+                return Ok(path.clone());
+            }
+            
+            // Otherwise, check if this directory contains packages.lance subdirectory
+            let packages_lance_dir = path_obj.join("packages.lance");
+            if packages_lance_dir.exists() && packages_lance_dir.is_dir() {
+                let data_dir = packages_lance_dir.join("data");
+                let versions_dir = packages_lance_dir.join("_versions");
                 
                 if data_dir.exists() && versions_dir.exists() {
-                    info!("Valid LanceDB structure found at: {}", path);
+                    info!("Valid LanceDB structure found at: {}", packages_lance_dir.display());
                     
                     // List contents for debugging
-                    if let Ok(entries) = std::fs::read_dir(path) {
+                    if let Ok(entries) = std::fs::read_dir(&packages_lance_dir) {
                         let contents: Vec<String> = entries
                             .filter_map(|e| e.ok())
                             .map(|e| e.file_name().to_string_lossy().to_string())
@@ -129,16 +151,17 @@ pub async fn get_lancedb_path() -> Result<String, String> {
                         debug!("Database directory contents: {:?}", contents);
                     }
                     
+                    // Return the parent directory path, as LanceDB expects to connect to the parent
                     return Ok(path.clone());
                 } else {
-                    warn!("Directory exists but missing LanceDB structure at: {} (data: {}, versions: {})", 
-                          path, data_dir.exists(), versions_dir.exists());
+                    warn!("packages.lance directory exists but missing LanceDB structure at: {} (data: {}, versions: {})", 
+                          packages_lance_dir.display(), data_dir.exists(), versions_dir.exists());
                 }
             } else {
-                warn!("Path exists but is not a directory: {}", path);
+                debug!("No packages.lance subdirectory found in: {}", path);
             }
         } else {
-            debug!("Path does not exist: {}", path);
+            debug!("Path does not exist or is not a directory: {}", path);
         }
     }
     
