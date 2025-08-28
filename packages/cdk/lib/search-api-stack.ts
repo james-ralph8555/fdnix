@@ -41,13 +41,13 @@ export class FdnixSearchApiStack extends Stack {
     }));
 
     // Lambda function for hybrid search API
-    // Implemented in C++ using the custom runtime (PROVIDED_AL2023).
-    // The build places a `bootstrap` binary in `packages/search-lambda/dist`.
+    // Implemented in Rust using the custom runtime (PROVIDED_AL2023).
+    // The Nix build places the `bootstrap` binary in the `result/bin/` directory.
     this.searchFunction = new lambda.Function(this, 'SearchFunction', {
       runtime: lambda.Runtime.PROVIDED_AL2023,
       architecture: lambda.Architecture.X86_64,
       handler: 'bootstrap',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/dist')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/result/bin')),
       timeout: Duration.seconds(30),
       memorySize: 1024,
       role: this.lambdaExecutionRole,

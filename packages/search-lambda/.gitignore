@@ -29,3 +29,5 @@ bootstrap
 # Logs
 *.log
 target/
+result/
+result-dev/
