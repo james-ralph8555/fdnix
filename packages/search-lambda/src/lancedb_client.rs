@@ -1,12 +1,10 @@
 use lancedb::{Connection, Table};
-use lancedb::query::{QueryBase, ExecutableQuery, FullTextSearchQuery};
-use arrow::array::{Float32Array, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
+use lancedb::query::{QueryBase, ExecutableQuery, Select};
+use lance_index::scalar::FullTextSearchQuery;
+use arrow::array::{RecordBatch, StringArray};
 use futures_util::stream::TryStreamExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 use tracing::{info, warn, error};
@@ -86,16 +84,16 @@ impl LanceDBClient {
     }
 
     pub async fn initialize(&mut self) -> Result<bool, LanceDBClientError> {
-        let conn = lancedb::connect(&self.db_path).await?;
+        let conn = lancedb::connect(&self.db_path).execute().await?;
 
         // Check if packages table exists
-        let table_names = conn.table_names().await?;
+        let table_names = conn.table_names().execute().await?;
         if !table_names.contains(&"packages".to_string()) {
             error!("Required 'packages' table not found in LanceDB");
             return Err(LanceDBClientError::TableNotFound("packages".to_string()));
         }
 
-        let table = conn.open_table("packages").await?;
+        let table = conn.open_table("packages").execute().await?;
         info!("Found required 'packages' table");
 
         // Check embeddings availability if enabled
@@ -233,6 +231,7 @@ impl LanceDBClient {
         let search_results = table
             .query()
             .full_text_search(FullTextSearchQuery::new(query.to_owned()))
+            .select(Select::All)
             .limit(limit as usize)
             .execute()
             .await

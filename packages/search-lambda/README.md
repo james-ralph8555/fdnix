@@ -74,9 +74,9 @@ Using Nix (reproducible builds):
 # Build the binary
 nix build .#default
 
-# Build a deployable zip with CA certs
+# Build a deployable package with CA certs (REQUIRED for CDK deployment)
 nix build .#lambda-package
-ls -l result # contains lambda-deployment.zip and raw files
+ls -l result # contains lambda-deployment.zip and lambda-files/ directory
 
 # Dev shell with the right toolchain
 nix develop
@@ -84,9 +84,21 @@ nix develop
 
 ## Deploy
 
-- Ensure `dist/bootstrap` (or the Nix-built zip) is produced
-- Deploy via CDK from `packages/cdk` (stacks expect `bootstrap` packaging)
-- Resource naming should use `fdnix-` prefixes per repo guidelines
+**Important**: For CDK deployment, you MUST use the lambda-package build:
+
+```bash
+# Required: Build the lambda package for CDK
+nix build .#lambda-package
+
+# Verify the structure CDK expects
+ls -la result/lambda-files/bootstrap  # Should show 50MB executable
+
+# Deploy from packages/cdk
+cd ../cdk
+cdk deploy FdnixSearchApiStack
+```
+
+The CDK stack looks for `bootstrap` at `packages/search-lambda/result/lambda-files/bootstrap`. The `lambda-package` build creates this structure with CA certificates included.
 
 ## Testing
 

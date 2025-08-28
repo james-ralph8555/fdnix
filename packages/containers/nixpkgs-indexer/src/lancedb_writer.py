@@ -166,8 +166,8 @@ class LanceDBWriter:
             logger.info("Creating FTS index on fields: %s (stopwords=%s, stemmer=%s)", 
                        fts_fields, stopwords, stemmer or "<none>")
             
-            # LanceDB's FTS index creation with tantivy
-            self._table.create_fts_index(fts_fields, use_tantivy=True)
+            # LanceDB's native FTS index creation (Lance-based, not tantivy)
+            self._table.create_fts_index(fts_fields, use_tantivy=False)
             
             logger.info("FTS index created successfully")
         except Exception as e:

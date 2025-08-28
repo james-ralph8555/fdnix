@@ -11,9 +11,7 @@ COPY environment.nix /tmp/environment.nix
 # We also remove the file in the same layer to keep the final image clean.
 RUN nix-env -if /tmp/environment.nix && rm /tmp/environment.nix
 
-# Install tantivy-py via pip since it's not available in nixpkgs
-# Use a specific stable version to avoid build issues
-RUN python -m pip install --no-cache-dir tantivy
+# LanceDB native FTS is used instead of tantivy-py
 
 # OCI labels
 LABEL org.opencontainers.image.title="fdnix nixpkgs-indexer"

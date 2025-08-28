@@ -2,9 +2,8 @@
   description = "A statically-compiled Rust AWS Lambda function for fdnix search (LanceDB)";
 
   inputs = {
-    # Pinning nixpkgs to a specific commit ensures the build is fully reproducible
-    # and not susceptible to changes in nixos-unstable.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    # Use unstable nixpkgs for latest LanceDB compatibility
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -14,23 +13,28 @@
         pkgs = import nixpkgs {
           inherit system;
         };
+        
+        # Cross-compilation setup for musl static linking
+        pkgsMusl = pkgs.pkgsCross.musl64;
 
         # The final Rust application derivation.
         # This is where all the solutions come together.
-        search-lambda = pkgs.rustPlatform.buildRustPackage {
+        search-lambda = pkgsMusl.rustPlatform.buildRustPackage {
           pname = "fdnix-search-lambda";
           version = "0.1.0";
           src = ./.;
 
-          # The correct Rust target for static compilation.
-          # This tells rustc to link against the musl libc.
+          # Enable musl static linking for Lambda deployment
           target = "x86_64-unknown-linux-musl";
 
-          # Increase stack size to prevent compiler crashes
-          RUST_MIN_STACK = "67108864";
+          # Set minimum stack size to 512MB for stability
+          RUST_MIN_STACK = "536870912";
 
+          # Aggressive optimization settings for Lambda deployment
+          RUSTFLAGS = "-C target-feature=+crt-static";
+          
           # Native build tools needed for compilation
-          nativeBuildInputs = with pkgs; [
+          nativeBuildInputs = with pkgsMusl.buildPackages; [
             pkg-config
             protobuf
           ];
@@ -54,6 +58,7 @@
       in {
         packages = {
           default = search-lambda;
+          search-lambda = search-lambda;
           
           # Lambda deployment package with CA certificates
           lambda-package = pkgs.stdenv.mkDerivation {
