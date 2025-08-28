@@ -218,10 +218,10 @@ export class FdnixPipelineStack extends Stack {
         BEDROCK_INPUT_BUCKET: databaseStack.artifactsBucket.bucketName,
         BEDROCK_OUTPUT_BUCKET: databaseStack.artifactsBucket.bucketName,
         // Dual database configuration
-        DUCKDB_DATA_KEY: 'snapshots/fdnix-data.duckdb',        // Main database with all metadata
-        DUCKDB_MINIFIED_KEY: 'snapshots/fdnix.duckdb',        // Minified database for Lambda layer
-        OUTPUT_PATH: '/out/fdnix-data.duckdb',                 // Main database output path
-        OUTPUT_MINIFIED_PATH: '/out/fdnix.duckdb',             // Minified database output path
+        LANCEDB_DATA_KEY: 'snapshots/fdnix-data.lancedb',        // Main database with all metadata
+        LANCEDB_MINIFIED_KEY: 'snapshots/fdnix.lancedb',        // Minified database for Lambda layer
+        OUTPUT_PATH: '/out/fdnix-data.lancedb',                 // Main database output path
+        OUTPUT_MINIFIED_PATH: '/out/fdnix.lancedb',             // Minified database output path
         // Layer publish configuration
         PUBLISH_LAYER: 'true',
         LAYER_ARN: dbLayerUnversionedArn,

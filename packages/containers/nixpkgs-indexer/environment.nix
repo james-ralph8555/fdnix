@@ -11,7 +11,11 @@ in
     botocore
     requests
     httpx
-    duckdb
     numpy
+    pydantic
+    pandas
+    pyarrow
+    lancedb
+    pip
   ]))
 ]

@@ -31,3 +31,5 @@ bootstrap
 target/
 result/
 result-dev/
+result
+result-dev

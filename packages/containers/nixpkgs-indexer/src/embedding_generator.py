@@ -6,7 +6,8 @@ import logging
 import json
 import asyncio
 from typing import List, Dict, Any, Tuple
-import duckdb
+import lancedb
+import pandas as pd
 from botocore.exceptions import ClientError
 from bedrock_client import BedrockBatchClient
 
@@ -23,16 +24,15 @@ class EmbeddingGenerator:
         # Use Bedrock batch size for processing (up to 50,000)
         self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '50000'))
         self.max_text_length = 8192  # Titan Text v2 supports up to 8,192 tokens
-        # DuckDB + artifact settings (operate on the main database)
-        self.duckdb_path = os.environ.get('DUCKDB_PATH', '/out/fdnix-data.duckdb').strip()
+        # LanceDB + artifact settings (operate on the main database)
+        self.lancedb_path = os.environ.get('LANCEDB_PATH', '/out/fdnix-data.lancedb').strip()
         self.artifacts_bucket = os.environ.get('ARTIFACTS_BUCKET', '').strip()
         # Embedding phase reads/writes the MAIN DB artifact in S3
-        self.duckdb_key = os.environ.get('DUCKDB_DATA_KEY', '').strip()
+        self.lancedb_key = os.environ.get('LANCEDB_DATA_KEY', '').strip()
         self.embedding_dim: int | None = None
-        # VSS index parameters (override via env)
-        self.vss_hnsw_m = int(os.environ.get('VSS_HNSW_M', '16'))
-        self.vss_ef_construction = int(os.environ.get('VSS_EF_CONSTRUCTION', '200'))
-        self.vss_ef_search = int(os.environ.get('VSS_EF_SEARCH', '40'))
+        # Vector index parameters (override via env)
+        self.vector_index_partitions = int(os.environ.get('VECTOR_INDEX_PARTITIONS', '256'))
+        self.vector_index_sub_vectors = int(os.environ.get('VECTOR_INDEX_SUB_VECTORS', '8'))
 
     def validate_environment(self):
         """Validate required environment variables"""
@@ -45,97 +45,46 @@ class EmbeddingGenerator:
             raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
 
     # -----------------------
-    # DuckDB helpers
+    # LanceDB helpers
     # -----------------------
-    def connect_duckdb(self) -> duckdb.DuckDBPyConnection:
-        if not os.path.exists(self.duckdb_path):
-            raise FileNotFoundError(f"DuckDB file not found at {self.duckdb_path}")
-        logger.info(f"Opening DuckDB at {self.duckdb_path}")
-        con = duckdb.connect(self.duckdb_path)
-        # Ensure VSS extension is available
-        try:
-            con.execute("INSTALL vss; LOAD vss;")
-        except Exception as e:
-            error_msg = f"Could not install/load DuckDB vss extension: {e}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg) from e
-        # Enable experimental persistence for HNSW indexes for on-disk DBs
-        con.execute("SET hnsw_enable_experimental_persistence = true;")
-        # Best-effort: set runtime VSS parameters (ignored if unsupported)
-        try:
-            con.execute(f"SET vss.ef_search={int(self.vss_ef_search)};")
-        except Exception:
-            pass
-        # Create embeddings table if not present
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS embeddings (
-                package_id TEXT PRIMARY KEY,
-                vector FLOAT[]
-            );
-            """
-        )
-        # Simple key/value meta table for index metadata (e.g., embedding_dim)
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS fdnix_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-            """
-        )
-        # Table to track content hashes and their embeddings for incremental updates
-        con.execute(
-            """
-            CREATE TABLE IF NOT EXISTS embeddings_content_hashes (
-                content_hash HUGEINT PRIMARY KEY,
-                vector FLOAT[]
-            );
-            """
-        )
-        return con
+    def connect_lancedb(self) -> lancedb.DBConnection:
+        if not os.path.exists(self.lancedb_path):
+            raise FileNotFoundError(f"LanceDB not found at {self.lancedb_path}")
+        logger.info(f"Opening LanceDB at {self.lancedb_path}")
+        db = lancedb.connect(self.lancedb_path)
+        return db
 
-    def fetch_packages_to_embed(self, con: duckdb.DuckDBPyConnection, limit: int | None = None, force_rebuild: bool = False) -> List[Dict[str, Any]]:
-        # Select all candidates - process all data regardless of broken/insecure/unsupported status
-        base_select = (
-            "SELECT package_id, packageName, version, attributePath, description, longDescription, homepage, mainProgram, "
-            "license, maintainers, platforms, COALESCE(hasEmbedding, FALSE) AS hasEmbedding, "
-            "COALESCE(available, TRUE) AS available, COALESCE(broken, FALSE) AS broken, "
-            "COALESCE(insecure, FALSE) AS insecure, COALESCE(unsupported, FALSE) AS unsupported, "
-            "content_hash "
-            "FROM packages"
-        )
-        
+    def fetch_packages_to_embed(self, db: lancedb.DBConnection, limit: int | None = None, force_rebuild: bool = False) -> List[Dict[str, Any]]:
+        try:
+            table = db.open_table("packages")
+        except (FileNotFoundError, ValueError) as e:
+            raise RuntimeError("Expected 'packages' table not found in LanceDB. Run metadata phase first.") from e
+
+        # Get all packages data
         if force_rebuild:
-            # Force rebuild: process all packages regardless of hasEmbedding status
-            sql = base_select
+            # Force rebuild: process all packages regardless of has_embedding status
+            # Use head with count_rows to get all data (workaround for to_pandas limit)
+            row_count = table.count_rows()
+            if limit:
+                row_count = min(row_count, limit)
+            df = table.head(row_count).to_pandas()
         else:
-            # Incremental: process packages that need embeddings OR have changed content
-            sql = (
-                base_select + " WHERE ("
-                "COALESCE(hasEmbedding, FALSE) = FALSE OR "
-                "(content_hash IS NOT NULL AND content_hash NOT IN "
-                "(SELECT content_hash FROM embeddings_content_hashes WHERE content_hash IS NOT NULL))"
-                ")"
-            )
-            
-        if limit:
-            sql += f" LIMIT {int(limit)}"
-            
-        try:
-            res = con.execute(sql)
-            rows = res.fetchall()
-        except duckdb.CatalogException as e:
-            raise RuntimeError("Expected 'packages' table not found in DuckDB. Run metadata phase first.") from e
-
-        columns = [d[0] for d in res.description]
+            # Incremental: process packages that need embeddings
+            # Use vector search with where clause (need a dummy vector for search API)
+            dummy_vector = [0.0] * 256  # Match the vector dimension
+            query = table.search(dummy_vector).where("has_embedding = false")
+            if limit:
+                query = query.limit(limit)
+            df = query.to_pandas()
+        
+        # Convert to list of dictionaries
         out: List[Dict[str, Any]] = []
-        for r in rows:
-            rec = dict(zip(columns, r))
-            # Coerce JSON-like columns into Python types when stored as JSON or VARCHAR
+        for _, row in df.iterrows():
+            rec = row.to_dict()
+            # Coerce JSON-like columns into Python types
             for key in ("license", "maintainers", "platforms"):
                 val = rec.get(key)
-                if isinstance(val, str):
+                if isinstance(val, str) and val:
                     try:
                         rec[key] = json.loads(val)
                     except Exception:
@@ -144,70 +93,44 @@ class EmbeddingGenerator:
             out.append(rec)
         return out
 
-    def insert_embeddings(self, con: duckdb.DuckDBPyConnection, rows: List[Tuple[str, list]]) -> None:
+    def insert_embeddings(self, table: lancedb.table.Table, rows: List[Tuple[str, list]]) -> None:
         if not rows:
             return
-        con.executemany("INSERT OR REPLACE INTO embeddings (package_id, vector) VALUES (?, ?)", rows)
+        # Convert to records for LanceDB
+        records = []
+        for package_id, vector in rows:
+            records.append({
+                "package_id": package_id,
+                "vector": vector
+            })
+        # Update existing records with embeddings
+        for record in records:
+            table.update(where=f"package_id = '{record['package_id']}'", values={"vector": record["vector"], "has_embedding": True})
 
-    def mark_packages_embedded(self, con: duckdb.DuckDBPyConnection, keys: List[str]) -> None:
+    def mark_packages_embedded(self, table: lancedb.table.Table, keys: List[str]) -> None:
         if not keys:
             return
-        con.executemany(
-            "UPDATE packages SET hasEmbedding = TRUE WHERE package_id = ?",
-            [(k,) for k in keys],
-        )
+        for key in keys:
+            table.update(where=f"package_id = '{key}'", values={"has_embedding": True})
 
-    def ensure_vss_index(self, con: duckdb.DuckDBPyConnection) -> None:
-        # Determine dimension from existing rows if not already known
-        dim = self.embedding_dim
-        if dim is None:
-            try:
-                dim_row = con.execute("SELECT list_length(vector) FROM embeddings WHERE vector IS NOT NULL LIMIT 1").fetchone()
-                if dim_row and dim_row[0]:
-                    dim = int(dim_row[0])
-            except Exception:
-                dim = None
-        if not dim:
-            logger.warning("Skipping VSS index creation: no embeddings present to infer dimension")
-            return
-        # Compare with last known dim; if different, rebuild index
+    def ensure_vector_index(self, table: lancedb.table.Table) -> None:
+        # Create vector index using LanceDB's native indexing
         try:
-            prev_dim_row = con.execute("SELECT value FROM fdnix_meta WHERE key='embedding_dim'").fetchone()
-            prev_dim = int(prev_dim_row[0]) if prev_dim_row and prev_dim_row[0] is not None else None
-        except Exception:
-            prev_dim = None
-
-        # Try creating/updating index with HNSW params
-        logger.info(f"Ensuring VSS index (dim={dim}, M={self.vss_hnsw_m}, ef_construction={self.vss_ef_construction})")
-        try:
-            con.execute(
-                """
-                CREATE INDEX IF NOT EXISTS embeddings_vss_idx
-                ON embeddings(vector)
-                USING vss (dim={}, hnsw_m={}, hnsw_ef_construction={});
-                """.format(dim, self.vss_hnsw_m, self.vss_ef_construction)
+            logger.info(f"Creating vector index (partitions={self.vector_index_partitions}, sub_vectors={self.vector_index_sub_vectors})")
+            
+            # Create IVF-PQ index on vector column
+            table.create_index(
+                column="vector",
+                index_type="IVF_PQ",
+                num_partitions=self.vector_index_partitions,
+                num_sub_vectors=self.vector_index_sub_vectors,
+                distance_type="cosine"
             )
+            
+            logger.info("Vector index created successfully")
         except Exception as e:
-            logger.warning(f"VSS index ensure failed: {e}. Attempting drop/recreate...")
-            try:
-                con.execute("DROP INDEX IF EXISTS embeddings_vss_idx;")
-                con.execute(
-                    """
-                    CREATE INDEX embeddings_vss_idx
-                    ON embeddings(vector)
-                    USING vss (dim={}, hnsw_m={}, hnsw_ef_construction={});
-                    """.format(dim, self.vss_hnsw_m, self.vss_ef_construction)
-                )
-            except Exception as inner:
-                error_msg = f"Failed to rebuild VSS index: {inner}"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg) from inner
-
-        # Persist current dim into meta table
-        try:
-            con.execute("INSERT OR REPLACE INTO fdnix_meta (key, value) VALUES ('embedding_dim', ?)", [str(dim)])
-        except Exception:
-            pass
+            logger.error("Failed to create vector index: %s", e)
+            # Don't raise - vector index is optional
 
     def create_embedding_text(self, package: Dict[str, Any]) -> str:
         """Create a text representation of the package for embedding"""
@@ -328,14 +251,17 @@ class EmbeddingGenerator:
             if content_hash:
                 # Check if we have an existing embedding for this content hash
                 try:
-                    existing_vector = self._duckdb_con.execute(
-                        "SELECT vector FROM embeddings_content_hashes WHERE content_hash = ?",
-                        [content_hash]
-                    ).fetchone()
+                    # For LanceDB, we'll check if package already has embedding based on content hash
+                    # This is simplified since embeddings are stored directly in the packages table
+                    # Use vector search with where clause to find existing embedding
+                    dummy_vector = [0.0] * 256
+                    existing_df = self._lancedb_table.search(dummy_vector).where(f"content_hash = {content_hash} AND has_embedding = true").limit(1).to_pandas()
                     
-                    if existing_vector and existing_vector[0]:
-                        packages_can_reuse.append((package, existing_vector[0]))
-                        continue
+                    if not existing_df.empty and 'vector' in existing_df.columns:
+                        existing_vector = existing_df.iloc[0]['vector']
+                        if existing_vector is not None and len(existing_vector) > 0:
+                            packages_can_reuse.append((package, existing_vector))
+                            continue
                 except Exception:
                     pass  # Fall through to generate new embedding
             
@@ -355,15 +281,12 @@ class EmbeddingGenerator:
                 vector_rows.append((pkg_id, vector))
                 reuse_keys.append(pkg_id)
             
-            con = self._duckdb_con
-            con.execute("BEGIN TRANSACTION;")
+            table = self._lancedb_table
             try:
-                self.insert_embeddings(con, vector_rows)
-                self.mark_packages_embedded(con, reuse_keys)
-                con.execute("COMMIT;")
+                self.insert_embeddings(table, vector_rows)
+                self.mark_packages_embedded(table, reuse_keys)
                 processed_count += reused_count
             except Exception:
-                con.execute("ROLLBACK;")
                 raise
         
         # Process packages that need new embeddings
@@ -405,22 +328,14 @@ class EmbeddingGenerator:
                     if content_hash:
                         hash_rows.append((content_hash, vec))
 
-                # Insert into DuckDB and mark packages
-                con = self._duckdb_con
-                con.execute("BEGIN TRANSACTION;")
+                # Insert into LanceDB and mark packages
+                table = self._lancedb_table
                 try:
-                    self.insert_embeddings(con, vector_rows)
-                    self.mark_packages_embedded(con, new_package_ids)
-                    # Store content hash -> embedding mappings for future reuse
-                    if hash_rows:
-                        con.executemany(
-                            "INSERT OR REPLACE INTO embeddings_content_hashes (content_hash, vector) VALUES (?, ?)",
-                            hash_rows
-                        )
-                    con.execute("COMMIT;")
+                    self.insert_embeddings(table, vector_rows)
+                    self.mark_packages_embedded(table, new_package_ids)
+                    # Note: For LanceDB, content hash -> embedding mapping is handled directly in the packages table
                     processed_count += len(packages_need_embedding)
                 except Exception:
-                    con.execute("ROLLBACK;")
                     raise
                 
             except Exception as error:
@@ -441,21 +356,24 @@ class EmbeddingGenerator:
                 raise RuntimeError("Cannot access Bedrock model. Check IAM permissions and model availability.")
             logger.info("Bedrock model access validated successfully")
             
-            # Connect to DuckDB, downloading current artifact from S3 if missing
+            # Connect to LanceDB, downloading current artifact from S3 if missing
             downloaded_current = False
             try:
-                self._duckdb_con = self.connect_duckdb()
+                self._lancedb_db = self.connect_lancedb()
+                self._lancedb_table = self._lancedb_db.open_table("packages")
             except FileNotFoundError:
-                if self.artifacts_bucket and self.duckdb_key:
+                if self.artifacts_bucket and self.lancedb_key:
                     logger.info(
-                        f"Local main DB not found at {self.duckdb_path}. Attempting download from s3://{self.artifacts_bucket}/{self.duckdb_key}"
+                        f"Local main DB not found at {self.lancedb_path}. Attempting download from s3://{self.artifacts_bucket}/{self.lancedb_key}"
                     )
                     try:
                         import boto3
                         s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
-                        s3.download_file(self.artifacts_bucket, self.duckdb_key, self.duckdb_path)
+                        # Download entire LanceDB directory structure
+                        self._download_lancedb_from_s3(s3, self.artifacts_bucket, self.lancedb_key, self.lancedb_path)
                         downloaded_current = True
-                        self._duckdb_con = self.connect_duckdb()
+                        self._lancedb_db = self.connect_lancedb()
+                        self._lancedb_table = self._lancedb_db.open_table("packages")
                         logger.info("Downloaded and opened main DB from S3")
                     except Exception as e:
                         logger.error(f"Failed to download main DB from S3: {e}")
@@ -465,7 +383,7 @@ class EmbeddingGenerator:
             
             # Try to load previous artifact for incremental updates (unless force rebuild)
             if not force_rebuild and not downloaded_current:
-                prev_artifact_path = self.duckdb_path + ".previous"
+                prev_artifact_path = self.lancedb_path + ".previous"
                 if self._maybe_download_previous_artifact():
                     self._load_previous_embeddings_and_hashes(prev_artifact_path)
                     # Clean up temporary file
@@ -476,7 +394,7 @@ class EmbeddingGenerator:
                         pass
             
             # Load candidates (this now uses content hash comparison for incremental updates)
-            candidates = self.fetch_packages_to_embed(self._duckdb_con, force_rebuild=force_rebuild)
+            candidates = self.fetch_packages_to_embed(self._lancedb_db, force_rebuild=force_rebuild)
             total_packages = len(candidates)
             
             if total_packages == 0:
@@ -508,8 +426,8 @@ class EmbeddingGenerator:
                     logger.error(f"Failed to process batch {batch_num}: {e}")
                     failed_count += len(batch)
             
-            # Build or update VSS index in DuckDB
-            self.ensure_vss_index(self._duckdb_con)
+            # Build or update vector index in LanceDB
+            self.ensure_vector_index(self._lancedb_table)
 
             # Upload final artifact to S3 if configured
             self._maybe_upload_artifact()
@@ -524,38 +442,35 @@ class EmbeddingGenerator:
             raise error
 
     def _maybe_download_previous_artifact(self) -> bool:
-        """Download previous DuckDB artifact from S3 if available for incremental updates.
+        """Download previous LanceDB artifact from S3 if available for incremental updates.
         
         Returns True if previous artifact was downloaded, False otherwise.
         """
-        if not self.artifacts_bucket or not self.duckdb_key:
-            logger.info("Artifact download not configured (ARTIFACTS_BUCKET/DUCKDB_DATA_KEY missing). Skipping download.")
+        if not self.artifacts_bucket or not self.lancedb_key:
+            logger.info("Artifact download not configured (ARTIFACTS_BUCKET/LANCEDB_DATA_KEY missing). Skipping download.")
             return False
             
         # Use a temporary path for the previous artifact
-        prev_artifact_path = self.duckdb_path + ".previous"
+        prev_artifact_path = self.lancedb_path + ".previous"
         
         try:
             import boto3
             s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
-            logger.info(f"Attempting to download previous main DB artifact from s3://{self.artifacts_bucket}/{self.duckdb_key}")
+            logger.info(f"Attempting to download previous main DB artifact from s3://{self.artifacts_bucket}/{self.lancedb_key}")
             
-            # Check if object exists first
+            # For LanceDB, we need to download the entire directory structure
+            # Check if the key exists (this might be a prefix)
             try:
-                s3.head_object(Bucket=self.artifacts_bucket, Key=self.duckdb_key)
-            except ClientError as e:
-                if e.response['Error']['Code'] == '404':
-                    logger.info(f"No previous main DB artifact exists at s3://{self.artifacts_bucket}/{self.duckdb_key}. Starting fresh build.")
-                    return False
-                else:
-                    logger.info(f"Could not check for previous main DB artifact: {e}. Starting fresh build.")
+                response = s3.list_objects_v2(Bucket=self.artifacts_bucket, Prefix=self.lancedb_key, MaxKeys=1)
+                if 'Contents' not in response:
+                    logger.info(f"No previous main DB artifact exists at s3://{self.artifacts_bucket}/{self.lancedb_key}. Starting fresh build.")
                     return False
             except Exception as e:
                 logger.info(f"Could not check for previous main DB artifact: {e}. Starting fresh build.")
                 return False
             
-            # Download the file
-            s3.download_file(self.artifacts_bucket, self.duckdb_key, prev_artifact_path)
+            # Download the LanceDB directory structure
+            self._download_lancedb_from_s3(s3, self.artifacts_bucket, self.lancedb_key, prev_artifact_path)
             logger.info(f"Successfully downloaded previous main DB artifact to {prev_artifact_path}")
             return True
         except Exception as e:
@@ -566,61 +481,96 @@ class EmbeddingGenerator:
         """Load embeddings and content hashes from previous artifact into current DB."""
         try:
             logger.info("Loading embeddings and content hashes from previous main DB artifact...")
-            with duckdb.connect(prev_artifact_path, read_only=True) as prev_con:
-                # Load VSS extension in previous connection
-                try:
-                    prev_con.execute("INSTALL vss; LOAD vss;")
-                except Exception:
-                    pass  # May not be available in previous versions
+            prev_db = lancedb.connect(prev_artifact_path)
+            prev_table = prev_db.open_table("packages")
+            
+            # Load existing embeddings from previous LanceDB
+            try:
+                # Use vector search to find packages with embeddings
+                dummy_vector = [0.0] * 256
+                prev_df = prev_table.search(dummy_vector).where("has_embedding = true AND vector IS NOT NULL").to_pandas()
                 
-                # Copy existing embeddings to current DB (if embeddings table exists)
-                try:
-                    embeddings_data = prev_con.execute(
-                        "SELECT package_id, vector FROM embeddings WHERE vector IS NOT NULL"
-                    ).fetchall()
+                if not prev_df.empty:
+                    logger.info(f"Found {len(prev_df)} packages with embeddings in previous artifact")
                     
-                    if embeddings_data:
-                        logger.info(f"Copying {len(embeddings_data)} existing embeddings...")
-                        self._duckdb_con.executemany(
-                            "INSERT OR REPLACE INTO embeddings (package_id, vector) VALUES (?, ?)",
-                            embeddings_data
-                        )
-                    else:
-                        logger.info("No existing embeddings found in previous main DB artifact")
-                except duckdb.CatalogException as e:
-                    logger.info(f"No embeddings table found in previous main DB artifact: {e}")
-                except Exception as e:
-                    logger.warning(f"Could not load embeddings from previous main DB artifact: {e}")
-                
-                # Copy content hashes and their embeddings
-                try:
-                    # Try to get content hashes from packages table (new schema)
-                    hash_data = prev_con.execute(
-                        "SELECT p.content_hash, e.vector FROM packages p "
-                        "JOIN embeddings e ON p.package_id = e.package_id "
-                        "WHERE p.content_hash IS NOT NULL AND e.vector IS NOT NULL"
-                    ).fetchall()
-                    
-                    if hash_data:
-                        logger.info(f"Copying {len(hash_data)} content hash mappings from previous main DB...")
-                        self._duckdb_con.executemany(
-                            "INSERT OR REPLACE INTO embeddings_content_hashes (content_hash, vector) VALUES (?, ?)",
-                            hash_data
-                        )
-                    else:
-                        logger.info("No content hashes found in previous main DB artifact (old schema)")
+                    # For each package with existing embedding, update current DB
+                    for _, row in prev_df.iterrows():
+                        package_id = row['package_id']
+                        vector = row['vector']
+                        content_hash = row.get('content_hash')
                         
-                except Exception as e:
-                    logger.info(f"Could not load content hashes from previous main DB artifact: {e}")
+                        if vector is not None and len(vector) > 0:
+                            # Update current table with existing embedding
+                            try:
+                                self._lancedb_table.update(
+                                    where=f"package_id = '{package_id}'",
+                                    values={"vector": vector, "has_embedding": True}
+                                )
+                            except Exception as e:
+                                logger.debug(f"Could not update package {package_id}: {e}")
                     
+                    logger.info("Successfully loaded embeddings from previous artifact")
+                else:
+                    logger.info("No existing embeddings found in previous main DB artifact")
+                    
+            except Exception as e:
+                logger.warning(f"Could not load embeddings from previous main DB artifact: {e}")
+                
         except Exception as e:
             logger.warning(f"Failed to load previous embeddings from main DB artifact: {e}")
 
     def _maybe_upload_artifact(self) -> None:
-        if not self.artifacts_bucket or not self.duckdb_key:
-            logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/DUCKDB_DATA_KEY missing). Skipping upload.")
+        if not self.artifacts_bucket or not self.lancedb_key:
+            logger.info("Artifact upload not configured (ARTIFACTS_BUCKET/LANCEDB_DATA_KEY missing). Skipping upload.")
             return
         import boto3
         s3 = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
-        logger.info(f"Uploading main DB {self.duckdb_path} to s3://{self.artifacts_bucket}/{self.duckdb_key}")
-        s3.upload_file(self.duckdb_path, self.artifacts_bucket, self.duckdb_key)
+        logger.info(f"Uploading main DB {self.lancedb_path} to s3://{self.artifacts_bucket}/{self.lancedb_key}")
+        
+        # Upload the entire LanceDB directory structure
+        self._upload_lancedb_to_s3(s3, self.artifacts_bucket, self.lancedb_key, self.lancedb_path)
+        logger.info("Upload complete.")
+    
+    def _download_lancedb_from_s3(self, s3, bucket: str, key_prefix: str, local_path: str) -> None:
+        """Download LanceDB directory structure from S3."""
+        import os
+        from pathlib import Path
+        
+        # List all objects with the prefix
+        paginator = s3.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=bucket, Prefix=key_prefix)
+        
+        # Create local directory
+        Path(local_path).mkdir(parents=True, exist_ok=True)
+        
+        for page in pages:
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    s3_key = obj['Key']
+                    # Calculate local file path
+                    relative_path = s3_key[len(key_prefix):].lstrip('/')
+                    if relative_path:  # Skip empty paths
+                        local_file_path = os.path.join(local_path, relative_path)
+                        
+                        # Create parent directories
+                        Path(local_file_path).parent.mkdir(parents=True, exist_ok=True)
+                        
+                        # Download file
+                        s3.download_file(bucket, s3_key, local_file_path)
+                        logger.debug(f"Downloaded {s3_key} to {local_file_path}")
+
+    def _upload_lancedb_to_s3(self, s3, bucket: str, key_prefix: str, local_path: str) -> None:
+        """Upload LanceDB directory structure to S3."""
+        from pathlib import Path
+        
+        local_path_obj = Path(local_path)
+        
+        for file_path in local_path_obj.rglob("*"):
+            if file_path.is_file():
+                # Calculate relative path for S3 key
+                relative_path = file_path.relative_to(local_path_obj)
+                s3_key = f"{key_prefix.rstrip('/')}/{relative_path}".replace("\\", "/")
+                
+                # Upload file
+                s3.upload_file(str(file_path), bucket, s3_key)
+                logger.debug(f"Uploaded {file_path} to {s3_key}")

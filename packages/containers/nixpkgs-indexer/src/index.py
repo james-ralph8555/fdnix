@@ -7,8 +7,7 @@ import asyncio
 from typing import List, Dict, Any
 
 from nixpkgs_extractor import NixpkgsExtractor
-from duckdb_writer import DuckDBWriter
-from minified_db_writer import MinifiedDuckDBWriter
+from lancedb_writer import LanceDBWriter
 from embedding_generator import EmbeddingGenerator
 from layer_publisher import LayerPublisher
 
@@ -30,8 +29,8 @@ def validate_env() -> None:
     """Validate environment variables"""
     # Optional S3 upload: requires bucket and region, plus at least one key
     has_bucket = bool(os.environ.get("ARTIFACTS_BUCKET"))
-    has_data_key = bool(os.environ.get("DUCKDB_DATA_KEY"))
-    has_minified_key = bool(os.environ.get("DUCKDB_MINIFIED_KEY"))
+    has_data_key = bool(os.environ.get("LANCEDB_DATA_KEY"))
+    has_minified_key = bool(os.environ.get("LANCEDB_MINIFIED_KEY"))
     has_region = bool(os.environ.get("AWS_REGION"))
     
     if has_bucket or has_data_key or has_minified_key or has_region:
@@ -43,13 +42,13 @@ def validate_env() -> None:
         
         # Set default keys if not provided but S3 upload is configured
         if not has_data_key:
-            os.environ["DUCKDB_DATA_KEY"] = "fdnix-data.duckdb"
+            os.environ["LANCEDB_DATA_KEY"] = "fdnix-data.lancedb"
         if not has_minified_key:
-            os.environ["DUCKDB_MINIFIED_KEY"] = "fdnix.duckdb"
+            os.environ["LANCEDB_MINIFIED_KEY"] = "fdnix.lancedb"
 
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):
-        required_keys = ["LAYER_ARN", "ARTIFACTS_BUCKET", "AWS_REGION", "DUCKDB_MINIFIED_KEY"]
+        required_keys = ["LAYER_ARN", "ARTIFACTS_BUCKET", "AWS_REGION", "LANCEDB_MINIFIED_KEY"]
         missing = [k for k in required_keys if not os.environ.get(k)]
             
         if missing:
@@ -69,8 +68,8 @@ async def main() -> int:
             processing_mode = "both"
         
         # Setup paths for both databases
-        main_db_path = os.environ.get("OUTPUT_PATH", "/out/fdnix-data.duckdb")
-        minified_db_path = os.environ.get("OUTPUT_MINIFIED_PATH", "/out/fdnix.duckdb")
+        main_db_path = os.environ.get("OUTPUT_PATH", "/out/fdnix-data.lancedb")
+        minified_db_path = os.environ.get("OUTPUT_MINIFIED_PATH", "/out/fdnix.lancedb")
         
         # Phase 1: Metadata Generation (if requested)
         if processing_mode in ("metadata", "both"):
@@ -79,10 +78,10 @@ async def main() -> int:
             extractor = NixpkgsExtractor()
             
             # Create main database with all metadata (upload to data key)
-            main_writer = DuckDBWriter(
+            main_writer = LanceDBWriter(
                 output_path=main_db_path,
                 s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
-                s3_key=os.environ.get("DUCKDB_DATA_KEY"),
+                s3_key=os.environ.get("LANCEDB_DATA_KEY"),
                 region=os.environ.get("AWS_REGION"),
             )
 
@@ -90,7 +89,7 @@ async def main() -> int:
             packages: List[Dict[str, Any]] = extractor.extract_all_packages()
             logger.info("Extracted %d packages from nixpkgs", len(packages))
 
-            logger.info("Writing metadata to main DuckDB artifact...")
+            logger.info("Writing metadata to main LanceDB artifact...")
             main_writer.write_artifact(packages)
             logger.info("Main database generation completed successfully!")
         
@@ -106,8 +105,8 @@ async def main() -> int:
                 os.environ["BEDROCK_OUTPUT_DIMENSIONS"] = "256"
             
             # Always use the main database for embeddings
-            if not os.environ.get("DUCKDB_PATH"):
-                os.environ["DUCKDB_PATH"] = main_db_path
+            if not os.environ.get("LANCEDB_PATH"):
+                os.environ["LANCEDB_PATH"] = main_db_path
             
             # Check for force rebuild flag
             force_rebuild = _truthy(os.environ.get("FORCE_REBUILD_EMBEDDINGS"))
@@ -115,8 +114,8 @@ async def main() -> int:
                 logger.info("Force rebuild enabled - will regenerate all embeddings")
             
             # Ensure S3 key is set for main DB during embedding stage
-            if os.environ.get("ARTIFACTS_BUCKET") and not os.environ.get("DUCKDB_DATA_KEY"):
-                os.environ["DUCKDB_DATA_KEY"] = "fdnix-data.duckdb"
+            if os.environ.get("ARTIFACTS_BUCKET") and not os.environ.get("LANCEDB_DATA_KEY"):
+                os.environ["LANCEDB_DATA_KEY"] = "fdnix-data.lancedb"
 
             generator = EmbeddingGenerator()
             await generator.run(force_rebuild=force_rebuild)
@@ -128,26 +127,26 @@ async def main() -> int:
         # Phase 3: Minified Database Generation (if requested)
         if processing_mode in ("minified", "both"):
             logger.info("=== MINIFIED DATABASE GENERATION PHASE ===")
-            minified_writer = MinifiedDuckDBWriter(
+            minified_writer = LanceDBWriter(
                 output_path=minified_db_path,
                 s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
-                s3_key=os.environ.get("DUCKDB_MINIFIED_KEY"),
+                s3_key=os.environ.get("LANCEDB_MINIFIED_KEY"),
                 region=os.environ.get("AWS_REGION"),
             )
             logger.info("Creating minified database from main database (with embeddings if present)...")
             minified_writer.create_minified_db_from_main(main_db_path)
             logger.info("Minified database generation completed successfully!")
         
-        # Phase 3: Publish DuckDB layer (if requested)
+        # Phase 3: Publish LanceDB layer (if requested)
         if _truthy(os.environ.get("PUBLISH_LAYER")):
             logger.info("=== LAYER PUBLISH PHASE ===")
             layer_arn = os.environ.get("LAYER_ARN", "").strip()
             bucket = os.environ.get("ARTIFACTS_BUCKET", "").strip()
             
             # Use minified key for layer publishing
-            key = os.environ.get("DUCKDB_MINIFIED_KEY", "")
+            key = os.environ.get("LANCEDB_MINIFIED_KEY", "")
             if not key:
-                raise RuntimeError("DUCKDB_MINIFIED_KEY required for layer publishing")
+                raise RuntimeError("LANCEDB_MINIFIED_KEY required for layer publishing")
 
             publisher = LayerPublisher(region=os.environ.get("AWS_REGION"))
             publisher.publish_from_s3(bucket=bucket, key=key, layer_arn=layer_arn)

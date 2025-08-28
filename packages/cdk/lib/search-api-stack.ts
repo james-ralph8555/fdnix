@@ -47,13 +47,13 @@ export class FdnixSearchApiStack extends Stack {
       runtime: lambda.Runtime.PROVIDED_AL2023,
       architecture: lambda.Architecture.X86_64,
       handler: 'bootstrap',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/result/bin')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../search-lambda/result/lambda-files')),
       timeout: Duration.seconds(30),
       memorySize: 1024,
       role: this.lambdaExecutionRole,
       layers: [databaseStack.databaseLayer],
       environment: {
-        DUCKDB_PATH: '/opt/fdnix/fdnix.duckdb',
+        LANCEDB_PATH: '/opt/fdnix/fdnix.lancedb',
         BEDROCK_MODEL_ID: bedrockModelId,
         BEDROCK_OUTPUT_DIMENSIONS: '256',
         ENABLE_EMBEDDINGS: 'true', // Set to 'false' for FTS-only mode

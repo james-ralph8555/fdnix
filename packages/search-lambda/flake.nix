@@ -1,5 +1,5 @@
 {
-  description = "A statically-compiled Rust AWS Lambda function with DuckDB extensions";
+  description = "A statically-compiled Rust AWS Lambda function for fdnix search (LanceDB)";
 
   inputs = {
     # Pinning nixpkgs to a specific commit ensures the build is fully reproducible
@@ -15,43 +15,6 @@
           inherit system;
         };
 
-        # The core solution: custom DuckDB derivation with extensions.
-        # This addresses the header bug and statically links the extensions.
-        duckdb-with-extensions = pkgs.duckdb.overrideAttrs (oldAttrs: {
-          # Use a name specific to this custom build.
-          pname = "duckdb-static-extensions";
-          
-          # Ensure we have all outputs (out, lib, dev)
-          outputs = oldAttrs.outputs or ["out" "lib" "dev"];
-
-          # Define the specific extensions to be built statically.
-          # The `vss` and `fts` extensions are enabled by these flags.
-          cmakeFlags = oldAttrs.cmakeFlags or [] ++ [
-            "-DDUCKDB_BUILD_EXTENSIONS=fts;vss"
-            "-DDUCKDB_BUILD_ICU_EXTENSION=ON"
-            "-DDUCKDB_BUILD_VSS_EXTENSION=ON"
-            "-DDUCKDB_BUILD_FTS_EXTENSION=ON"
-            "-DDUCKDB_EXTENSION_LINK_STATIC=ON"
-            "-DBUILD_SHARED_LIBS=ON"  # Build shared library for linking
-            "-DDUCKDB_USE_EXTERNAL_LIBRARIES=ON"
-            "-DCMAKE_BUILD_TYPE=Release"
-          ];
-
-          # Fix the known header issue by manually adding the `third_party` directory
-          # to the C++ include path (`CXXFLAGS`). This is the critical step to resolve
-          # the header-not-found errors reported in community forums.
-          preConfigure = (oldAttrs.preConfigure or "") + ''
-            export CXXFLAGS="$CXXFLAGS -I$src/third_party"
-          '';
-
-          # Ensure we have the necessary build dependencies
-          nativeBuildInputs = oldAttrs.nativeBuildInputs or [] ++ (with pkgs; [
-            cmake
-            ninja
-            pkg-config
-          ]);
-        });
-
         # The final Rust application derivation.
         # This is where all the solutions come together.
         search-lambda = pkgs.rustPlatform.buildRustPackage {
@@ -63,37 +26,11 @@
           # This tells rustc to link against the musl libc.
           target = "x86_64-unknown-linux-musl";
 
-          # The list of dependencies required to build the project.
-          # Our custom DuckDB derivation is included here.
-          buildInputs = with pkgs; [
-            duckdb-with-extensions.lib
-            duckdb-with-extensions.dev
-          ];
-
           # Native build tools needed for compilation
           nativeBuildInputs = with pkgs; [
             pkg-config
-            cmake
-            clang
-            llvmPackages.libclang.lib
+            protobuf
           ];
-          
-          # Environment variables for bindgen and rustc stack size
-          env = {
-            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
-            BINDGEN_EXTRA_CLANG_ARGS = "-I${pkgs.llvmPackages.libclang.lib}/lib/clang/${pkgs.llvmPackages.libclang.version}/include -I${duckdb-with-extensions.dev}/include";
-            # This resolves the SIGSEGV by increasing rustc's stack size
-            # Using a larger stack size to handle complex macro expansions
-            RUST_MIN_STACK = "33554432";  # 32MB
-            # Enable full backtrace for debugging bindgen issues
-            RUST_BACKTRACE = "full";
-            
-            # Tell libduckdb-sys to use our custom system DuckDB
-            DUCKDB_LIB_DIR = "${duckdb-with-extensions.lib}/lib";
-            DUCKDB_INCLUDE_DIR = "${duckdb-with-extensions.dev}/include";
-            # Force the crate to not build bundled version
-            LIBDUCKDB_SYS_USE_PKG_CONFIG = "1";
-          };
 
           # Use the Cargo.lock file for vendoring dependencies.
           cargoLock = {
@@ -104,7 +41,7 @@
           doCheck = false;
 
           meta = with pkgs.lib; {
-            description = "fdnix hybrid search AWS Lambda function with DuckDB";
+            description = "fdnix hybrid search AWS Lambda function (LanceDB)";
             license = licenses.mit;
             maintainers = [ ];
             platforms = [ "x86_64-linux" ];
@@ -148,16 +85,13 @@
         };
 
         devShells.default = pkgs.mkShell {
-          buildInputs = [ duckdb-with-extensions ];
           nativeBuildInputs = with pkgs; [
             rustc
             cargo
             pkg-config
-            cmake
           ];
-          
           shellHook = ''
-            echo "fdnix search lambda development environment"
+            echo "fdnix search lambda development environment (LanceDB)"
             echo "Rust toolchain: $(rustc --version)"
             echo "Target: x86_64-unknown-linux-musl"
             echo ""

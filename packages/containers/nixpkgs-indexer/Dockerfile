@@ -11,6 +11,9 @@ COPY environment.nix /tmp/environment.nix
 # We also remove the file in the same layer to keep the final image clean.
 RUN nix-env -if /tmp/environment.nix && rm /tmp/environment.nix
 
+# Install tantivy-py via pip since it's not available in nixpkgs
+RUN python -m pip install --no-cache-dir tantivy-py
+
 # OCI labels
 LABEL org.opencontainers.image.title="fdnix nixpkgs-indexer"
 LABEL org.opencontainers.image.description="Indexes nixpkgs metadata and embeddings for fdnix search"

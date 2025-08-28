@@ -7,9 +7,9 @@ This package contains the AWS CDK infrastructure definitions for the fdnix hybri
 The infrastructure consists of four main stacks, a certificate stack, and a set of constructs for building Docker images and Lambda layers.
 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
-2.  **Database Stack** - S3 artifact storage + Lambda Layer for the DuckDB file (minified).
-3.  **Pipeline Stack** - Data processing pipeline that builds the DuckDB file and publishes the Lambda layer.
-4.  **Search API Stack** - A Rust Lambda-based search API with self-contained DuckDB dependencies and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
+2.  **Database Stack** - S3 artifact storage + Lambda Layer for the LanceDB dataset (minified).
+3.  **Pipeline Stack** - Data processing pipeline that builds the LanceDB dataset and publishes the Lambda layer.
+4.  **Search API Stack** - A Rust Lambda-based search API with self-contained LanceDB runtime/dependencies and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
 5.  **Frontend Stack** - Static site hosting with CloudFront (no CDK-managed custom domain).
 
 ## Architecture Diagram
@@ -23,7 +23,7 @@ graph TD
 
     subgraph FdnixDatabaseStack
         s3_artifacts["S3 Artifacts"]
-        db_layer["Lambda Layer - DuckDB file (minified)"]
+        db_layer["Lambda Layer - LanceDB dataset (minified)"]
     end
 
     subgraph FdnixPipelineStack
@@ -77,7 +77,7 @@ graph TD
     subgraph "FdnixDatabaseStack"
         direction LR
         s3_artifacts[(S3 Artifacts)]
-        db_layer[[Lambda Layer: DuckDB File]]
+        db_layer[[Lambda Layer: LanceDB Dataset]]
     end
 
     indexer_task -- reads/writes (full + minified) --> s3_artifacts
@@ -86,7 +86,7 @@ graph TD
 
 ## Search API Diagram
 
-The search API is a Rust Lambda function fronted by an API Gateway. It uses a single Lambda layer to access the DuckDB minified database file.
+The search API is a Rust Lambda function fronted by an API Gateway. It uses a single Lambda layer to access the LanceDB minified dataset.
 
 ```mermaid
 graph TD
@@ -108,7 +108,7 @@ graph TD
 
 -   Node.js 18+ and npm
 -   Rust toolchain (`rustup`, `cargo`) with musl target: `rustup target add x86_64-unknown-linux-musl` (if building without Nix)
--   Nix (recommended) for reproducible builds of the Lambda and DuckDB dependencies
+-   Nix (recommended) for reproducible builds of the Lambda and native dependencies
 -   Docker (optional) for containerized builds
 -   AWS CLI configured with appropriate credentials
 -   AWS CDK CLI installed (`npm install -g aws-cdk`)
@@ -242,15 +242,15 @@ npm run synth
 
 **Resources:**
 
--   `fdnix-artifacts` - S3 bucket for pipeline artifacts (stores both main and minified `.duckdb` files).
--   `fdnix-db-layer` - Lambda Layer that packages the minified `.duckdb` file under `/opt/fdnix/fdnix.duckdb`.
+-   `fdnix-artifacts` - S3 bucket for pipeline artifacts (stores the full and minified LanceDB dataset files).
+-   `fdnix-db-layer` - Lambda Layer that packages the minified LanceDB dataset under `/opt/fdnix/lancedb`.
 -   `fdnix-database-access-role` - IAM role for artifact access and layer publishing.
 
 **Key Features:**
 
 -   S3 versioning with lifecycle management (30-day retention).
 -   Encryption at rest with S3-managed keys.
--   The `databaseLayer` is populated by the pipeline with the minified database.
+-   The `databaseLayer` is populated by the pipeline with the minified LanceDB dataset.
 
 ### Pipeline Stack (`FdnixPipelineStack`)
 
@@ -276,19 +276,19 @@ npm run synth
 
 -   `fdnix-search-api` - Rust Lambda function for hybrid search.
 -   `fdnix-search-api-gateway` - API Gateway REST API.
--   Lambda Layer attached from Database Stack (contains DuckDB data file only).
+-   Lambda Layer attached from Database Stack (contains LanceDB dataset only).
 
 **Key Features:**
 
--   Hybrid search using DuckDB VSS (semantic) + FTS (keyword) from a single file.
--   Direct DuckDB queries (no external databases).
+-   Hybrid search using LanceDB vector index (semantic) + keyword index from a local dataset.
+-   Direct LanceDB access (no external databases required for vectors).
 -   Real-time query embeddings via AWS Bedrock Runtime (Amazon Titan Embeddings).
 -   CORS enabled for frontend integration.
 -   Rate limiting and usage plans (100 req/sec, 10K/day).
 -   Health check endpoint.
 -   Implemented in Rust using AWS Lambda custom runtime (`PROVIDED_AL2023`).
--   DuckDB file accessed read-only at `/opt/fdnix/fdnix.duckdb`.
--   All DuckDB dependencies statically linked (no separate DuckDB library layer).
+-   LanceDB dataset accessed read-only at `/opt/fdnix/lancedb`.
+-   All LanceDB dependencies are packaged with the function (no separate LanceDB library layer).
 
 **API Endpoints:**
 
@@ -439,7 +439,7 @@ For issues or questions:
 -   Review CloudWatch logs.
 -   Verify IAM permissions.
 -   Ensure all prerequisites are met.
-Pipeline database keys (used by the indexer task):
+Pipeline dataset keys (used by the indexer task):
 
--   `DUCKDB_DATA_KEY` - S3 key for the full DuckDB (e.g., `snapshots/fdnix-data.duckdb`).
--   `DUCKDB_MINIFIED_KEY` - S3 key for the minified DuckDB used by the Lambda layer (e.g., `snapshots/fdnix.duckdb`).
+-   `LANCEDB_DATA_PATH` - S3 key/prefix for the full LanceDB dataset (e.g., `datasets/fdnix-lancedb/`).
+-   `LANCEDB_MINIFIED_PATH` - S3 key/prefix for the minified LanceDB dataset used by the Lambda layer (e.g., `datasets/fdnix-lancedb-min/`).

@@ -14,7 +14,7 @@ logger = logging.getLogger("fdnix.layer-publisher")
 class LayerPublisher:
     """Publishes a new Lambda Layer version from an S3 object.
 
-    Expects the DuckDB artifact to be available in S3 and publishes it as a new
+    Expects the LanceDB artifact to be available in S3 and publishes it as a new
     layer version using the unversioned Layer ARN (name) passed in.
     """
 
@@ -27,8 +27,8 @@ class LayerPublisher:
         """Publish a new layer version and return the LayerVersionArn.
 
         Args:
-            bucket: S3 bucket containing the DuckDB object
-            key: S3 key for the DuckDB object
+            bucket: S3 bucket containing the LanceDB object
+            key: S3 key for the LanceDB object
             layer_arn: Unversioned layer ARN or name (e.g., arn:aws:lambda:...:layer:fdnix-database-layer)
         """
         if not boto3:
@@ -43,7 +43,7 @@ class LayerPublisher:
         try:
             resp = lambda_client.publish_layer_version(
                 LayerName=layer_arn,
-                Description="Minified DuckDB database with search indexes for fdnix search API",
+                Description="Minified LanceDB database with search indexes for fdnix search API",
                 Content={"S3Bucket": bucket, "S3Key": key},
                 CompatibleRuntimes=["provided.al2023"],
                 CompatibleArchitectures=["x86_64"],

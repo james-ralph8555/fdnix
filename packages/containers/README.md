@@ -1,25 +1,25 @@
 # fdnix Data Processing Containers
 
-Status: Three-phase pipeline with S3 artifacts (metadata → embeddings → minified).
+Status: Three-phase pipeline with S3 artifacts (metadata → embeddings → minified), now backed by LanceDB datasets.
 
 ## What’s Included
 
 - Nixpkgs Indexer (`packages/containers/nixpkgs-indexer/`)
   - Phases: Metadata, Embeddings, Minified (run individually or all)
-  - Outputs: Full DB `fdnix-data.duckdb` (metadata + embeddings) → Minified DB `fdnix.duckdb` (FTS, essential columns)
+  - Outputs: Main dataset `fdnix-data.lancedb` (metadata + embeddings) → Minified dataset `fdnix.lancedb` (Tantivy FTS, essential columns)
   - Modes: `metadata`, `embedding`, `minified`, or `both`/`full` (all phases; default)
-  - S3 integration for upload/download per phase for observability
-  - Runs as non-root; dependencies installed via Nix on `nixos/nix` (Python, DuckDB, boto3, httpx, etc.)
+  - S3 integration for upload/download of LanceDB directory trees under key prefixes
+  - Runs as non-root; dependencies installed via Nix on `nixos/nix` (Python, LanceDB, pydantic, pandas, pyarrow, boto3, httpx, etc.)
 
 Deprecated: the separate `metadata-generator` and `embedding-generator` containers have been replaced by the unified processor.
 
 ## How It Runs in AWS
 
 - Orchestration: Step Functions `fdnix-daily-pipeline` runs nightly (02:00 UTC) via EventBridge.
-- Sequence: ECS Fargate runs a single indexer task (`PROCESSING_MODE=both/full`) which performs metadata → embedding → minified, then (optionally) publishes the minified DB as a Lambda layer.
+- Sequence: ECS Fargate runs a single indexer task (`PROCESSING_MODE=both/full`) which performs metadata → embedding → minified, then (optionally) publishes the minified dataset as a Lambda layer.
 - Resources (from CDK):
-  - Artifacts bucket: `fdnix-artifacts` (stores `.duckdb`).
-  - Lambda Layer: `fdnix-db-layer` (packages `.duckdb` under `/opt/fdnix/fdnix.duckdb`).
+  - Artifacts bucket: `fdnix-artifacts` (stores LanceDB datasets under key prefixes).
+  - Lambda Layer: `fdnix-db-layer` (packages the minified dataset artifact; path depends on packaging).
   - Logs: single log group for the indexer task (e.g., `/fdnix/nixpkgs-indexer`).
   - ECR: single repository (e.g., `fdnix-nixpkgs-indexer`).
 
@@ -27,11 +27,11 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
 
 - Common:
   - `AWS_REGION`: AWS region used by clients.
-  - `ARTIFACTS_BUCKET`: S3 bucket for `.duckdb` artifacts (e.g., `fdnix-artifacts`).
-  - `DUCKDB_DATA_KEY`: S3 key for the full database (e.g., `snapshots/fdnix-data.duckdb`).
-  - `DUCKDB_MINIFIED_KEY`: S3 key for the minified database used by the Lambda layer (e.g., `snapshots/fdnix.duckdb`).
+  - `ARTIFACTS_BUCKET`: S3 bucket for LanceDB artifacts (e.g., `fdnix-artifacts`).
+  - `LANCEDB_DATA_KEY`: S3 key prefix for the main dataset (e.g., `snapshots/fdnix-data.lancedb`).
+  - `LANCEDB_MINIFIED_KEY`: S3 key prefix for the minified dataset used by the Lambda layer (e.g., `snapshots/fdnix.lancedb`).
   - `PROCESSING_MODE`: `metadata` | `embedding` | `minified` | `both` | `full` (default: `both` → all phases).
-  - FTS (optional tuning): `FTS_STOPWORDS` (default `english`), `FTS_STEMMER` (default `english`), `FTS_INDEX_NAME` (default `packages_fts_idx`).
+  - FTS (optional tuning): `FTS_STOPWORDS` (default `english`), `FTS_STEMMER` (default `english`).
 - Embeddings (AWS Bedrock batch):
   - `BEDROCK_ROLE_ARN`: IAM role ARN Bedrock uses for batch inference S3 access (required for embedding mode).
   - `BEDROCK_MODEL_ID`: Model ID (default: `amazon.titan-embed-text-v2:0`).
@@ -40,12 +40,11 @@ Deprecated: the separate `metadata-generator` and `embedding-generator` containe
   - `BEDROCK_BATCH_SIZE`: Max records per batch job (default: `50000`).
   - `BEDROCK_POLL_INTERVAL`: Seconds between job status polls (default: `60`).
   - `BEDROCK_MAX_WAIT_TIME`: Max seconds to wait for job completion (default: `7200`).
-  - VSS (optional tuning): `VSS_HNSW_M` (default `16`), `VSS_EF_CONSTRUCTION` (default `200`), `VSS_EF_SEARCH` (default `40`).
-  - VSS persistence: Enabled by executing `SET hnsw_enable_experimental_persistence = true` in DuckDB.
+  - Vector index tuning: `VECTOR_INDEX_PARTITIONS` (default `256`), `VECTOR_INDEX_SUB_VECTORS` (default `8`).
 - Local paths (optional):
-  - `OUTPUT_PATH`: Local path for the full database (default: `/out/fdnix-data.duckdb`).
-  - `OUTPUT_MINIFIED_PATH`: Local path for the minified database (default: `/out/fdnix.duckdb`).
-  - `DUCKDB_PATH`: Input DuckDB for embedding mode (defaults to the full DB).
+- `OUTPUT_PATH`: Local path for the main dataset (default: `/out/fdnix-data.lancedb`).
+- `OUTPUT_MINIFIED_PATH`: Local path for the minified dataset (default: `/out/fdnix.lancedb`).
+- `LANCEDB_PATH`: Input LanceDB path for embedding mode (defaults to the main dataset).
 
 ## AWS Guidelines
 
@@ -64,13 +63,13 @@ From repo root:
 ## Run (Local)
 
 - All phases with S3 artifacts (Bedrock batch):
-  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole fdnix/nixpkgs-indexer`
+  - `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=both -e ARTIFACTS_BUCKET=fdnix-artifacts -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb -e LANCEDB_MINIFIED_KEY=snapshots/fdnix.lancedb -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole fdnix/nixpkgs-indexer`
 - Single phases:
-  - Metadata: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb fdnix/nixpkgs-indexer`
-  - Embedding (Bedrock batch): `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=embedding -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole fdnix/nixpkgs-indexer`
-  - Minified: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=minified -e ARTIFACTS_BUCKET=fdnix-artifacts -e DUCKDB_DATA_KEY=snapshots/fdnix-data.duckdb -e DUCKDB_MINIFIED_KEY=snapshots/fdnix.duckdb fdnix/nixpkgs-indexer`
+  - Metadata: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata -e ARTIFACTS_BUCKET=fdnix-artifacts -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb fdnix/nixpkgs-indexer`
+  - Embedding (Bedrock batch): `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=embedding -e ARTIFACTS_BUCKET=fdnix-artifacts -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole fdnix/nixpkgs-indexer`
+  - Minified: `docker run --rm --env-file .env -e AWS_REGION=us-east-1 -e PROCESSING_MODE=minified -e ARTIFACTS_BUCKET=fdnix-artifacts -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb -e LANCEDB_MINIFIED_KEY=snapshots/fdnix.lancedb fdnix/nixpkgs-indexer`
 
-For AWS runs, provide `ARTIFACTS_BUCKET` and keys for one or both artifacts (`DUCKDB_DATA_KEY` and/or `DUCKDB_MINIFIED_KEY`). Embedding mode requires Bedrock batch configuration (`BEDROCK_ROLE_ARN`, buckets, and model settings). No external API keys are required for Bedrock.
+For AWS runs, provide `ARTIFACTS_BUCKET` and prefixes for one or both artifacts (`LANCEDB_DATA_KEY` and/or `LANCEDB_MINIFIED_KEY`). Embedding mode requires Bedrock batch configuration (`BEDROCK_ROLE_ARN`, buckets, and model settings). No external API keys are required for Bedrock.
 
 ## Deployment Notes
 
@@ -83,12 +82,10 @@ For AWS runs, provide `ARTIFACTS_BUCKET` and keys for one or both artifacts (`DU
 
 ## Outputs and Schema
 
-- Full database: `fdnix-data.duckdb` (complete metadata + embeddings once generated)
-- Minified database: `fdnix.duckdb` (only essential columns + FTS; simplified license/maintainers; used by Lambda layer)
-- Core tables present in both, when applicable:
-  - `packages(...)` (normalized metadata; minified drops non-essential columns like positions, outputsToInstall, lastUpdated, content_hash)
-  - `packages_fts_source(...)` with FTS index (built on minified data)
-  - `embeddings(package_id, vector)` with VSS index
+- Main dataset: `fdnix-data.lancedb` (complete metadata + embeddings once generated)
+- Minified dataset: `fdnix.lancedb` (only essential columns + Tantivy FTS; simplified license/maintainers; used by Lambda layer)
+- Core table present in both:
+  - `packages(...)` with typed columns and a `vector` field; FTS over key text fields; IVF‑PQ vector index when embeddings are present.
 
 See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troubleshooting.
 
@@ -97,22 +94,22 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
 - Metadata phase:
   - Extracts package metadata from the nixpkgs channel via `nix-env -qaP --json` (no git clone).
   - Cleans and normalizes fields (ids, names, attrs, descriptions, maintainers, etc.).
-  - Writes `packages` and `packages_fts_source` tables to DuckDB.
-  - Optionally uploads the full DuckDB artifact to S3.
+  - Writes `packages` table to LanceDB.
+  - Optionally uploads the main dataset directory to S3 under the configured key prefix.
 - Embedding phase:
-  - Opens existing DuckDB (downloads from S3 when `ARTIFACTS_BUCKET` plus the relevant key is provided if not present locally).
+  - Opens existing LanceDB (downloads from S3 when `ARTIFACTS_BUCKET` plus the relevant key is provided if not present locally).
   - Generates text embeddings via AWS Bedrock batch inference (Amazon Titan Embeddings). Batch I/O is managed via S3; the task polls for completion.
-  - Inserts new vectors into `embeddings` and maintains referential integrity with `packages`.
-  - Builds/refreshes vector similarity index using DuckDB `vss` extension.
-  - Optionally uploads the updated full DuckDB to S3.
+  - Stores/updates vectors on the `packages.vector` field.
+  - Builds/refreshes IVF‑PQ vector index via LanceDB.
+  - Optionally uploads the updated main dataset to S3.
 - Minified phase:
-  - Creates `fdnix.duckdb` by copying essential data and embeddings from the full DB.
-  - Builds the FTS index in the minified DB using DuckDB `fts` extension.
-  - Uploads the minified DuckDB to S3 for use by the Lambda layer.
+  - Creates `fdnix.lancedb` by copying essential data and embeddings from the main dataset.
+  - Builds the FTS index in the minified dataset using Tantivy.
+  - Uploads the minified dataset to S3 for use by the Lambda layer.
 
 ## Legacy Support Removal
 
-- Backward compatibility for `DUCKDB_KEY` has been removed across the indexer and docs. Use `DUCKDB_DATA_KEY` (full DB) and `DUCKDB_MINIFIED_KEY` (minified DB, used for layer publishing). `DUCKDB_MINIFIED_KEY` is explicitly required for publishing the layer.
+- Backward compatibility for `DUCKDB_KEY` has been removed across the indexer and docs. Use `LANCEDB_DATA_KEY` (main dataset) and `LANCEDB_MINIFIED_KEY` (minified dataset, used for layer publishing). `LANCEDB_MINIFIED_KEY` is explicitly required for publishing the layer.
 
 ## Benefits of Minified Layer
 

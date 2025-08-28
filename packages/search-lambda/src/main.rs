@@ -1,4 +1,4 @@
-mod duckdb_client;
+mod lancedb_client;
 mod bedrock_client;
 
 use lambda_runtime::{service_fn, Error, LambdaEvent};
@@ -9,11 +9,11 @@ use std::env;
 use std::sync::OnceLock;
 use tracing::{info, warn, error, debug};
 
-use crate::duckdb_client::{DuckDBClient, SearchParams};
+use crate::lancedb_client::{LanceDBClient, SearchParams};
 use crate::bedrock_client::BedrockClient;
 
 // Global clients (initialized once)
-static DUCKDB_CLIENT: OnceLock<Option<DuckDBClient>> = OnceLock::new();
+static LANCEDB_CLIENT: OnceLock<Option<LanceDBClient>> = OnceLock::new();
 static BEDROCK_CLIENT: OnceLock<Option<BedrockClient>> = OnceLock::new();
 
 #[derive(Deserialize)]
@@ -45,14 +45,13 @@ struct SearchResponseBody {
     version: Option<String>,
     runtime: Option<String>,
     query_received: Option<String>,
-    duckdb_path: Option<String>,
-    duckdb_lib_path: Option<String>,
+    lancedb_path: Option<String>,
     bedrock_model_id: Option<String>,
     aws_region: Option<String>,
     enable_embeddings: Option<String>,
-    duckdb_initialized: Option<bool>,
+    lancedb_initialized: Option<bool>,
     bedrock_initialized: Option<bool>,
-    duckdb_healthy: Option<bool>,
+    lancedb_healthy: Option<bool>,
     bedrock_healthy: Option<bool>,
 }
 
@@ -162,10 +161,10 @@ async fn handle_search_request(
     category_filter: Option<String>
 ) -> Result<SearchResponseBody, Box<dyn std::error::Error + Send + Sync>> {
     // Get clients from static storage
-    let duckdb_client = DUCKDB_CLIENT.get()
-        .ok_or("DuckDB client not initialized")?
+    let lancedb_client = LANCEDB_CLIENT.get()
+        .ok_or("LanceDB client not initialized")?
         .as_ref()
-        .ok_or("DuckDB client failed to initialize")?;
+        .ok_or("LanceDB client failed to initialize")?;
 
     // Prepare search parameters
     let search_params = SearchParams {
@@ -203,7 +202,7 @@ async fn handle_search_request(
     // Perform search
     debug!("Executing hybrid search with query: '{}', limit: {}, offset: {}", query, limit, offset);
     let search_start = std::time::Instant::now();
-    let results = duckdb_client.hybrid_search(&search_params, query_embedding.as_deref())?;
+    let results = lancedb_client.hybrid_search(&search_params, query_embedding.as_deref()).await?;
     let search_elapsed = search_start.elapsed();
     
     info!(
@@ -239,14 +238,13 @@ async fn handle_search_request(
         version: None,
         runtime: None,
         query_received: None,
-        duckdb_path: None,
-        duckdb_lib_path: None,
+        lancedb_path: None,
         bedrock_model_id: None,
         aws_region: None,
         enable_embeddings: None,
-        duckdb_initialized: None,
+        lancedb_initialized: None,
         bedrock_initialized: None,
-        duckdb_healthy: None,
+        lancedb_healthy: None,
         bedrock_healthy: None,
     })
 }
@@ -254,7 +252,7 @@ async fn handle_search_request(
 async fn create_health_check_response(query_param: String) -> SearchResponseBody {
     let mut response = SearchResponseBody {
         message: "fdnix search API (Rust) — stub active".to_string(),
-        note: Some("This is a Rust Lambda stub. DuckDB integration ready.".to_string()),
+        note: Some("This is a Rust Lambda stub. LanceDB integration ready.".to_string()),
         version: Some("0.1.0".to_string()),
         runtime: Some("provided.al2023".to_string()),
         query: None,
@@ -263,20 +261,19 @@ async fn create_health_check_response(query_param: String) -> SearchResponseBody
         search_type: None,
         packages: None,
         query_received: if !query_param.is_empty() { Some(query_param) } else { None },
-        duckdb_path: env::var("DUCKDB_PATH").ok(),
-        duckdb_lib_path: env::var("DUCKDB_LIB_PATH").ok(),
+        lancedb_path: env::var("LANCEDB_PATH").ok(),
         bedrock_model_id: env::var("BEDROCK_MODEL_ID").ok(),
         aws_region: env::var("AWS_REGION").ok(),
         enable_embeddings: env::var("ENABLE_EMBEDDINGS").ok(),
-        duckdb_initialized: Some(DUCKDB_CLIENT.get().and_then(|c| c.as_ref()).is_some()),
+        lancedb_initialized: Some(LANCEDB_CLIENT.get().and_then(|c| c.as_ref()).is_some()),
         bedrock_initialized: Some(BEDROCK_CLIENT.get().and_then(|c| c.as_ref()).is_some()),
-        duckdb_healthy: None,
+        lancedb_healthy: None,
         bedrock_healthy: None,
     };
 
     // Check client health
-    if let Some(duckdb_client) = DUCKDB_CLIENT.get().and_then(|c| c.as_ref()) {
-        response.duckdb_healthy = Some(duckdb_client.health_check());
+    if let Some(lancedb_client) = LANCEDB_CLIENT.get().and_then(|c| c.as_ref()) {
+        response.lancedb_healthy = Some(lancedb_client.health_check().await);
     }
 
     if let Some(bedrock_client) = BEDROCK_CLIENT.get().and_then(|c| c.as_ref()) {
@@ -297,33 +294,33 @@ async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send + S
     debug!("Lambda initialization starting with environment configuration");
 
     // Log environment configuration
-    debug!("Environment variables: DUCKDB_PATH={:?}, AWS_REGION={:?}, ENABLE_EMBEDDINGS={:?}", 
-           env::var("DUCKDB_PATH").ok(), 
+    debug!("Environment variables: LANCEDB_PATH={:?}, AWS_REGION={:?}, ENABLE_EMBEDDINGS={:?}", 
+           env::var("LANCEDB_PATH").ok(), 
            env::var("AWS_REGION").ok(), 
            env::var("ENABLE_EMBEDDINGS").ok());
 
-    // Initialize DuckDB client
-    let duckdb_client = if let Ok(duckdb_path) = env::var("DUCKDB_PATH") {
-        info!("Initializing DuckDB client with path: {}", duckdb_path);
+    // Initialize LanceDB client
+    let lancedb_client = if let Ok(lancedb_path) = env::var("LANCEDB_PATH") {
+        info!("Initializing LanceDB client with path: {}", lancedb_path);
         let start_time = std::time::Instant::now();
-        match DuckDBClient::new(&duckdb_path) {
+        match LanceDBClient::new(&lancedb_path) {
             Ok(mut client) => {
-                if client.initialize()? {
+                if client.initialize().await? {
                     let elapsed = start_time.elapsed();
-                    info!("DuckDB client initialized successfully in {}ms", elapsed.as_millis());
+                    info!("LanceDB client initialized successfully in {}ms", elapsed.as_millis());
                     Some(client)
                 } else {
-                    error!("Failed to initialize DuckDB client after {}ms", start_time.elapsed().as_millis());
+                    error!("Failed to initialize LanceDB client after {}ms", start_time.elapsed().as_millis());
                     None
                 }
             }
             Err(e) => {
-                error!("Failed to create DuckDB client after {}ms: {}", start_time.elapsed().as_millis(), e);
+                error!("Failed to create LanceDB client after {}ms: {}", start_time.elapsed().as_millis(), e);
                 None
             }
         }
     } else {
-        error!("DUCKDB_PATH environment variable not set");
+        error!("LANCEDB_PATH environment variable not set");
         None
     };
 
@@ -357,11 +354,11 @@ async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send + S
     };
 
     // Store clients in static storage
-    DUCKDB_CLIENT.set(duckdb_client).map_err(|_| "Failed to set DuckDB client")?;
+    LANCEDB_CLIENT.set(lancedb_client).map_err(|_| "Failed to set LanceDB client")?;
     BEDROCK_CLIENT.set(bedrock_client).map_err(|_| "Failed to set Bedrock client")?;
 
-    info!("Lambda initialization complete - DuckDB: {}, Bedrock: {}", 
-          DUCKDB_CLIENT.get().and_then(|c| c.as_ref()).is_some(),
+    info!("Lambda initialization complete - LanceDB: {}, Bedrock: {}", 
+          LANCEDB_CLIENT.get().and_then(|c| c.as_ref()).is_some(),
           BEDROCK_CLIENT.get().and_then(|c| c.as_ref()).is_some());
     Ok(())
 }
