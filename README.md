@@ -138,10 +138,6 @@ If you want to track progress or help prioritize features, check `INIT.md` and o
 
 See `packages/cdk/README.md` for step‑by‑step DNS and validation instructions.
 
-## Roadmap
-
-- Migrate builds from Docker to Nix for reproducible, lightweight development and CI.
-
 ## Legal & Attribution
 
 - Independent project: fdnix is an independent, community-built website. It is not affiliated with, sponsored by, or endorsed by the NixOS Foundation, the Nix Team, or the Nixpkgs project.
