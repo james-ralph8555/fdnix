@@ -70,9 +70,10 @@ export class FdnixSearchApiStack extends Stack {
     this.api = new apigateway.RestApi(this, 'SearchApiGateway', {
       description: 'API Gateway for fdnix hybrid search engine',
       defaultCorsPreflightOptions: {
-        allowOrigins: apigateway.Cors.ALL_ORIGINS,
-        allowMethods: apigateway.Cors.ALL_METHODS,
-        allowHeaders: ['Content-Type', 'X-Amz-Date', 'Authorization', 'X-Api-Key'],
+        allowOrigins: ['http://localhost:3000', 'http://localhost:5173', 'https://fdnix.com', 'https://www.fdnix.com'],
+        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowHeaders: ['Content-Type', 'Accept', 'X-Amz-Date', 'Authorization', 'X-Api-Key', 'X-Amz-Security-Token'],
+        allowCredentials: false,
       },
       deployOptions: {
         stageName: 'v1',
@@ -101,12 +102,27 @@ export class FdnixSearchApiStack extends Stack {
       methodResponses: [
         {
           statusCode: '200',
+          responseParameters: {
+            'method.response.header.Access-Control-Allow-Origin': true,
+            'method.response.header.Access-Control-Allow-Headers': true,
+            'method.response.header.Access-Control-Allow-Methods': true,
+          },
         },
         {
           statusCode: '400',
+          responseParameters: {
+            'method.response.header.Access-Control-Allow-Origin': true,
+            'method.response.header.Access-Control-Allow-Headers': true,
+            'method.response.header.Access-Control-Allow-Methods': true,
+          },
         },
         {
           statusCode: '500',
+          responseParameters: {
+            'method.response.header.Access-Control-Allow-Origin': true,
+            'method.response.header.Access-Control-Allow-Headers': true,
+            'method.response.header.Access-Control-Allow-Methods': true,
+          },
         },
       ],
     });
@@ -124,6 +140,11 @@ export class FdnixSearchApiStack extends Stack {
               version: '1.0.0',
             }),
           },
+          responseParameters: {
+            'method.response.header.Access-Control-Allow-Origin': "'http://localhost:3000'",
+            'method.response.header.Access-Control-Allow-Headers': "'Content-Type,Accept,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
+            'method.response.header.Access-Control-Allow-Methods': "'GET,OPTIONS'",
+          },
         },
       ],
       requestTemplates: {
@@ -135,6 +156,11 @@ export class FdnixSearchApiStack extends Stack {
       methodResponses: [
         {
           statusCode: '200',
+          responseParameters: {
+            'method.response.header.Access-Control-Allow-Origin': true,
+            'method.response.header.Access-Control-Allow-Headers': true,
+            'method.response.header.Access-Control-Allow-Methods': true,
+          },
         },
       ],
     });

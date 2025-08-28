@@ -141,3 +141,21 @@ See `packages/cdk/README.md` for step‑by‑step DNS and validation instruction
 ## Roadmap
 
 - Migrate builds from Docker to Nix for reproducible, lightweight development and CI.
+
+## Legal & Attribution
+
+- Independent project: fdnix is an independent, community-built website. It is not affiliated with, sponsored by, or endorsed by the NixOS Foundation, the Nix Team, or the Nixpkgs project.
+- Data source: Package names, versions, descriptions, and license metadata are derived from the Nixpkgs repository.
+- Nixpkgs license: The content of Nixpkgs is licensed under the MIT License. We include the full license text on the site’s About page for easy access.
+- Trademarks: “Nix”, “Nixpkgs”, and “NixOS” are trademarks managed by the NixOS Foundation. We use these names only for factual, descriptive purposes and avoid any suggestion of official status.
+
+Quick links:
+- About/License page: `/about.html`
+- NixOS project: https://nixos.org
+- Nixpkgs repository: https://github.com/NixOS/nixpkgs
+
+Disclaimer of warranty and liability:
+- The license information for individual software packages displayed by fdnix is provided for informational purposes only. This information is extracted from metadata in the Nixpkgs repository and is presented without any guarantee of accuracy or completeness. Users are solely responsible for ensuring their own compliance with the licenses of any software they choose to use, install, or redistribute.
+
+Project license:
+- The fdnix code in this repository is licensed under the MIT License (see `LICENSE`).
