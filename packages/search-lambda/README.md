@@ -1,96 +1,135 @@
-# fdnix-search-api (C++)
+# fdnix Search Lambda (Rust)
 
-Planned C++ implementation of the fdnix hybrid search Lambda.
+Rust AWS Lambda for fdnix hybrid search over nixpkgs. Serves a simple HTTP API (API Gateway → Lambda) that performs:
 
-- Runtime: AWS Lambda custom runtime (`provided.al2023`).
-- Packaging: Compile to a binary named `bootstrap` and zip for upload.
-- Query Engine: DuckDB statically compiled into the function binary.
-- Embeddings: AWS Bedrock Runtime (Amazon Titan Embeddings) for real-time query embeddings.
-- Libraries: DuckDB (statically linked), AWS SDK for C++ (core, bedrock-runtime), AWS Lambda C++ runtime.
+- Hybrid ranking: DuckDB FTS (BM25) + semantic vectors (VSS)
+- Optional real-time query embeddings via AWS Bedrock Runtime
+- Reciprocal Rank Fusion to combine FTS and vector results
 
-Status: C++ implementation in progress. The repo provides a Dockerfile and build script to produce the `bootstrap` binary expected by the CDK.
+This package was migrated from C++ to Rust. See MIGRATION.md for the full rationale and details.
 
-## Runtime Data Model
+## What Changed (C++ → Rust)
 
-- Lambda Layer: `fdnix-db-layer` provides `/opt/fdnix/fdnix.duckdb` (minified database).
-- DuckDB Dependencies: All DuckDB libraries are statically compiled into the function binary (no separate library layer needed).
-- Minified database contents (essential for search):
-  - `packages(...)` with essential columns only (name, version, attr path, description, homepage, simplified license/maintainers, flags)
-  - `packages_fts_source(...)` and FTS index (BM25)
-  - `embeddings(package_id, vector)` with VSS index (e.g., HNSW/IVF)
-- Full database (`fdnix-data.duckdb`) is produced by the pipeline and stored in S3 for analytics/debugging; it is not deployed to Lambda.
+- Simplified builds: single `cargo build` replaces CMake + vcpkg
+- Portable binaries: musl-static `bootstrap` runs in scratch/al2023
+- Better DX: `cargo test`, `cargo fmt`, `cargo clippy`
+- Same behavior: API, query flow, env config, and health checks preserved
 
-## Request Handling
+## Package Structure
 
-- `GET /v1/search?q=<query>`
-  - Embed `q` using AWS Bedrock Runtime (e.g., `amazon.titan-embed-text-v2:0`) with 256 dimensions.
-  - Run two queries against `/opt/fdnix/fdnix.duckdb`:
-    - VSS: nearest neighbors over `embeddings.vector` by the query embedding
-    - FTS: BM25 over the FTS index from `packages_fts_source`
-  - Fuse results (e.g., RRF or normalized weighted sum), then join to `packages` for metadata.
-  - Return JSON array of results with scores.
+- `src/main.rs`: Lambda runtime, routing, health check
+- `src/duckdb_client.rs`: DuckDB integration, FTS + VSS + RRF
+- `src/bedrock_client.rs`: Bedrock Runtime client for embeddings
+- `Cargo.toml`: Rust project config (AWS SDK, DuckDB, Tokio)
+- `build.rs`: Static linking and DuckDB extension flags
+- `flake.nix`: Reproducible build with a custom DuckDB (fts/vss)
+- `Dockerfile`: Multi-stage build to a static `bootstrap`
+- `package.json`: npm scripts that wrap cargo for monorepo workflows
+- `test-event.json`: Sample API Gateway event for testing
 
-## Configuration
+## Runtime Model
 
-Environment variables used for embeddings (real-time via Bedrock):
+- Runtime: `provided.al2023` (custom runtime), binary named `bootstrap`
+- Database: Minified DuckDB provided via a Lambda Layer at `/opt/fdnix/fdnix.duckdb`
+- Extensions: FTS/VSS built in; DB contains `packages`, `packages_fts_source`, and `embeddings`
+- Search Flow:
+  - FTS: BM25 over `packages_fts_source`
+  - Vector: nearest neighbors over `embeddings` (VSS index)
+  - Fusion: Reciprocal Rank Fusion (RRF) merges both lists
 
-- `AWS_REGION`: AWS region for Bedrock Runtime (defaults to Lambda region).
-- `BEDROCK_MODEL_ID`: Embedding model id (default `amazon.titan-embed-text-v2:0`).
-- `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default `256`).
+## API
 
-## Build
+- `GET /v1/search`
+  - Query params: `q` (string, required for search), `limit` (int), `offset` (int), `license` (string), `category` (string)
+  - When `ENABLE_EMBEDDINGS` is enabled, the query is embedded via Bedrock and hybrid search runs; otherwise FTS-only
+  - Response: JSON with `packages[]`, `totalCount`, `queryTimeMs`, and `searchType` (`hybrid` or `fts`)
 
-Two options are provided.
+- `GET /v1/search` with no `q`
+  - Returns a health/status payload including client initialization and basic env hints
 
-1) Local build (requires toolchain and dependencies):
+## Configuration (env)
+
+- `DUCKDB_PATH`: Path to DuckDB file (e.g., `/opt/fdnix/fdnix.duckdb`) [required]
+- `ENABLE_EMBEDDINGS`: `1`/`true`/`yes` to enable Bedrock embeddings (default: disabled)
+- `AWS_REGION`: Region for Bedrock (defaults to Lambda region or `us-east-1`)
+- `BEDROCK_MODEL_ID`: Embedding model id (default: `amazon.titan-embed-text-v2:0`)
+- `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`)
+
+## Build Options
+
+Using Cargo (musl target):
 
 ```bash
-# Installs not managed here; you need CMake, Ninja, AWS SDK for C++, and aws-lambda-runtime installed locally
-(cd packages/search-lambda && npm run build)
-# Output: packages/search-lambda/dist/bootstrap
+rustup target add x86_64-unknown-linux-musl
+
+# Release build (recommended for Lambda)
+cargo build --release --target x86_64-unknown-linux-musl
+
+# Monorepo script (copies to dist/bootstrap)
+npm run build
 ```
 
-2) Docker build (recommended for reproducible output):
+Using Nix (reproducible, custom DuckDB with fts/vss):
 
 ```bash
-# Use the provided build script (recommended)
-cd packages/search-lambda
-./build.sh
+# Build the binary
+nix build .#default
 
-# Or build manually with Docker
+# Build a deployable zip with CA certs
+nix build .#lambda-package
+ls -l result # contains lambda-deployment.zip and raw files
+
+# Dev shell with the right toolchain
+nix develop
+```
+
+Using Docker (static binary into scratch):
+
+```bash
 docker build -t fdnix-search-lambda .
 
-# Extract the bootstrap from the final image into dist/
-cid=$(docker create fdnix-search-lambda) && \
-  mkdir -p dist && \
-  docker cp "$cid":/var/task/bootstrap dist/bootstrap && \
-  docker rm "$cid"
-
-# Verify binary exists and is self-contained
-ls -l dist/bootstrap
-ldd dist/bootstrap || echo "Static binary - no dynamic dependencies"
+# Optionally extract the bootstrap
+cid=$(docker create fdnix-search-lambda)
+mkdir -p dist
+docker cp "$cid":/var/task/bootstrap dist/bootstrap
+docker rm "$cid"
 ```
 
-## Build Tips
+## Deploy
 
-- Match Lambda environment: Amazon Linux 2023 is used in the Dockerfile to match `provided.al2023`.
-- Optimize size and cold start: Release builds with LTO and stripped symbols are configured in CMake.
-- Verify output: Ensure `dist/bootstrap` exists and is executable before running CDK deploy.
+- Ensure `dist/bootstrap` (or the Nix-built zip) is produced
+- Deploy via CDK from `packages/cdk` (stacks expect `bootstrap` packaging)
+- Resource naming should use `fdnix-` prefixes per repo guidelines
 
-## DuckDB Extensions in Lambda
+## Testing
 
-- The pipeline prebuilds FTS/VSS indexes in the DuckDB file.
-- All DuckDB extensions and dependencies are statically compiled into the function binary for optimal performance and cold start times.
+- Unit tests: `npm run test` (runs `cargo test`)
+- Sample event: see `test-event.json` (invoke in AWS Console/SAM)
+- Logging: structured logs via `tracing`; health endpoint returns init state
 
-## Deploy Flow
+## Nix Details (DuckDB and Bindgen)
 
-- Build `bootstrap` (one of the methods above)
-- Deploy (from CDK folder): `(cd packages/cdk && npm run deploy)`
+- `flake.nix` builds a custom DuckDB with `fts` and `vss` statically linked
+- Environment config sets `LIBCLANG_PATH` and bindgen include paths
+- CA bundle is added to the Lambda package for HTTPS (Bedrock)
 
-## TODO
+## Migration Notes
 
-- [ ] **Secure API access**: Implement proper API security to restrict access to only authorized domains:
-  - Add CORS configuration to only allow requests from fdnix.com domain
-  - Consider implementing API key authentication for additional security
-  - Add rate limiting to prevent abuse
-  - Consider using AWS WAF for additional protection against common web exploits
+See `MIGRATION.md` for the full C++ → Rust summary. Highlights:
+
+- Single-toolchain builds with Cargo (no CMake/vcpkg)
+- musl-static for predictable, air‑gapped deploys
+- Maintains the same API behavior, search logic, and env configuration
+
+## Troubleshooting
+
+- Embeddings disabled: Hybrid falls back to FTS; set `ENABLE_EMBEDDINGS=1`
+- FTS query errors: code falls back to a LIKE-based search
+- Verify DB path: `DUCKDB_PATH` must point to `/opt/fdnix/fdnix.duckdb`
+- Bedrock permissions: Lambda role must allow `bedrock:InvokeModel`
+
+## Notes
+
+- Monorepo scripts: `npm run build` and `npm run test` are wired for CI/CD
+- A debug build is useful locally, but the `build-dev` script currently copies from `release/`; adjust if you need a true debug artifact
+

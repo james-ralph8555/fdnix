@@ -9,7 +9,7 @@ The infrastructure consists of four main stacks, a certificate stack, and a set 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
 2.  **Database Stack** - S3 artifact storage + Lambda Layer for the DuckDB file (minified).
 3.  **Pipeline Stack** - Data processing pipeline that builds the DuckDB file and publishes the Lambda layer.
-4.  **Search API Stack** - A C++ Lambda-based search API with self-contained DuckDB dependencies and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
+4.  **Search API Stack** - A Rust Lambda-based search API with self-contained DuckDB dependencies and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
 5.  **Frontend Stack** - Static site hosting with CloudFront (no CDK-managed custom domain).
 
 ## Architecture Diagram
@@ -34,7 +34,7 @@ graph TD
 
     subgraph FdnixSearchApiStack
         api["API Gateway"]
-        lambda["C++ Lambda"]
+        lambda["Rust Lambda"]
         bedrock["AWS Bedrock Runtime"]
     end
 
@@ -86,19 +86,19 @@ graph TD
 
 ## Search API Diagram
 
-The search API is a C++ Lambda function fronted by an API Gateway. It uses two Lambda layers to access the DuckDB database and the DuckDB shared library.
+The search API is a Rust Lambda function fronted by an API Gateway. It uses a single Lambda layer to access the DuckDB minified database file.
 
 ```mermaid
 graph TD
     subgraph "FdnixSearchApiStack"
         direction LR
-        api[API Gateway] --> lambda[C++ Lambda]
+        api[API Gateway] --> lambda[Rust Lambda]
         lambda --> bedrock[AWS Bedrock Embeddings]
     end
 
     subgraph "FdnixDatabaseStack"
         direction LR
-        db_layer[[DB Layer]]
+    db_layer[[DB Layer]]
     end
 
     lambda -- uses --> db_layer
@@ -107,9 +107,9 @@ graph TD
 ## Prerequisites
 
 -   Node.js 18+ and npm
--   C++ toolchain for building the Lambda `bootstrap` (e.g., g++, clang++)
--   CMake 3.15+
--   Docker
+-   Rust toolchain (`rustup`, `cargo`) with musl target: `rustup target add x86_64-unknown-linux-musl` (if building without Nix)
+-   Nix (recommended) for reproducible builds of the Lambda and DuckDB dependencies
+-   Docker (optional) for containerized builds
 -   AWS CLI configured with appropriate credentials
 -   AWS CDK CLI installed (`npm install -g aws-cdk`)
 
@@ -189,15 +189,9 @@ Before deploying, ensure you have:
 From this folder (`packages/cdk`):
 
 ```bash
-# Build the C++ Lambda bootstrap first (required for API)
-(cd ../search-lambda && ./build.sh)
-
-# Or build manually with Docker
-# docker build -t fdnix-search-lambda ../search-lambda
-# cid=$(docker create fdnix-search-lambda) && \
-#   mkdir -p ../search-lambda/dist && \
-#   docker cp "$cid":/var/task/bootstrap ../search-lambda/dist/bootstrap && \
-#   docker rm "$cid"
+# Build the Rust Lambda bootstrap first (required for API)
+# Recommended: Nix build places bootstrap at ../search-lambda/result/bin/bootstrap
+(cd ../search-lambda && nix build)
 
 # Then deploy all stacks
 npm run deploy
@@ -206,8 +200,8 @@ npm run deploy
 ### Deploy Individual Stacks
 
 ```bash
-# Ensure the C++ Lambda is built before deploying the API stack
-(cd ../search-lambda && npm run build)
+# Ensure the Rust Lambda is built before deploying the API stack
+(cd ../search-lambda && nix build)
 
 npx cdk deploy FdnixCertificateStack
 npx cdk deploy FdnixDatabaseStack
@@ -226,7 +220,7 @@ npm run diff
 
 ```bash
 # Building the Lambda is not strictly required for synth, but recommended
-(cd ../search-lambda && npm run build)
+(cd ../search-lambda && nix build)
 
 npm run synth
 ```
@@ -280,7 +274,7 @@ npm run synth
 
 **Resources:**
 
--   `fdnix-search-api` - C++ Lambda function for hybrid search.
+-   `fdnix-search-api` - Rust Lambda function for hybrid search.
 -   `fdnix-search-api-gateway` - API Gateway REST API.
 -   Lambda Layer attached from Database Stack (contains DuckDB data file only).
 
@@ -288,13 +282,13 @@ npm run synth
 
 -   Hybrid search using DuckDB VSS (semantic) + FTS (keyword) from a single file.
 -   Direct DuckDB queries (no external databases).
- -   Real-time query embeddings via AWS Bedrock Runtime (Amazon Titan Embeddings).
+-   Real-time query embeddings via AWS Bedrock Runtime (Amazon Titan Embeddings).
 -   CORS enabled for frontend integration.
 -   Rate limiting and usage plans (100 req/sec, 10K/day).
 -   Health check endpoint.
--   Implemented in C++ using AWS Lambda custom runtime (`provided.al2023`).
+-   Implemented in Rust using AWS Lambda custom runtime (`PROVIDED_AL2023`).
 -   DuckDB file accessed read-only at `/opt/fdnix/fdnix.duckdb`.
--   All DuckDB dependencies statically compiled into the function binary for optimal performance.
+-   All DuckDB dependencies statically linked (no separate DuckDB library layer).
 
 **API Endpoints:**
 
@@ -384,7 +378,7 @@ npm run destroy
 
 1.  **Bootstrap Required**: Ensure CDK is bootstrapped in your account.
 2.  **Permission Denied**: Verify IAM permissions for CDK deployment.
-3.  **C++ Lambda Build**: Ensure `(cd ../search-lambda && npm run build)` completes successfully.
+3.  **Rust Lambda Build**: Ensure `(cd ../search-lambda && nix build)` completes successfully (produces `result/bin/bootstrap`).
 4.  **Container Images**: ECR repositories need container images pushed before ECS tasks can run.
 5.  **Custom Domain**: Ensure DNS records are properly configured in your DNS provider.
 
@@ -433,8 +427,8 @@ After successful deployment:
 
 1.  **Set up the custom domain**: Attach the domain and cert to CloudFront, then configure Cloudflare DNS as described above.
 2.  **Phase 2**: Build and deploy data processing containers.
-3.  **Phase 3**: Implement search Lambda function.
-4.  **Phase 4**: Build and deploy SolidJS frontend.
+3.  **Search Lambda (Rust)**: Ensure Nix build exists (`../search-lambda/result/bin/bootstrap`), set env flags, and validate API Gateway integration.
+4.  **Frontend**: Build and deploy SolidJS frontend; point it to the API URL.
 5.  **CI/CD**: Set up automated deployments.
 
 ## Support
