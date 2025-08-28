@@ -9,8 +9,6 @@ use thiserror::Error;
 use tokio::time::sleep;
 use tracing::{info, warn, error, debug};
 
-#[cfg(test)]
-use mockall::{automock, predicate::*};
 
 #[derive(Error, Debug)]
 pub enum BedrockClientError {
@@ -274,7 +272,6 @@ mod tests {
     use super::*;
     use rstest::*;
     use std::env;
-    use tokio_test;
 
     #[fixture]
     fn embedding_request() -> EmbeddingRequest {
@@ -292,7 +289,11 @@ mod tests {
     }
 
     #[test]
-    fn test_embedding_request_serialization(embedding_request: EmbeddingRequest) {
+    fn test_embedding_request_serialization() {
+        let embedding_request = EmbeddingRequest {
+            input_text: "test input".to_string(),
+            dimensions: 256,
+        };
         let json_str = serde_json::to_string(&embedding_request).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         
@@ -328,28 +329,31 @@ mod tests {
         assert_eq!(error.to_string(), "Model invocation failed: Invalid model");
     }
 
-    #[rstest]
-    #[case("", "us-east-1")]
-    #[case("us-west-2", "us-west-2")]
-    #[case("eu-central-1", "eu-central-1")]
-    async fn test_bedrock_client_region_handling(
-        #[case] input_region: &str,
-        #[case] expected_region: &str,
-    ) {
+    #[tokio::test]
+    async fn test_bedrock_client_region_handling() {
+        let test_cases = [
+            ("", "us-east-1"),
+            ("us-west-2", "us-west-2"),
+            ("eu-central-1", "eu-central-1"),
+        ];
+        
         // Clear any existing AWS_REGION env var for this test
         let original_region = env::var("AWS_REGION").ok();
-        env::remove_var("AWS_REGION");
         
-        // This will fail due to lack of AWS credentials, but we can still test region parsing
-        let result = BedrockClient::new(
-            input_region,
-            "amazon.titan-embed-text-v2:0",
-            256,
-        ).await;
-        
-        // The function should fail due to credentials, not region parsing
-        // We can't easily test the actual region setting without mocking AWS SDK
-        assert!(result.is_err() || result.is_ok());
+        for (input_region, _expected_region) in test_cases {
+            env::remove_var("AWS_REGION");
+            
+            // This will fail due to lack of AWS credentials, but we can still test region parsing
+            let result = BedrockClient::new(
+                input_region,
+                "amazon.titan-embed-text-v2:0",
+                256,
+            ).await;
+            
+            // The function should fail due to credentials, not region parsing
+            // We can't easily test the actual region setting without mocking AWS SDK
+            assert!(result.is_err() || result.is_ok());
+        }
         
         // Restore original env var if it existed
         if let Some(region) = original_region {
@@ -426,12 +430,12 @@ mod tests {
         
         assert_eq!(response.embedding.len(), 1024);
         assert_eq!(response.embedding[0], 0.0);
-        assert_eq!(response.embedding[1023], 1.023);
+        assert!((response.embedding[1023] - 1.023).abs() < 0.001);
     }
 
     #[test]
     fn test_json_error_conversion() {
-        let json_error = serde_json::Error::custom("test error");
+        let json_error = serde_json::from_str::<serde_json::Value>("{invalid json").unwrap_err();
         let bedrock_error = BedrockClientError::JsonError(json_error);
         
         match bedrock_error {

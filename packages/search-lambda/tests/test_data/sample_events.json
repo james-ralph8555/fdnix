@@ -1,0 +1,112 @@
+{
+  "search_request": {
+    "resource": "/search",
+    "path": "/search",
+    "httpMethod": "GET",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (compatible; test-client)"
+    },
+    "queryStringParameters": {
+      "q": "nodejs web server",
+      "limit": "20",
+      "offset": "0"
+    },
+    "requestContext": {
+      "requestId": "example-request-id-123",
+      "stage": "prod",
+      "resourcePath": "/search",
+      "httpMethod": "GET"
+    },
+    "body": null,
+    "isBase64Encoded": false
+  },
+  
+  "health_check": {
+    "resource": "/search", 
+    "path": "/search",
+    "httpMethod": "GET",
+    "headers": {
+      "Accept": "application/json"
+    },
+    "queryStringParameters": null,
+    "requestContext": {
+      "requestId": "health-check-456",
+      "stage": "prod",
+      "resourcePath": "/search",
+      "httpMethod": "GET"
+    },
+    "body": null,
+    "isBase64Encoded": false
+  },
+
+  "filtered_search": {
+    "resource": "/search",
+    "path": "/search", 
+    "httpMethod": "GET",
+    "headers": {
+      "Accept": "application/json",
+      "Content-Type": "application/json"
+    },
+    "queryStringParameters": {
+      "q": "python machine learning",
+      "limit": "15",
+      "offset": "30",
+      "license": "MIT",
+      "category": "data-science"
+    },
+    "requestContext": {
+      "requestId": "filtered-search-789",
+      "stage": "prod", 
+      "resourcePath": "/search",
+      "httpMethod": "GET"
+    },
+    "body": null,
+    "isBase64Encoded": false
+  },
+
+  "large_limit": {
+    "resource": "/search",
+    "path": "/search",
+    "httpMethod": "GET", 
+    "headers": {
+      "Accept": "application/json"
+    },
+    "queryStringParameters": {
+      "q": "rust",
+      "limit": "1000",
+      "offset": "0"
+    },
+    "requestContext": {
+      "requestId": "large-limit-request",
+      "stage": "test",
+      "resourcePath": "/search",
+      "httpMethod": "GET"
+    },
+    "body": null,
+    "isBase64Encoded": false
+  },
+
+  "edge_case_query": {
+    "resource": "/search",
+    "path": "/search",
+    "httpMethod": "GET",
+    "headers": {
+      "Accept": "application/json"
+    },
+    "queryStringParameters": {
+      "q": "c++/c# programming language with \"quotes\" and special chars!@#$%",
+      "limit": "10",
+      "offset": "0"
+    },
+    "requestContext": {
+      "requestId": "edge-case-query-request",
+      "stage": "test",
+      "resourcePath": "/search", 
+      "httpMethod": "GET"
+    },
+    "body": null,
+    "isBase64Encoded": false
+  }
+}

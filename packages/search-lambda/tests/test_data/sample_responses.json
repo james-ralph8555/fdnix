@@ -1,0 +1,73 @@
+{
+  "successful_search": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"message\":\"Search completed\",\"query\":\"nodejs\",\"total_count\":3,\"query_time_ms\":25.7,\"search_type\":\"hybrid\",\"packages\":[{\"packageId\":\"nodejs-18.17.1\",\"packageName\":\"nodejs\",\"version\":\"18.17.1\",\"description\":\"Event-driven I/O framework for the V8 JavaScript engine\",\"homepage\":\"https://nodejs.org\",\"license\":\"MIT\",\"attributePath\":\"pkgs.nodejs\",\"relevanceScore\":0.95},{\"packageId\":\"node-gyp-9.4.0\",\"packageName\":\"node-gyp\",\"version\":\"9.4.0\",\"description\":\"Node.js native addon build tool\",\"homepage\":\"https://github.com/nodejs/node-gyp\",\"license\":\"MIT\",\"attributePath\":\"pkgs.nodePackages.node-gyp\",\"relevanceScore\":0.78},{\"packageId\":\"nodejs-slim-18.17.1\",\"packageName\":\"nodejs-slim\",\"version\":\"18.17.1\",\"description\":\"Event-driven I/O framework (minimal build)\",\"homepage\":\"https://nodejs.org\",\"license\":\"MIT\",\"attributePath\":\"pkgs.nodejs-slim\",\"relevanceScore\":0.72}]}"
+  },
+
+  "health_check": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json", 
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"message\":\"fdnix search API (Rust) — stub active\",\"note\":\"This is a Rust Lambda stub. LanceDB integration ready.\",\"version\":\"0.1.0\",\"runtime\":\"provided.al2023\",\"lancedb_path\":\"/opt/packages.lance\",\"bedrock_model_id\":\"amazon.titan-embed-text-v2:0\",\"aws_region\":\"us-east-1\",\"enable_embeddings\":\"true\",\"lancedb_initialized\":true,\"bedrock_initialized\":true,\"lancedb_healthy\":true,\"bedrock_healthy\":true}"
+  },
+
+  "empty_results": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"message\":\"Search completed\",\"query\":\"nonexistentpackagename12345\",\"total_count\":0,\"query_time_ms\":15.2,\"search_type\":\"fts\",\"packages\":[]}"
+  },
+
+  "database_error": {
+    "statusCode": 500,
+    "headers": {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"error\":\"Internal server error\",\"message\":\"Database connection failed\"}"
+  },
+
+  "bad_request": {
+    "statusCode": 400, 
+    "headers": {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"error\":\"Bad request\",\"message\":\"Failed to parse request body\"}"
+  },
+
+  "large_result_set": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"message\":\"Search completed\",\"query\":\"python\",\"total_count\":50,\"query_time_ms\":89.3,\"search_type\":\"hybrid\",\"packages\":[{\"packageId\":\"python3-3.11.4\",\"packageName\":\"python3\",\"version\":\"3.11.4\",\"description\":\"A high-level dynamically-typed programming language\",\"homepage\":\"https://python.org\",\"license\":\"PSF-2.0\",\"attributePath\":\"pkgs.python3\",\"relevanceScore\":0.98}]}"
+  },
+
+  "fts_only_search": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"message\":\"Search completed\",\"query\":\"rust compiler\",\"total_count\":12,\"query_time_ms\":42.1,\"search_type\":\"fts\",\"packages\":[{\"packageId\":\"rustc-1.71.0\",\"packageName\":\"rustc\",\"version\":\"1.71.0\",\"description\":\"A safe, concurrent, practical language\",\"homepage\":\"https://www.rust-lang.org/\",\"license\":\"Apache-2.0 OR MIT\",\"attributePath\":\"pkgs.rustc\",\"relevanceScore\":0.91}]}"
+  },
+
+  "vector_only_search": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*"
+    },
+    "body": "{\"message\":\"Search completed\",\"query\":\"machine learning framework\",\"total_count\":8,\"query_time_ms\":156.8,\"search_type\":\"vector\",\"packages\":[{\"packageId\":\"pytorch-2.0.1\",\"packageName\":\"pytorch\",\"version\":\"2.0.1\",\"description\":\"Tensors and Dynamic neural networks in Python\",\"homepage\":\"https://pytorch.org\",\"license\":\"BSD-3-Clause\",\"attributePath\":\"pkgs.python3Packages.pytorch\",\"relevanceScore\":0.94}]}"
+  }
+}

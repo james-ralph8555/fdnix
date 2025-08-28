@@ -1,59 +1,15 @@
-mod lancedb_client;
-mod bedrock_client;
-
 use lambda_runtime::{service_fn, Error, LambdaEvent};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::env;
 use std::sync::OnceLock;
 use tracing::{info, warn, error, debug};
 
-use crate::lancedb_client::{LanceDBClient, SearchParams};
-use crate::bedrock_client::BedrockClient;
+use fdnix_search_lambda::*;
 
 // Global clients (initialized once)
 static LANCEDB_CLIENT: OnceLock<Option<LanceDBClient>> = OnceLock::new();
 static BEDROCK_CLIENT: OnceLock<Option<BedrockClient>> = OnceLock::new();
-
-#[derive(Deserialize, Debug, Clone)]
-struct ApiGatewayRequest {
-    #[serde(rename = "queryStringParameters")]
-    query_string_parameters: Option<HashMap<String, String>>,
-    body: Option<String>,
-    headers: Option<HashMap<String, String>>,
-}
-
-#[derive(Serialize, Debug, Clone)]
-struct ApiGatewayResponse {
-    #[serde(rename = "statusCode")]
-    status_code: u16,
-    headers: HashMap<String, String>,
-    body: String,
-}
-
-#[derive(Serialize, Debug, Clone)]
-struct SearchResponseBody {
-    message: String,
-    query: Option<String>,
-    total_count: Option<i32>,
-    query_time_ms: Option<f64>,
-    search_type: Option<String>,
-    packages: Option<Vec<Value>>,
-    // Status fields for health check
-    note: Option<String>,
-    version: Option<String>,
-    runtime: Option<String>,
-    query_received: Option<String>,
-    lancedb_path: Option<String>,
-    bedrock_model_id: Option<String>,
-    aws_region: Option<String>,
-    enable_embeddings: Option<String>,
-    lancedb_initialized: Option<bool>,
-    bedrock_initialized: Option<bool>,
-    lancedb_healthy: Option<bool>,
-    bedrock_healthy: Option<bool>,
-}
 
 async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayResponse, Error> {
     let payload = event.payload;
@@ -121,37 +77,6 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayRespons
     }
 }
 
-fn extract_query_params(params: &Option<HashMap<String, String>>) -> (String, i32, i32, Option<String>, Option<String>) {
-    let mut query = String::new();
-    let mut limit = 50;
-    let mut offset = 0;
-    let mut license_filter = None;
-    let mut category_filter = None;
-    
-    if let Some(params) = params {
-        if let Some(q) = params.get("q") {
-            query = q.clone();
-        }
-        if let Some(l) = params.get("limit") {
-            if let Ok(l_val) = l.parse::<i32>() {
-                limit = l_val;
-            }
-        }
-        if let Some(o) = params.get("offset") {
-            if let Ok(o_val) = o.parse::<i32>() {
-                offset = o_val;
-            }
-        }
-        if let Some(license) = params.get("license") {
-            license_filter = Some(license.clone());
-        }
-        if let Some(category) = params.get("category") {
-            category_filter = Some(category.clone());
-        }
-    }
-    
-    (query, limit, offset, license_filter, category_filter)
-}
 
 async fn handle_search_request(
     query: String, 
@@ -249,104 +174,8 @@ async fn handle_search_request(
     })
 }
 
-async fn create_health_check_response(query_param: String) -> SearchResponseBody {
-    let mut response = SearchResponseBody {
-        message: "fdnix search API (Rust) — stub active".to_string(),
-        note: Some("This is a Rust Lambda stub. LanceDB integration ready.".to_string()),
-        version: Some("0.1.0".to_string()),
-        runtime: Some("provided.al2023".to_string()),
-        query: None,
-        total_count: None,
-        query_time_ms: None,
-        search_type: None,
-        packages: None,
-        query_received: if !query_param.is_empty() { Some(query_param) } else { None },
-        lancedb_path: env::var("LANCEDB_PATH").ok(),
-        bedrock_model_id: env::var("BEDROCK_MODEL_ID").ok(),
-        aws_region: env::var("AWS_REGION").ok(),
-        enable_embeddings: env::var("ENABLE_EMBEDDINGS").ok(),
-        lancedb_initialized: Some(LANCEDB_CLIENT.get().and_then(|c| c.as_ref()).is_some()),
-        bedrock_initialized: Some(BEDROCK_CLIENT.get().and_then(|c| c.as_ref()).is_some()),
-        lancedb_healthy: None,
-        bedrock_healthy: None,
-    };
 
-    // Check client health
-    if let Some(lancedb_client) = LANCEDB_CLIENT.get().and_then(|c| c.as_ref()) {
-        response.lancedb_healthy = Some(lancedb_client.health_check().await);
-    }
 
-    if let Some(bedrock_client) = BEDROCK_CLIENT.get().and_then(|c| c.as_ref()) {
-        response.bedrock_healthy = Some(bedrock_client.health_check().await.unwrap_or(false));
-    }
-
-    response
-}
-
-fn is_embeddings_enabled() -> bool {
-    env::var("ENABLE_EMBEDDINGS")
-        .map(|val| val == "1" || val.to_lowercase() == "true" || val.to_lowercase() == "yes")
-        .unwrap_or(false)
-}
-
-async fn get_lancedb_path() -> Result<String, String> {
-    use std::path::Path;
-    
-    // Try paths in priority order: env var, Lambda layer path, local paths
-    let candidate_paths = vec![
-        env::var("LANCEDB_PATH").unwrap_or_default(),
-        "/opt/packages.lance".to_string(),
-        "./packages.lance".to_string(),
-        "packages.lance".to_string(),
-    ];
-    
-    for path in &candidate_paths {
-        if path.is_empty() {
-            continue;
-        }
-        
-        info!("Checking database path: {}", path);
-        
-        let path_obj = Path::new(path);
-        if path_obj.exists() {
-            if path_obj.is_dir() {
-                // Check for required LanceDB structure
-                let data_dir = path_obj.join("data");
-                let versions_dir = path_obj.join("_versions");
-                
-                if data_dir.exists() && versions_dir.exists() {
-                    info!("Valid LanceDB structure found at: {}", path);
-                    
-                    // List contents for debugging
-                    if let Ok(entries) = std::fs::read_dir(path) {
-                        let contents: Vec<String> = entries
-                            .filter_map(|e| e.ok())
-                            .map(|e| e.file_name().to_string_lossy().to_string())
-                            .collect();
-                        debug!("Database directory contents: {:?}", contents);
-                    }
-                    
-                    return Ok(path.clone());
-                } else {
-                    warn!("Directory exists but missing LanceDB structure at: {} (data: {}, versions: {})", 
-                          path, data_dir.exists(), versions_dir.exists());
-                }
-            } else {
-                warn!("Path exists but is not a directory: {}", path);
-            }
-        } else {
-            debug!("Path does not exist: {}", path);
-        }
-    }
-    
-    // If we reach here, no valid path was found
-    let attempted_paths = candidate_paths.into_iter()
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<String>>()
-        .join(", ");
-    
-    Err(format!("No valid LanceDB database found. Attempted paths: [{}]. Ensure the database layer is properly attached and contains packages.lance directory with data/ and _versions/ subdirectories.", attempted_paths))
-}
 
 async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting fdnix-search-api Rust Lambda v{}", env!("CARGO_PKG_VERSION"));
@@ -453,8 +282,6 @@ mod tests {
     use rstest::*;
     use serde_json::json;
     use std::collections::HashMap;
-    use tokio_test;
-    use uuid::Uuid;
 
     #[fixture]
     fn sample_api_gateway_request() -> ApiGatewayRequest {
