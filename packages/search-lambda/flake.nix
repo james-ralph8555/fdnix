@@ -97,6 +97,7 @@
             rustc
             cargo
             pkg-config
+            protobuf
           ];
           shellHook = ''
             echo "fdnix search lambda development environment (LanceDB)"

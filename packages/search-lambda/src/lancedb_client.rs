@@ -9,7 +9,10 @@ use std::time::Instant;
 use thiserror::Error;
 use tracing::{info, warn, error};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg(test)]
+use mockall::{automock, predicate::*};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Package {
     pub package_id: String,
     pub package_name: String,
@@ -403,5 +406,228 @@ impl LanceDBClient {
         }
 
         Ok(packages)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::*;
+    use tempfile::tempdir;
+    use std::env;
+
+    #[fixture]
+    fn sample_package() -> Package {
+        Package {
+            package_id: "nodejs-18".to_string(),
+            package_name: "nodejs".to_string(),
+            version: "18.17.1".to_string(),
+            description: "Event-driven I/O framework for the V8 JavaScript engine".to_string(),
+            homepage: "https://nodejs.org".to_string(),
+            license: "MIT".to_string(),
+            attribute_path: "pkgs.nodejs".to_string(),
+            relevance_score: 0.95,
+        }
+    }
+
+    #[fixture]
+    fn search_params() -> SearchParams {
+        SearchParams {
+            query: "nodejs".to_string(),
+            limit: 10,
+            offset: 0,
+            license_filter: None,
+            category_filter: None,
+        }
+    }
+
+    #[test]
+    fn test_package_serialization(sample_package: Package) {
+        let json_str = serde_json::to_string(&sample_package).unwrap();
+        let deserialized: Package = serde_json::from_str(&json_str).unwrap();
+        
+        assert_eq!(sample_package.package_id, deserialized.package_id);
+        assert_eq!(sample_package.package_name, deserialized.package_name);
+        assert_eq!(sample_package.version, deserialized.version);
+        assert_eq!(sample_package.description, deserialized.description);
+        assert_eq!(sample_package.homepage, deserialized.homepage);
+        assert_eq!(sample_package.license, deserialized.license);
+        assert_eq!(sample_package.attribute_path, deserialized.attribute_path);
+        assert_eq!(sample_package.relevance_score, deserialized.relevance_score);
+    }
+
+    #[test]
+    fn test_search_params_creation(search_params: SearchParams) {
+        assert_eq!(search_params.query, "nodejs");
+        assert_eq!(search_params.limit, 10);
+        assert_eq!(search_params.offset, 0);
+        assert!(search_params.license_filter.is_none());
+        assert!(search_params.category_filter.is_none());
+    }
+
+    #[rstest]
+    #[case("nodejs web framework", 50, 0, None, None)]
+    #[case("python", 25, 10, Some("MIT".to_string()), None)]
+    #[case("rust compiler", 100, 0, None, Some("development".to_string()))]
+    fn test_search_params_variations(
+        #[case] query: &str,
+        #[case] limit: i32,
+        #[case] offset: i32,
+        #[case] license_filter: Option<String>,
+        #[case] category_filter: Option<String>,
+    ) {
+        let params = SearchParams {
+            query: query.to_string(),
+            limit,
+            offset,
+            license_filter,
+            category_filter,
+        };
+
+        assert_eq!(params.query, query);
+        assert_eq!(params.limit, limit);
+        assert_eq!(params.offset, offset);
+        assert_eq!(params.license_filter, license_filter);
+        assert_eq!(params.category_filter, category_filter);
+    }
+
+    #[test]
+    fn test_lancedb_client_creation() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        
+        let client = LanceDBClient::new(db_path);
+        assert!(client.is_ok());
+        
+        let client = client.unwrap();
+        assert_eq!(client.db_path, db_path);
+        assert!(client.connection.is_none());
+        assert!(client.table.is_none());
+    }
+
+    #[test]
+    fn test_lancedb_client_with_embeddings_enabled() {
+        env::set_var("ENABLE_EMBEDDINGS", "true");
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        
+        let client = LanceDBClient::new(db_path).unwrap();
+        assert!(client.embeddings_enabled);
+        
+        env::remove_var("ENABLE_EMBEDDINGS");
+    }
+
+    #[test] 
+    fn test_lancedb_client_with_embeddings_disabled() {
+        env::set_var("ENABLE_EMBEDDINGS", "false");
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        
+        let client = LanceDBClient::new(db_path).unwrap();
+        assert!(!client.embeddings_enabled);
+        
+        env::remove_var("ENABLE_EMBEDDINGS");
+    }
+
+    #[rstest]
+    #[case("1", true)]
+    #[case("true", true)]
+    #[case("TRUE", true)]
+    #[case("yes", true)]
+    #[case("YES", true)]
+    #[case("0", false)]
+    #[case("false", false)]
+    #[case("FALSE", false)]
+    #[case("no", false)]
+    #[case("random", false)]
+    fn test_embeddings_environment_parsing(
+        #[case] env_value: &str,
+        #[case] expected: bool,
+    ) {
+        env::set_var("ENABLE_EMBEDDINGS", env_value);
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        
+        let client = LanceDBClient::new(db_path).unwrap();
+        assert_eq!(client.embeddings_enabled, expected);
+        
+        env::remove_var("ENABLE_EMBEDDINGS");
+    }
+
+    #[test]
+    fn test_search_results_creation() {
+        let packages = vec![
+            Package {
+                package_id: "test1".to_string(),
+                package_name: "test-package-1".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test package 1".to_string(),
+                homepage: "https://test1.com".to_string(),
+                license: "MIT".to_string(),
+                attribute_path: "pkgs.test1".to_string(),
+                relevance_score: 0.9,
+            }
+        ];
+
+        let results = SearchResults {
+            packages: packages.clone(),
+            total_count: 1,
+            query_time_ms: 15.5,
+            search_type: "test".to_string(),
+        };
+
+        assert_eq!(results.packages.len(), 1);
+        assert_eq!(results.total_count, 1);
+        assert_eq!(results.query_time_ms, 15.5);
+        assert_eq!(results.search_type, "test");
+        assert_eq!(results.packages[0].package_id, "test1");
+    }
+
+    #[tokio::test]
+    async fn test_health_check_without_initialization() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().to_str().unwrap();
+        let client = LanceDBClient::new(db_path).unwrap();
+        
+        let health = client.health_check().await;
+        assert!(!health); // Should be false since not initialized
+    }
+
+    #[test]
+    fn test_lancedb_client_error_display() {
+        let error = LanceDBClientError::NotInitialized;
+        assert_eq!(error.to_string(), "Connection not initialized");
+        
+        let error = LanceDBClientError::TableNotFound("packages".to_string());
+        assert_eq!(error.to_string(), "Required table not found: packages");
+        
+        let error = LanceDBClientError::DatabaseError("Connection failed".to_string());
+        assert_eq!(error.to_string(), "Database error: Connection failed");
+        
+        let error = LanceDBClientError::QueryFailed("Invalid query".to_string());
+        assert_eq!(error.to_string(), "Query failed: Invalid query");
+    }
+
+    #[test] 
+    fn test_package_default_values() {
+        let pkg = Package {
+            package_id: String::new(),
+            package_name: String::new(),
+            version: String::new(),
+            description: String::new(),
+            homepage: String::new(),
+            license: String::new(),
+            attribute_path: String::new(),
+            relevance_score: 0.0,
+        };
+
+        assert!(pkg.package_id.is_empty());
+        assert!(pkg.package_name.is_empty());
+        assert!(pkg.version.is_empty());
+        assert!(pkg.description.is_empty());
+        assert!(pkg.homepage.is_empty());
+        assert!(pkg.license.is_empty());
+        assert!(pkg.attribute_path.is_empty());
+        assert_eq!(pkg.relevance_score, 0.0);
     }
 }

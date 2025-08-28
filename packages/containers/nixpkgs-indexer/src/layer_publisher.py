@@ -121,9 +121,93 @@ class LayerPublisher:
                 logger.info("Published layer version: %s (version %s)", arn, version)
                 logger.info("ZIP file preserved at s3://%s/%s", bucket, zip_key)
                 
+                # Update Lambda functions using this layer
+                self._update_lambda_functions_using_layer(lambda_client, layer_arn, arn)
+                
                 return arn
                         
         except Exception as e:  # noqa: BLE001
             logger.error("Failed to publish layer version: %s", e)
             raise
+
+    def _update_lambda_functions_using_layer(self, lambda_client, layer_arn: str, new_layer_version_arn: str) -> None:
+        """Find and update Lambda functions that are using this layer."""
+        try:
+            logger.info("Searching for Lambda functions using layer: %s", layer_arn)
+            
+            # Extract layer name from ARN for matching
+            layer_name = layer_arn.split(':')[-1] if ':' in layer_arn else layer_arn
+            base_layer_arn = ':'.join(layer_arn.split(':')[:-1]) if ':' in layer_arn and layer_arn.count(':') >= 6 else layer_arn
+            
+            # List all Lambda functions
+            paginator = lambda_client.get_paginator('list_functions')
+            functions_updated = 0
+            
+            for page in paginator.paginate():
+                for function in page.get('Functions', []):
+                    function_name = function['FunctionName']
+                    
+                    try:
+                        # Get function configuration to check layers
+                        config = lambda_client.get_function_configuration(FunctionName=function_name)
+                        layers = config.get('Layers', [])
+                        
+                        # Check if this function uses our layer
+                        updated_layers = []
+                        layer_found = False
+                        
+                        for layer in layers:
+                            layer_version_arn = layer['Arn']
+                            
+                            # Check if this layer matches our layer (by name/base ARN)
+                            if (layer_name in layer_version_arn or 
+                                base_layer_arn in layer_version_arn or
+                                self._layer_arns_match(layer_version_arn, layer_arn)):
+                                
+                                logger.info("Found function %s using layer %s", function_name, layer_version_arn)
+                                updated_layers.append(new_layer_version_arn)
+                                layer_found = True
+                            else:
+                                # Keep other layers unchanged
+                                updated_layers.append(layer_version_arn)
+                        
+                        # Update the function if it uses our layer
+                        if layer_found:
+                            logger.info("Updating function %s to use new layer version %s", function_name, new_layer_version_arn)
+                            
+                            lambda_client.update_function_configuration(
+                                FunctionName=function_name,
+                                Layers=updated_layers
+                            )
+                            
+                            functions_updated += 1
+                            logger.info("Successfully updated function: %s", function_name)
+                    
+                    except Exception as e:
+                        logger.warning("Failed to check/update function %s: %s", function_name, e)
+                        continue
+            
+            if functions_updated > 0:
+                logger.info("Successfully updated %d Lambda function(s) to use the new layer version", functions_updated)
+            else:
+                logger.info("No Lambda functions found using this layer")
+                
+        except Exception as e:
+            logger.error("Failed to update Lambda functions using layer: %s", e)
+            # Don't raise - this is a nice-to-have feature, not critical
+
+    def _layer_arns_match(self, layer_version_arn: str, target_layer_arn: str) -> bool:
+        """Check if two layer ARNs refer to the same layer (ignoring version)."""
+        try:
+            # Extract base ARN without version
+            if ':' in layer_version_arn:
+                parts = layer_version_arn.split(':')
+                if len(parts) >= 7:  # arn:aws:lambda:region:account:layer:name:version
+                    base_arn = ':'.join(parts[:-1])  # Remove version part
+                    target_base = ':'.join(target_layer_arn.split(':')[:-1]) if ':' in target_layer_arn else target_layer_arn
+                    return base_arn == target_base or base_arn.endswith(target_base) or target_base.endswith(base_arn)
+            
+            return False
+        except Exception:
+            return False
 
