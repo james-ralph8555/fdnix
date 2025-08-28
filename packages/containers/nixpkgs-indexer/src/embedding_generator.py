@@ -22,7 +22,7 @@ class EmbeddingGenerator:
         )
         
         # Use Bedrock batch size for processing (up to 50,000)
-        self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '50000'))
+        self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '10000'))
         self.max_text_length = 8192  # Titan Text v2 supports up to 8,192 tokens
         # LanceDB + artifact settings (operate on the main database)
         self.lancedb_path = os.environ.get('LANCEDB_PATH', '/out/fdnix-data.lancedb').strip()

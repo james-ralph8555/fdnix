@@ -162,9 +162,9 @@ async fn handle_search_request(
 ) -> Result<SearchResponseBody, Box<dyn std::error::Error + Send + Sync>> {
     // Get clients from static storage
     let lancedb_client = LANCEDB_CLIENT.get()
-        .ok_or("LanceDB client not initialized")?
+        .ok_or("LanceDB client not initialized - this should not happen as Lambda should fail at startup")?
         .as_ref()
-        .ok_or("LanceDB client failed to initialize")?;
+        .ok_or("LanceDB client failed to initialize during startup - check Lambda layer and LANCEDB_PATH configuration")?;
 
     // Prepare search parameters
     let search_params = SearchParams {
@@ -289,6 +289,65 @@ fn is_embeddings_enabled() -> bool {
         .unwrap_or(false)
 }
 
+async fn get_lancedb_path() -> Result<String, String> {
+    use std::path::Path;
+    
+    // Try paths in priority order: env var, Lambda layer path, local paths
+    let candidate_paths = vec![
+        env::var("LANCEDB_PATH").unwrap_or_default(),
+        "/opt/packages.lance".to_string(),
+        "./packages.lance".to_string(),
+        "packages.lance".to_string(),
+    ];
+    
+    for path in &candidate_paths {
+        if path.is_empty() {
+            continue;
+        }
+        
+        info!("Checking database path: {}", path);
+        
+        let path_obj = Path::new(path);
+        if path_obj.exists() {
+            if path_obj.is_dir() {
+                // Check for required LanceDB structure
+                let data_dir = path_obj.join("data");
+                let versions_dir = path_obj.join("_versions");
+                
+                if data_dir.exists() && versions_dir.exists() {
+                    info!("Valid LanceDB structure found at: {}", path);
+                    
+                    // List contents for debugging
+                    if let Ok(entries) = std::fs::read_dir(path) {
+                        let contents: Vec<String> = entries
+                            .filter_map(|e| e.ok())
+                            .map(|e| e.file_name().to_string_lossy().to_string())
+                            .collect();
+                        debug!("Database directory contents: {:?}", contents);
+                    }
+                    
+                    return Ok(path.clone());
+                } else {
+                    warn!("Directory exists but missing LanceDB structure at: {} (data: {}, versions: {})", 
+                          path, data_dir.exists(), versions_dir.exists());
+                }
+            } else {
+                warn!("Path exists but is not a directory: {}", path);
+            }
+        } else {
+            debug!("Path does not exist: {}", path);
+        }
+    }
+    
+    // If we reach here, no valid path was found
+    let attempted_paths = candidate_paths.into_iter()
+        .filter(|p| !p.is_empty())
+        .collect::<Vec<String>>()
+        .join(", ");
+    
+    Err(format!("No valid LanceDB database found. Attempted paths: [{}]. Ensure the database layer is properly attached and contains packages.lance directory with data/ and _versions/ subdirectories.", attempted_paths))
+}
+
 async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Starting fdnix-search-api Rust Lambda v{}", env!("CARGO_PKG_VERSION"));
     debug!("Lambda initialization starting with environment configuration");
@@ -299,29 +358,35 @@ async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send + S
            env::var("AWS_REGION").ok(), 
            env::var("ENABLE_EMBEDDINGS").ok());
 
-    // Initialize LanceDB client
-    let lancedb_client = if let Ok(lancedb_path) = env::var("LANCEDB_PATH") {
-        info!("Initializing LanceDB client with path: {}", lancedb_path);
-        let start_time = std::time::Instant::now();
-        match LanceDBClient::new(&lancedb_path) {
-            Ok(mut client) => {
-                if client.initialize().await? {
-                    let elapsed = start_time.elapsed();
-                    info!("LanceDB client initialized successfully in {}ms", elapsed.as_millis());
-                    Some(client)
-                } else {
-                    error!("Failed to initialize LanceDB client after {}ms", start_time.elapsed().as_millis());
-                    None
+    // Initialize LanceDB client with path validation and fallback
+    let lancedb_client = match get_lancedb_path().await {
+        Ok(lancedb_path) => {
+            info!("Initializing LanceDB client with validated path: {}", lancedb_path);
+            let start_time = std::time::Instant::now();
+            match LanceDBClient::new(&lancedb_path) {
+                Ok(mut client) => {
+                    match client.initialize().await {
+                        Ok(_) => {
+                            let elapsed = start_time.elapsed();
+                            info!("LanceDB client initialized successfully in {}ms", elapsed.as_millis());
+                            Some(client)
+                        }
+                        Err(e) => {
+                            error!("Failed to initialize LanceDB client after {}ms: {}", start_time.elapsed().as_millis(), e);
+                            return Err(format!("LanceDB initialization failed: {}", e).into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to create LanceDB client after {}ms: {}", start_time.elapsed().as_millis(), e);
+                    return Err(format!("LanceDB client creation failed: {}", e).into());
                 }
             }
-            Err(e) => {
-                error!("Failed to create LanceDB client after {}ms: {}", start_time.elapsed().as_millis(), e);
-                None
-            }
         }
-    } else {
-        error!("LANCEDB_PATH environment variable not set");
-        None
+        Err(e) => {
+            error!("Failed to find valid LanceDB path: {}", e);
+            return Err(e.into());
+        }
     };
 
     // Initialize Bedrock client only if embeddings are enabled
@@ -372,9 +437,10 @@ async fn main() -> Result<(), Error> {
         .without_time()
         .init();
 
-    // Initialize clients
+    // Initialize clients - fail fast if initialization fails
     if let Err(e) = initialize_clients().await {
-        error!("Error initializing clients: {}", e);
+        error!("Fatal error initializing clients: {}", e);
+        panic!("Lambda cannot start without proper client initialization: {}", e);
     }
 
     // Run the Lambda runtime

@@ -86,15 +86,45 @@ impl LanceDBClient {
     pub async fn initialize(&mut self) -> Result<bool, LanceDBClientError> {
         let conn = lancedb::connect(&self.db_path).execute().await?;
 
-        // Check if packages table exists
-        let table_names = conn.table_names().execute().await?;
-        if !table_names.contains(&"packages".to_string()) {
-            error!("Required 'packages' table not found in LanceDB");
-            return Err(LanceDBClientError::TableNotFound("packages".to_string()));
+        // Debug: List actual directory contents
+        if let Ok(entries) = std::fs::read_dir(&self.db_path) {
+            let mut dir_contents = Vec::new();
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    dir_contents.push(entry.file_name().to_string_lossy().to_string());
+                }
+            }
+            info!("Database directory contents: {:?}", dir_contents);
         }
 
-        let table = conn.open_table("packages").execute().await?;
-        info!("Found required 'packages' table");
+        // Check if packages table exists
+        let table_names = conn.table_names().execute().await?;
+        info!("Available tables in LanceDB: {:?}", table_names);
+        
+        if table_names.is_empty() {
+            error!("No tables found in LanceDB database at {}", self.db_path);
+            error!("This suggests the database was not properly created or populated");
+            
+            // Try to provide more debugging information
+            error!("Database appears to have data files but no registered tables");
+            error!("This could indicate a version mismatch or incomplete database creation");
+            
+            return Err(LanceDBClientError::TableNotFound("no tables found in database".to_string()));
+        }
+        
+        // Try to find packages table or use the first available table
+        let table_name = if table_names.contains(&"packages".to_string()) {
+            "packages".to_string()
+        } else if !table_names.is_empty() {
+            warn!("'packages' table not found, trying to use first available table: {}", table_names[0]);
+            table_names[0].clone()
+        } else {
+            error!("Required 'packages' table not found in LanceDB");
+            return Err(LanceDBClientError::TableNotFound("packages".to_string()));
+        };
+
+        let table = conn.open_table(&table_name).execute().await?;
+        info!("Successfully opened table: {}", table_name);
 
         // Check embeddings availability if enabled
         if self.embeddings_enabled {

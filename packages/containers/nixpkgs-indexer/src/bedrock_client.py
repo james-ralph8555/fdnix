@@ -19,7 +19,7 @@ class BedrockBatchClient:
         self.output_dimensions = int(os.environ.get('BEDROCK_OUTPUT_DIMENSIONS', '256'))
         
         # Batch job configuration
-        self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '50000'))
+        self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '10000'))
         self.input_bucket = os.environ.get('BEDROCK_INPUT_BUCKET') or os.environ.get('ARTIFACTS_BUCKET')
         self.output_bucket = os.environ.get('BEDROCK_OUTPUT_BUCKET') or os.environ.get('ARTIFACTS_BUCKET')
         self.role_arn = os.environ.get('BEDROCK_ROLE_ARN')

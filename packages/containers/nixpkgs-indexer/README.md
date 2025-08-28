@@ -38,7 +38,7 @@ Each phase can run independently or in sequence, and artifacts are uploaded to S
 Bedrock model and batch settings:
 - `BEDROCK_MODEL_ID`: Model ID (default: `amazon.titan-embed-text-v2:0`)
 - `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`)
-- `BEDROCK_BATCH_SIZE`: Max records per batch job (default: `50000`)
+- `BEDROCK_BATCH_SIZE`: Max records per batch job (default: `10000`)
 - `BEDROCK_POLL_INTERVAL`: Seconds between job status polls (default: `60`)
 - `BEDROCK_MAX_WAIT_TIME`: Max seconds to wait for job completion (default: `7200`)
 

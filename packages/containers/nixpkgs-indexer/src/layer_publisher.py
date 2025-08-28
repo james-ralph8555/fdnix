@@ -75,14 +75,29 @@ class LayerPublisher:
                                 s3_client.download_file(bucket, s3_key, str(local_file_path))
                                 logger.debug(f"Downloaded {s3_key} to {local_file_path}")
                 
-                # Create ZIP file
+                # Create ZIP file with correct directory structure for Lambda layer
                 zip_path = temp_path / "lancedb.zip"
                 logger.info("Creating ZIP file for Lambda layer...")
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     for file_path in lancedb_dir.rglob("*"):
                         if file_path.is_file():
-                            # Calculate path within ZIP (relative to lancedb directory)
-                            arc_name = file_path.relative_to(lancedb_dir)
+                            # Calculate path within ZIP - preserve the full directory structure
+                            # This ensures files are extracted to packages.lance/ in the Lambda layer
+                            relative_path = file_path.relative_to(lancedb_dir)
+                            
+                            # If the file is at the root level of lancedb directory, 
+                            # assume it should be in packages.lance/
+                            if len(relative_path.parts) == 1:
+                                arc_name = Path("packages.lance") / relative_path
+                            else:
+                                # If already in a subdirectory structure, preserve it
+                                # but ensure it starts with packages.lance if not already
+                                if relative_path.parts[0] != "packages.lance":
+                                    arc_name = Path("packages.lance") / relative_path
+                                else:
+                                    arc_name = relative_path
+                                    
+                            logger.debug(f"Adding {file_path} as {arc_name} to ZIP")
                             zip_file.write(file_path, arc_name)
                 
                 # Upload ZIP to S3 with timestamp to avoid overlap
