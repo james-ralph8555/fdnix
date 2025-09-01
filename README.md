@@ -54,9 +54,73 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 - Embeddings: both the pipeline and runtime use AWS Bedrock (Amazon Titan Embeddings) — batch for indexing, real-time for user queries.
 - A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
 
+## Jamstack + CloudFront/API Gateway
+
+- Single domain: Use one CloudFront distribution for both the static site and the API. Route `/` to S3 and `/api/*` to API Gateway.
+- Cross‑stack link: Export the API Gateway endpoint from the Search API stack and reference it in the Frontend stack (already wired via `RestApiOrigin`).
+- Frontend calls: Prefer relative paths (`/api/search`) over hardcoded URLs. Build‑time env can set `VITE_API_BASE_PATH=/api` and the client can default to `/api`.
+- Cloudflare DNS: Point `fdnix.com` and `www` to the CloudFront domain via CNAME flattening. ACM cert must be in `us-east-1`.
+- Security hardening: Inject a secret header at CloudFront to the API origin and validate it with an API Gateway Lambda Authorizer so only requests via your distribution are allowed. For local dev, use a separate dev API (or API key).
+
 ## Project Status
 
-- Status: Early development. Core architecture and plan are defined.
+- Status: v0.0.1 (early alpha). Core search works; UI and filters are basic and will evolve quickly.
+
+## v0.0.1 Highlights
+
+- Hybrid search path in place: LanceDB FTS (BM25) + optional semantic vectors (ANN) via Bedrock when `ENABLE_EMBEDDINGS=1`.
+- Basic filters: license and category, plus UI toggles for broken/unfree (API supports them; UI wiring is partial).
+- Copyable commands: install and temporary shell snippets per result.
+- Typical search latency: 300–700 ms per query (baseline to improve).
+- Minified LanceDB dataset shipped via Lambda layer for faster cold starts and lower transfer.
+
+## Roadmap (P07 — fdnix)
+
+Quick Wins
+- Faceted filters: platform (x86_64-linux/darwin/aarch64), license, broken/insecure, maintainers.
+  - Status: license filter done; category present. Broken/unfree toggles exist in UI but not sent to API yet. Platforms/maintainers are displayed on results but not yet filterable.
+- Reverse-deps & “who uses this?” (count + list with attrpaths).
+  - Status: planned.
+- Compare view: select 2–3 packages → versions, size, deps, build inputs, platforms side-by-side.
+  - Status: planned.
+- Copyable snippets: nix shell -p, nix run, flake.nix output template.
+  - Status: partial. Implemented `nix-env -iA` (install) and `nix-shell -p` (temporary shell). To add: `nix shell -p`, `nix run`, flake template.
+
+Medium
+- Semantic search over description/readme/maintainers using the LanceDB setup; rerank by attrpath exact matches.
+  - Status: hybrid search implemented with LanceDB (FTS + vector) when embeddings enabled. Attrpath exact-match rerank: planned.
+- Evals: add an evaluation harness and small gold set to measure relevance, regressions, and ranking quality.
+  - Status: planned.
+- Update & CVE badges (NVD by package name + aliases); warn on broken/insecure flags.
+  - Status: planned.
+- “Recipe builder”: pick multiple packages → output a minimal flake with devShell + pre-commit hooks.
+  - Status: planned.
+
+Differentiators
+- Reverse overlay diff: show what an overlay changes (added/removed/overridden attrs).
+  - Status: planned.
+- “Where did this come from?”: link to the exact nixpkgs file + line, with last 3 commits affecting it.
+  - Status: planned.
+- Offline index: download once, works fully in browser with WASM search.
+  - Status: planned.
+
+Self-Hosted
+- Dockerized self-hosted setup (API + static UI).
+  - Status: planned. Current container is for the indexing pipeline; add API/UI images and compose.
+
+Infrastructure
+- Frontend/API unification: ensure CloudFront `/api/*` → API Gateway stage and switch frontend to relative calls (remove hard dependency on `VITE_API_BASE_URL`).
+  - Status: routing in CDK present via `RestApiOrigin`; update frontend client to default to `/api` with optional `VITE_API_BASE_PATH`.
+- Cross‑stack outputs/props: expose API endpoint or object and pass to Frontend stack for origin wiring and build‑time config.
+  - Status: partial (stacks already depend; tighten prop passing or outputs if needed).
+- API hardening: CloudFront‑injected secret header + Lambda Authorizer on API Gateway.
+  - Status: planned. Store secret in Secrets Manager; validate in authorizer; disable direct public access.
+- Local/dev access: second dev API Gateway (not behind CloudFront) or API key path for localhost.
+  - Status: planned. Gate dev with API key and usage plan; keep prod locked to CloudFront.
+
+Success Metrics
+- Primary: search → click → code-snippet copy rate.
+- Secondary: median search latency (end-to-end).
 
 ## Development & Deployment
 

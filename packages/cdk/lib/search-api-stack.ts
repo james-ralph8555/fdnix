@@ -141,7 +141,7 @@ export class FdnixSearchApiStack extends Stack {
             }),
           },
           responseParameters: {
-            'method.response.header.Access-Control-Allow-Origin': "'http://localhost:3000'",
+            'method.response.header.Access-Control-Allow-Origin': "'*'",
             'method.response.header.Access-Control-Allow-Headers': "'Content-Type,Accept,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'",
             'method.response.header.Access-Control-Allow-Methods': "'GET,OPTIONS'",
           },
