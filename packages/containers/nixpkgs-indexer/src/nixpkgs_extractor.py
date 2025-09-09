@@ -1,9 +1,13 @@
 import json
 import logging
+import os
+import shutil
 import subprocess
-import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import extract_dependencies
 
 
 logger = logging.getLogger("fdnix.nixpkgs-extractor")
@@ -11,22 +15,111 @@ logger = logging.getLogger("fdnix.nixpkgs-extractor")
 
 class NixpkgsExtractor:
     def __init__(self) -> None:
-        self.max_retries = 3
-        self.retry_delay_sec = 5
+        self.nixpkgs_path = None
+        self.temp_dir = None
 
-    def extract_all_packages(self) -> List[Dict[str, Any]]:
-        logger.info("Extracting package metadata using nix-env...")
-        raw = self._extract_raw_package_data()
+    def extract_all_packages(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Extract both package metadata and dependency information.
+        
+        Returns:
+            Tuple of (packages, dependencies) where:
+            - packages: List of package metadata (for main LanceDB)
+            - dependencies: List of dependency information (for separate LanceDB table)
+        """
+        # Setup nixpkgs repository
+        self._setup_nixpkgs_repo()
+        
+        try:
+            logger.info("Extracting package metadata and dependencies...")
+            raw_deps = self._extract_dependencies_data()
+            raw_packages = self._extract_nix_env_data()
+            
+            logger.info("Processing and merging package data...")
+            packages = self._process_package_data(raw_packages)
+            dependencies = self._process_dependency_data(raw_deps)
+            
+            return packages, dependencies
+        finally:
+            self._cleanup_temp_dirs()
 
-        logger.info("Processing and cleaning package data...")
-        return self._process_package_data(raw)
-
-    def _extract_raw_package_data(self) -> Dict[str, Any]:
+    def _setup_nixpkgs_repo(self) -> None:
+        """Clone nixpkgs repository and checkout the target branch."""
+        import tempfile
+        
+        # Create temporary directory for nixpkgs
+        self.temp_dir = Path(tempfile.mkdtemp(prefix="nixpkgs_"))
+        self.nixpkgs_path = self.temp_dir / "nixpkgs"
+        
+        logger.info("Cloning nixpkgs repository to %s", self.nixpkgs_path)
+        
+        # Clone nixpkgs with depth 1 for faster cloning
+        clone_cmd = [
+            "git", "clone", 
+            "--depth", "1",
+            "--branch", "release-25.05",
+            "https://github.com/NixOS/nixpkgs.git",
+            str(self.nixpkgs_path)
+        ]
+        
+        try:
+            logger.info("Cloning nixpkgs repository with shallow depth (faster clone)...")
+            subprocess.run(clone_cmd, check=True, timeout=1200, capture_output=True)
+            logger.info("Successfully cloned nixpkgs release-25.05 branch")
+            
+        except subprocess.CalledProcessError as e:
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            raise RuntimeError(f"Failed to clone/update nixpkgs: {error_msg}") from e
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("Nixpkgs clone timed out after 20 minutes")
+    
+    def _cleanup_temp_dirs(self) -> None:
+        """Clean up temporary directories."""
+        if self.temp_dir and self.temp_dir.exists():
+            logger.info("Cleaning up temporary directory: %s", self.temp_dir)
+            shutil.rmtree(self.temp_dir)
+    
+    def _extract_dependencies_data(self) -> Dict[str, Any]:
+        """Extract dependency data using extract-dependencies.py module directly."""
+        output_dir = self.temp_dir / "deps_output"
+        
+        # Create arguments for the extract-dependencies module
+        args = [
+            "--nixpkgs", str(self.nixpkgs_path),
+            "--allow-unfree",
+            "--output", str(output_dir),
+            "--verbose"
+        ]
+        
+        try:
+            logger.info("Running dependency extraction directly...")
+            result = extract_dependencies.main(args)
+            
+            if result != 0:
+                raise RuntimeError(f"Dependency extraction failed with exit code {result}")
+            
+            # Find the output file (should be in a timestamped directory)
+            output_files = list(output_dir.glob("*/dependencies_raw.json"))
+            if not output_files:
+                raise RuntimeError("No dependency output file found")
+            
+            with open(output_files[0]) as f:
+                data = json.load(f)
+                
+            logger.info("Successfully extracted dependencies data")
+            return data
+            
+        except Exception as e:
+            logger.error("Dependency extraction failed: %s", str(e))
+            raise RuntimeError(f"Dependency extraction failed: {str(e)}") from e
+    
+    def _extract_nix_env_data(self) -> Dict[str, Any]:
+        """Extract package metadata using nix-env (for compatibility)."""
         cmd = [
             "nix-env",
             "-qaP",
             "--json",
             "--meta",
+            "-f", str(self.nixpkgs_path)
         ]
 
         attempt = 0
@@ -41,16 +134,28 @@ class NixpkgsExtractor:
                 logger.info("Successfully extracted %d packages", len(data))
                 return data
             except subprocess.CalledProcessError as e:
+                # Log the actual error details for debugging
+                error_details = f"Exit code: {e.returncode}"
+                if e.stdout:
+                    logger.error("nix-env stdout: %s", e.stdout.strip())
+                if e.stderr:
+                    stderr_str = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr)
+                    logger.error("nix-env stderr: %s", stderr_str.strip())
+                    error_details += f", Stderr: {stderr_str.strip()}"
+                else:
+                    error_details += ", No stderr output"
+                
                 if attempt < self.max_retries:
                     logger.warning(
-                        "nix-env failed (attempt %d/%d). Retrying in %ss...",
-                        attempt,
-                        self.max_retries,
-                        self.retry_delay_sec,
+                        "nix-env failed (attempt %d/%d): %s. Retrying in %ss...",
+                        attempt, self.max_retries, error_details, self.retry_delay_sec
                     )
                     time.sleep(self.retry_delay_sec)
                     continue
-                raise RuntimeError(f"nix-env failed: {e.stderr}") from e
+                
+                # For final attempt, provide comprehensive error info
+                logger.error("Final nix-env attempt failed: %s", error_details)
+                raise RuntimeError(f"nix-env failed after {self.max_retries} attempts: {error_details}") from e
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"Failed to parse nix-env JSON output: {e}") from e
 
@@ -341,3 +446,60 @@ class NixpkgsExtractor:
             return "development"
         
         return "misc"
+    
+    def _process_dependency_data(self, raw_deps: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Process dependency data from extract-dependencies.py output."""
+        packages = raw_deps.get('packages', [])
+        processed_deps = []
+        
+        logger.info("Processing %d dependency entries", len(packages))
+        
+        for pkg in packages:
+            try:
+                # Extract dependency information
+                build_inputs = pkg.get('buildInputs', [])
+                propagated_inputs = pkg.get('propagatedBuildInputs', [])
+                
+                dep_entry = {
+                    "packageId": pkg.get('id', ''),
+                    "pname": pkg.get('pname', ''),
+                    "version": pkg.get('version', ''),
+                    "attributePath": pkg.get('attrPath', ''),
+                    "buildInputs": self._normalize_dep_list(build_inputs),
+                    "propagatedBuildInputs": self._normalize_dep_list(propagated_inputs),
+                    "totalDependencies": len(build_inputs) + len(propagated_inputs),
+                    "lastUpdated": datetime.now(timezone.utc).isoformat()
+                }
+                
+                processed_deps.append(dep_entry)
+                
+            except Exception as e:
+                logger.warning("Error processing dependency for %s: %s", 
+                             pkg.get('id', 'unknown'), e)
+                continue
+        
+        logger.info("Successfully processed %d dependency entries", len(processed_deps))
+        return processed_deps
+    
+    def _normalize_dep_list(self, deps: List[str]) -> List[str]:
+        """Normalize dependency list to extract package names."""
+        normalized = []
+        for dep in deps:
+            if isinstance(dep, str) and dep.strip():
+                # Extract package name from store path
+                # e.g., "/nix/store/abc123-hello-1.0" -> "hello"
+                parts = dep.split('/')[-1]  # Get basename
+                if '-' in parts:
+                    # Remove hash prefix
+                    name_version = '-'.join(parts.split('-')[1:])
+                    # Try to extract just the name part
+                    if '-' in name_version:
+                        name = name_version.split('-')[0]
+                    else:
+                        name = name_version
+                    normalized.append(name)
+        return normalized
+    
+    def __del__(self):
+        """Cleanup on object destruction."""
+        self._cleanup_temp_dirs()

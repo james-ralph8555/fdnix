@@ -44,6 +44,17 @@ class Package(LanceModel):
     vector: Vector(256)  # 256-dimensional vector for embeddings
 
 
+class Dependency(LanceModel):
+    package_id: str
+    pname: str 
+    version: str
+    attribute_path: str
+    build_inputs: str  # JSON string of dependencies
+    propagated_build_inputs: str  # JSON string of dependencies
+    total_dependencies: int
+    last_updated: str
+
+
 class LanceDBWriter:
     def __init__(
         self,
@@ -102,6 +113,43 @@ class LanceDBWriter:
 
         if self.s3_bucket and self.s3_key:
             self._upload_to_s3()
+    
+    def write_dependency_artifact(self, dependencies: List[Dict[str, Any]]) -> None:
+        """Write dependency data to a separate LanceDB table."""
+        self._ensure_parent_dir()
+        logger.info("Writing dependency data to LanceDB at %s", self.output_path)
+
+        # Connect to LanceDB (reuse existing connection if available)
+        if not self._db:
+            self._db = lancedb.connect(str(self.output_path))
+        
+        # Convert dependencies to LanceDB format
+        lance_dependencies = self._convert_dependencies_to_lance_format(dependencies)
+        
+        # Create or update dependencies table
+        try:
+            # Try to open existing dependencies table
+            deps_table = self._db.open_table("dependencies")
+            logger.info("Opened existing dependencies table")
+            
+            # Add new data (this will append to existing data)
+            if lance_dependencies:
+                deps_table.add(lance_dependencies)
+                logger.info("Added %d dependencies to existing table", len(lance_dependencies))
+        except (FileNotFoundError, ValueError):
+            # Table doesn't exist, create new one
+            if lance_dependencies:
+                deps_table = self._db.create_table("dependencies", data=lance_dependencies, schema=Dependency)
+                logger.info("Created new dependencies table with %d dependencies", len(lance_dependencies))
+            else:
+                # Create empty table with schema
+                deps_table = self._db.create_table("dependencies", schema=Dependency)
+                logger.info("Created empty dependencies table")
+
+        # Create FTS index on dependency table text fields
+        self._create_dependency_fts_index(deps_table)
+
+        logger.info("Dependency LanceDB artifact written: %s", self.output_path)
 
     def _ensure_parent_dir(self) -> None:
         self.output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -144,6 +192,25 @@ class LanceDBWriter:
             lance_packages.append(lance_pkg)
 
         return lance_packages
+    
+    def _convert_dependencies_to_lance_format(self, dependencies: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert dependency dictionaries to LanceDB format."""
+        lance_dependencies = []
+        
+        for dep in dependencies:
+            lance_dep = {
+                "package_id": dep.get("packageId") or "",
+                "pname": dep.get("pname") or "",
+                "version": dep.get("version") or "",
+                "attribute_path": dep.get("attributePath") or "",
+                "build_inputs": json.dumps(dep.get("buildInputs", [])),
+                "propagated_build_inputs": json.dumps(dep.get("propagatedBuildInputs", [])),
+                "total_dependencies": int(dep.get("totalDependencies", 0)),
+                "last_updated": dep.get("lastUpdated") or ""
+            }
+            lance_dependencies.append(lance_dep)
+            
+        return lance_dependencies
 
     def _create_fts_index(self) -> None:
         """Create full-text search index on relevant fields."""
@@ -188,6 +255,40 @@ class LanceDBWriter:
             logger.info("FTS index created successfully")
         except Exception as e:
             logger.error("Failed to create FTS index: %s", e)
+            # Don't raise - FTS is optional
+    
+    def _create_dependency_fts_index(self, deps_table) -> None:
+        """Create full-text search index on dependency table fields."""
+        if not deps_table:
+            logger.warning("No dependency table available for FTS index creation")
+            return
+            
+        try:
+            # Get table schema to check which fields exist
+            schema = deps_table.schema
+            available_fields = [field.name for field in schema]
+            logger.debug("Available fields in dependency table: %s", available_fields)
+            
+            # Create FTS index on text fields for dependency searching
+            potential_fts_fields = [
+                "package_id",        # Package identifiers
+                "pname",            # Package names
+                "attribute_path"    # Attribute paths
+            ]
+            fts_fields = [field for field in potential_fts_fields if field in available_fields]
+            
+            if not fts_fields:
+                logger.warning("No suitable text fields found for dependency FTS index")
+                return
+            
+            logger.info("Creating dependency FTS index on fields: %s", fts_fields)
+            
+            # LanceDB's native FTS index creation
+            deps_table.create_fts_index(fts_fields, use_tantivy=False)
+            
+            logger.info("Dependency FTS index created successfully")
+        except Exception as e:
+            logger.error("Failed to create dependency FTS index: %s", e)
             # Don't raise - FTS is optional
 
     def _create_vector_index(self) -> None:
@@ -346,7 +447,89 @@ class LanceDBWriter:
         if any(minified_data.get("has_embedding", False)) if not minified_data.empty else False:
             self._create_vector_index()
 
+        # Also copy dependencies table if it exists
+        try:
+            main_deps_table = main_db.open_table("dependencies")
+            deps_data = main_deps_table.to_pandas()
+            
+            if not deps_data.empty:
+                minified_deps_table = self._db.create_table("dependencies", data=deps_data.to_dict("records"))
+                self._create_dependency_fts_index(minified_deps_table)
+                logger.info("Copied dependencies table with %d entries", len(deps_data))
+        except (FileNotFoundError, ValueError):
+            logger.info("No dependencies table found in main database")
+
         logger.info("Minified LanceDB artifact written: %s", self.output_path)
 
         if self.s3_bucket and self.s3_key:
             self._upload_to_s3()
+
+
+class DependencyS3Writer:
+    """Separate writer for comprehensive dependency JSON output to S3."""
+    
+    def __init__(
+        self,
+        s3_bucket: Optional[str] = None,
+        s3_key: Optional[str] = None,
+        region: Optional[str] = None,
+    ) -> None:
+        self.s3_bucket = s3_bucket
+        self.s3_key = s3_key
+        self.region = region
+
+    def write_dependency_json(self, dependencies: List[Dict[str, Any]], metadata: Dict[str, Any] = None) -> None:
+        """Write comprehensive dependency data as JSON to S3."""
+        if not (self.s3_bucket and self.s3_key and self.region):
+            logger.info("Dependency S3 upload not configured; skipping comprehensive dependency output.")
+            return
+            
+        if boto3 is None:
+            logger.error("boto3 not available for dependency S3 upload")
+            return
+        
+        # Create comprehensive dependency output
+        output_data = {
+            "metadata": metadata or {},
+            "dependencies": dependencies,
+            "stats": self._calculate_dependency_stats(dependencies)
+        }
+        
+        # Convert to JSON
+        json_data = json.dumps(output_data, indent=2, sort_keys=True)
+        
+        logger.info("Uploading comprehensive dependency data to s3://%s/%s", self.s3_bucket, self.s3_key)
+        
+        # Upload to S3
+        s3 = boto3.client("s3", region_name=self.region)
+        s3.put_object(
+            Bucket=self.s3_bucket,
+            Key=self.s3_key,
+            Body=json_data.encode('utf-8'),
+            ContentType='application/json'
+        )
+        
+        logger.info("Dependency JSON upload complete.")
+    
+    def _calculate_dependency_stats(self, dependencies: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Calculate statistics about the dependency data."""
+        if not dependencies:
+            return {}
+        
+        total_packages = len(dependencies)
+        total_dep_relations = sum(dep.get("totalDependencies", 0) for dep in dependencies)
+        
+        # Count packages with no dependencies
+        no_deps = sum(1 for dep in dependencies if dep.get("totalDependencies", 0) == 0)
+        
+        # Calculate averages
+        avg_deps = total_dep_relations / total_packages if total_packages > 0 else 0
+        max_deps = max((dep.get("totalDependencies", 0) for dep in dependencies), default=0)
+        
+        return {
+            "totalPackages": total_packages,
+            "totalDependencyRelations": total_dep_relations,
+            "packagesWithNoDependencies": no_deps,
+            "averageDependenciesPerPackage": round(avg_deps, 2),
+            "maxDependenciesPerPackage": max_deps
+        }

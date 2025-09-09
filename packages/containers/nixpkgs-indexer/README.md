@@ -8,9 +8,10 @@ Each phase can run independently or in sequence, and artifacts are uploaded to S
 
 ## Features
 
-- Metadata Generation: Extracts nixpkgs package metadata using `nix-env` and writes a LanceDB dataset (directory) with a typed schema.
+- Metadata + Dependencies: Shallow‑clones nixpkgs (release branch) and extracts both package metadata and dependency relationships without building. Writes a LanceDB dataset (directory) with a typed schema and a separate `dependencies` table.
+- Dependency Graph Export: Optionally uploads a comprehensive dependency JSON to S3 for separate analysis and reuse.
 - Embedding Generation: Generates semantic embeddings with Amazon Titan Embeddings (Text v2) via AWS Bedrock batch; vectors are stored in LanceDB and indexed for vector search.
-- Minified Dataset: Derives a minified LanceDB dataset (from the main dataset, after embeddings) with essential columns and a Tantivy-backed FTS index.
+- Minified Dataset: Derives a minified LanceDB dataset (from the main dataset, after embeddings) with essential columns and a LanceDB‑native FTS index.
 - Unified Execution: Run individual phases or all three in order based on configuration.
 - S3 Integration: Uploads/downloads entire LanceDB directory structures under S3 key prefixes for traceability between stages.
 - Security: Runs as a non-root user.
@@ -34,6 +35,11 @@ Each phase can run independently or in sequence, and artifacts are uploaded to S
 - `LANCEDB_DATA_KEY`: S3 key prefix for the main dataset (e.g., `snapshots/fdnix-data.lancedb`)
 - `LANCEDB_MINIFIED_KEY`: S3 key prefix for the minified dataset (e.g., `snapshots/fdnix.lancedb`)
 - `LANCEDB_PATH`: Path to LanceDB dataset for embedding phase (defaults to the main dataset)
+- `DEPENDENCY_S3_KEY`: S3 key for a comprehensive dependency JSON (e.g., `dependencies/fdnix-deps.json`). When set with `ARTIFACTS_BUCKET`, dependency data is exported alongside the LanceDB artifacts.
+
+Embedding controls:
+- `ENABLE_EMBEDDINGS`: Toggle embedding phase when processing mode includes `embedding`/`both` (default: `true`).
+- `FORCE_REBUILD_EMBEDDINGS`: Recompute all embeddings even if present (default: falsey).
 
 Bedrock model and batch settings:
 - `BEDROCK_MODEL_ID`: Model ID (default: `amazon.titan-embed-text-v2:0`)
@@ -58,9 +64,10 @@ Vector index tuning (embedding/minified phases):
 ## Processing Modes
 
 ### "metadata"
-1. Extracts package metadata from the nixpkgs channel using `nix-env -qaP --json`, then cleans and normalizes fields (no git clone).
-2. Creates the main LanceDB dataset (`fdnix-data.lancedb`) with complete metadata.
-3. Uploads the dataset directory to S3 when `ARTIFACTS_BUCKET` and `LANCEDB_DATA_KEY` are provided (uploaded under that key prefix).
+1. Clones nixpkgs (shallow, `release-25.05` by default) and evaluates metadata and dependency info without building.
+2. Extracts dependency relationships using `nix-instantiate` over `src/extract-deps.nix` (captures `buildInputs` and `propagatedBuildInputs`).
+3. Creates the main LanceDB dataset (`fdnix-data.lancedb`) with complete metadata and a `dependencies` table.
+4. Uploads the dataset directory to S3 when `ARTIFACTS_BUCKET` and `LANCEDB_DATA_KEY` are provided; when `DEPENDENCY_S3_KEY` is set, also uploads a comprehensive dependency JSON.
 
 ### "embedding"
 1. Opens the main LanceDB dataset (downloads from S3 when configured and the local dataset is missing).
@@ -73,12 +80,24 @@ Vector index tuning (embedding/minified phases):
 
 ### "minified"
 1. Derives a minified LanceDB dataset (`fdnix.lancedb`) from the main dataset, copying essential fields and embeddings.
-2. Builds the Tantivy FTS index on relevant text fields; refreshes vector index if embeddings present.
+2. Builds the LanceDB‑native FTS index on relevant text fields; refreshes vector index if embeddings present.
 3. Uploads the minified dataset to S3 when `LANCEDB_MINIFIED_KEY` is provided (uploaded under that key prefix).
 
 ### "both" (default) and "full"
 - Run all three phases in sequence: metadata → embedding → minified.
 - Alias: `full` behaves the same as `both`.
+
+## How It Works
+
+- Nixpkgs clone: Shallow clone of `NixOS/nixpkgs` (branch `release-25.05`) into a temp directory for evaluation only.
+- Dependencies: `nix-instantiate` evaluates `src/extract-deps.nix` to read `buildInputs` and `propagatedBuildInputs` for all derivations, without building.
+- Metadata: `nix-env -qaP --json --meta -f <cloned nixpkgs>` extracts package metadata; results are merged with dependency info.
+- Storage: Writes a LanceDB dataset with a `packages` table and a `dependencies` table; optional comprehensive dependency JSON can also be uploaded to S3.
+- Indexes: Uses LanceDB-native full-text search for text fields and IVF-PQ for vectors when embeddings exist.
+
+Notes:
+- Nixpkgs branch is currently pinned to `release-25.05` in the indexer.
+- Extraction avoids builds; it evaluates attribute metadata and relationship fields only.
 
 ## Usage
 
@@ -92,6 +111,7 @@ docker run --rm --env-file .env -v "$PWD":/out \
   -e ARTIFACTS_BUCKET=my-bucket \
   -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb \
   -e LANCEDB_MINIFIED_KEY=snapshots/fdnix.lancedb \
+  -e DEPENDENCY_S3_KEY=dependencies/fdnix-deps.json \
   -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole \
   -e BEDROCK_MODEL_ID=amazon.titan-embed-text-v2:0 \
   -e BEDROCK_OUTPUT_DIMENSIONS=256 \
@@ -101,7 +121,9 @@ docker run --rm --env-file .env -v "$PWD":/out \
 # 1) Metadata only → writes main dataset and uploads to S3
 docker run --rm --env-file .env -v "$PWD":/out \
   -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata \
-  -e ARTIFACTS_BUCKET=my-bucket -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb \
+  -e ARTIFACTS_BUCKET=my-bucket \
+  -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb \
+  -e DEPENDENCY_S3_KEY=dependencies/fdnix-deps.json \
   fdnix/nixpkgs-indexer
 
 # 2) Embeddings only → updates main dataset and uploads to S3 using Bedrock batch
@@ -109,6 +131,7 @@ docker run --rm --env-file .env -v "$PWD":/out \
   -e AWS_REGION=us-east-1 -e PROCESSING_MODE=embedding \
   -e ARTIFACTS_BUCKET=my-bucket -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb \
   -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole \
+  -e ENABLE_EMBEDDINGS=true -e FORCE_REBUILD_EMBEDDINGS=false \
   -e BEDROCK_MODEL_ID=amazon.titan-embed-text-v2:0 \
   fdnix/nixpkgs-indexer
 
@@ -127,7 +150,7 @@ docker run --rm --env-file .env -v "$PWD":/out \
 - Bedrock: No external API keys. Ensure the task role can call Bedrock and pass the batch role:
   - `bedrock:CreateModelInvocationJob`, `bedrock:GetModelInvocationJob`, `bedrock:ListFoundationModels`
   - `iam:PassRole` on `BEDROCK_ROLE_ARN`
-- S3: The task role needs `s3:GetObject`, `s3:PutObject`, and `s3:ListBucket` for the artifact keys and the Bedrock batch prefixes.
+- S3: The task role needs `s3:GetObject`, `s3:PutObject`, and `s3:ListBucket` for the artifact keys and the Bedrock batch prefixes; include permissions for the optional `DEPENDENCY_S3_KEY` path if exporting dependency JSON.
 - Lambda layer: When `PUBLISH_LAYER` is enabled, grant permissions to publish/update the specified layer.
 - Regions & certs: If integrating with CloudFront, ACM certificates must be in `us-east-1` (handled by the CDK stacks).
 - DNS: Managed via Cloudflare; see CDK docs for setup.
@@ -136,10 +159,31 @@ docker run --rm --env-file .env -v "$PWD":/out \
 
 The indexer produces LanceDB datasets (directories):
 
-- Main dataset (`fdnix-data.lancedb`): Complete nixpkgs metadata; embeddings added when generated.
-- Minified dataset (`fdnix.lancedb`): Essential columns only; simplified license/maintainers; FTS built on text fields.
-- Core table in both:
-  - `packages` table with typed columns and a `vector` field for embeddings; Tantivy FTS over key text fields; IVF‑PQ vector index when embeddings are present.
+- Main dataset (`fdnix-data.lancedb`): Complete nixpkgs metadata and dependency relationships; embeddings added when generated.
+- Minified dataset (`fdnix.lancedb`): Essential columns only; simplified license/maintainers; FTS built on key text fields.
+- Tables:
+  - `packages`: Typed package metadata plus `vector` for embeddings; LanceDB‑native FTS over name/description/attribute path; IVF‑PQ vector index when embeddings are present.
+  - `dependencies`: Per‑package dependency rows including `package_id`, `pname`, `version`, `attribute_path`, `build_inputs`, `propagated_build_inputs`, and `total_dependencies`.
+
+Example dependency JSON (abridged):
+```json
+{
+  "metadata": {"nixpkgs_version": "25.05", "total_packages": 123},
+  "dependencies": [
+    {
+      "packageId": "hello-2.12.1",
+      "pname": "hello",
+      "version": "2.12.1",
+      "attributePath": "pkgs.hello",
+      "buildInputs": ["glibc", "gcc"],
+      "propagatedBuildInputs": [],
+      "totalDependencies": 2,
+      "lastUpdated": "2024-09-09T12:34:56Z"
+    }
+  ],
+  "stats": {"totalPackages": 123, "averageDependenciesPerPackage": 5.4}
+}
+```
 
 ## Build & Run
 
@@ -152,13 +196,14 @@ The indexer produces LanceDB datasets (directories):
 
 Notes:
 - Embedding mode uses AWS Bedrock batch inference with Amazon Titan Embeddings (Text v2); no external API keys are required. Provide `BEDROCK_ROLE_ARN` and S3 buckets/prefixes.
-- S3 upload requires `ARTIFACTS_BUCKET`, `AWS_REGION`, and at least one of `LANCEDB_DATA_KEY` or `LANCEDB_MINIFIED_KEY` (prefixes).
+- S3 upload requires `ARTIFACTS_BUCKET`, `AWS_REGION`, and at least one of `LANCEDB_DATA_KEY` or `LANCEDB_MINIFIED_KEY` (prefixes). If `DEPENDENCY_S3_KEY` is set, a comprehensive dependency JSON is also written.
 - Default local artifact paths: `/out/fdnix-data.lancedb` (main) and `/out/fdnix.lancedb` (minified).
 
 ## Image & Dependencies
 
 - Base: `nixos/nix:2.31.0`; dependencies installed via Nix (`nix-env`).
 - Installed deps: `python313`, `lancedb`, `pydantic`, `pandas`, `pyarrow`, `boto3`, `httpx`, `numpy`.
+- FTS: Uses LanceDB’s native FTS (no Tantivy‑py dependency).
 - Entry: `python src/index.py`; runs as non-root user.
 
 Layer contents: When publishing is enabled, the packaged minified dataset artifact is placed in the layer (path depends on layer packaging).

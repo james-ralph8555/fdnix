@@ -7,7 +7,7 @@ import asyncio
 from typing import List, Dict, Any
 
 from nixpkgs_extractor import NixpkgsExtractor
-from lancedb_writer import LanceDBWriter
+from lancedb_writer import LanceDBWriter, DependencyS3Writer
 from embedding_generator import EmbeddingGenerator
 from layer_publisher import LayerPublisher
 
@@ -48,6 +48,12 @@ def validate_env() -> None:
                 os.environ["LANCEDB_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.lancedb"
             if not has_minified_key:
                 os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.lancedb"
+        
+        # Set default dependency key if S3 is configured but dependency key is not set
+        if has_bucket and not os.environ.get("DEPENDENCY_S3_KEY"):
+            import time
+            timestamp = int(time.time())
+            os.environ["DEPENDENCY_S3_KEY"] = f"dependencies/fdnix-deps-{timestamp}.json"
 
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):
@@ -88,12 +94,36 @@ async def main() -> int:
                 region=os.environ.get("AWS_REGION"),
             )
 
-            logger.info("Extracting nixpkgs metadata...")
-            packages: List[Dict[str, Any]] = extractor.extract_all_packages()
-            logger.info("Extracted %d packages from nixpkgs", len(packages))
+            logger.info("Extracting nixpkgs metadata and dependencies...")
+            packages, dependencies = extractor.extract_all_packages()
+            logger.info("Extracted %d packages and %d dependency entries from nixpkgs", 
+                       len(packages), len(dependencies))
 
             logger.info("Writing metadata to main LanceDB artifact...")
             main_writer.write_artifact(packages)
+            
+            # Write dependency data to LanceDB (separate table in same database)
+            if dependencies:
+                logger.info("Writing dependency data to LanceDB...")
+                main_writer.write_dependency_artifact(dependencies)
+                logger.info("Dependency data written to LanceDB successfully!")
+            
+            # Write comprehensive dependency data to S3 (separate JSON file)
+            if dependencies and os.environ.get("DEPENDENCY_S3_KEY"):
+                logger.info("Writing comprehensive dependency data to S3...")
+                dep_s3_writer = DependencyS3Writer(
+                    s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
+                    s3_key=os.environ.get("DEPENDENCY_S3_KEY"), 
+                    region=os.environ.get("AWS_REGION")
+                )
+                dep_metadata = {
+                    "extraction_timestamp": main_writer._db.open_table("packages").to_pandas()["last_updated"].iloc[0] if packages else None,
+                    "nixpkgs_branch": "release-25.05",
+                    "total_packages": len(packages)
+                }
+                dep_s3_writer.write_dependency_json(dependencies, dep_metadata)
+                logger.info("Comprehensive dependency data uploaded to S3!")
+            
             logger.info("Main database generation completed successfully!")
         
         # Phase 2: Embedding Generation (if needed and enabled)
