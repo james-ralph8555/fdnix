@@ -93,3 +93,21 @@ export function getInstallCommand(pkg: Package): string {
 export function getShellCommand(pkg: Package): string {
   return `nix-shell -p ${pkg.packageName}`;
 }
+
+/**
+ * Get display name from attribute path by removing nixpkgs prefix
+ * @param attributePath - Full attribute path (e.g., "nixpkgs.firefox" or "nixpkgs.legacyPackages.x86_64-linux.firefox")
+ * @returns Clean attribute path for display (e.g., "firefox" or "legacyPackages.x86_64-linux.firefox")
+ */
+export function getDisplayName(attributePath: string): string {
+  if (!attributePath) {
+    return '';
+  }
+  
+  // Remove "nixpkgs." prefix if present
+  if (attributePath.startsWith('nixpkgs.')) {
+    return attributePath.substring('nixpkgs.'.length);
+  }
+  
+  return attributePath;
+}

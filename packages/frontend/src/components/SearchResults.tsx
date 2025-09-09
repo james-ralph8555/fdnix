@@ -1,7 +1,7 @@
 import { For, Show, createSignal } from 'solid-js';
 import type { Package } from '../types';
 import { formatList, truncateText } from '../utils/format';
-import { enhancePackage, getLicenseList, getInstallCommand, getShellCommand } from '../utils/package';
+import { enhancePackage, getLicenseList, getInstallCommand, getShellCommand, getDisplayName } from '../utils/package';
 
 interface SearchResultsProps {
   results: Package[];
@@ -111,7 +111,7 @@ function PackageCard(props: PackageCardProps) {
       <div class="flex justify-between items-start mb-4">
         <div class="flex-1">
           <div class="flex items-center gap-3 mb-2">
-            <h3 class="text-xl font-semibold text-gray-900">{pkg.packageName}</h3>
+            <h3 class="text-xl font-semibold text-gray-900">{getDisplayName(pkg.attributePath)}</h3>
             <span class="text-sm text-gray-500 font-mono bg-gray-100 px-2 py-1 rounded">
               {pkg.version}
             </span>

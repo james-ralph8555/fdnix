@@ -161,7 +161,7 @@ class LanceDBWriter:
             available_fields = [field.name for field in schema]
             
             # Create FTS index on text fields that actually exist
-            potential_fts_fields = ["package_name", "description", "long_description", "main_program", "license", "maintainers"]
+            potential_fts_fields = ["package_id", "package_name", "attribute_path", "description", "long_description", "main_program"]
             fts_fields = [field for field in potential_fts_fields if field in available_fields]
             
             if not fts_fields:
@@ -172,8 +172,8 @@ class LanceDBWriter:
                        fts_fields, stopwords, stemmer or "<none>")
             
             # LanceDB's native FTS index creation (Lance-based, not tantivy)
-            # Use first field for FTS when use_tantivy=False
-            self._table.create_fts_index(fts_fields[0], use_tantivy=False)
+            # Index all relevant fields for comprehensive search
+            self._table.create_fts_index(fts_fields, use_tantivy=False)
             
             logger.info("FTS index created successfully")
         except Exception as e:
