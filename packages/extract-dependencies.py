@@ -18,12 +18,6 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional
-try:
-    # Prefer a normal import of the processor module
-    from process_deps import process_dependencies as _process_dependencies
-    _HAS_PROCESS_DEPS = True
-except Exception:
-    _HAS_PROCESS_DEPS = False
 
 
 # ------------------------- Logging utilities -------------------------
@@ -81,6 +75,7 @@ def build_nix_cmd(
     nixpkgs_path: Optional[str],
     system: Optional[str],
     allow_unfree: bool,
+    test_mode: bool,
     verbose: bool,
 ) -> List[str]:
     base = [
@@ -89,6 +84,12 @@ def build_nix_cmd(
         "--json",
         "--strict",
     ]
+
+    # In test mode, the Nix file is self-contained (no args passed)
+    if test_mode:
+        cmd = [*base, str(nix_file)]
+        log_verbose(f"Using test mode nix command: {' '.join(cmd)}", verbose)
+        return cmd
 
     cmd: List[str] = list(base)
 
@@ -136,28 +137,8 @@ def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict
     log_file.write_text("\n".join(header))
 
     log_verbose("Starting nix-instantiate evaluation...", verbose)
-    
-    # Capture stderr to both log file and stderr for container visibility
-    try:
-        with output_file.open("w") as out:
-            proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, text=True)
-            
-            # Write stderr to log file
-            if proc.stderr:
-                with log_file.open("a") as err:
-                    err.write("\n--- STDERR ---\n")
-                    err.write(proc.stderr)
-                    err.write("\n--- END STDERR ---\n")
-                
-                # Also output to stderr for CloudWatch/container logs
-                log_error("nix-instantiate stderr output:")
-                for line in proc.stderr.strip().split('\n'):
-                    if line.strip():
-                        log_error(f"  {line}")
-            
-    except Exception as e:
-        log_error(f"Failed to run nix-instantiate: {e}")
-        return False
+    with output_file.open("w") as out, log_file.open("a") as err:
+        proc = subprocess.run(cmd, stdout=out, stderr=err, text=True)
 
     if proc.returncode == 0:
         log_info("Extraction completed successfully")
@@ -176,33 +157,30 @@ def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict
         log_info(f"Extracted dependencies for {pkg_count} packages")
         return True
     else:
-        log_error(f"Extraction failed with exit code {proc.returncode}")
-        log_error(f"Check log file for details: {log_file}")
-        if proc.stderr:
-            log_error("Last stderr output:")
-            for line in proc.stderr.strip().split('\n')[-10:]:  # Show last 10 lines
-                if line.strip():
-                    log_error(f"  {line}")
+        log_error(f"Extraction failed. Check log file: {log_file}")
         return False
 
 
 def process_output(script_dir: Path, out_dir: Path, verbose: bool) -> None:
     raw_file = out_dir / "dependencies_raw.json"
     processed_file = out_dir / "dependencies_processed.json"
-    if not _HAS_PROCESS_DEPS:
-        log_verbose("No processing module found, copying raw output", verbose)
+    proc_script = script_dir / "scripts" / "process-deps.py"
+
+    if proc_script.exists():
+        log_info("Processing raw output...")
+        cmd = [sys.executable or "python3", str(proc_script), str(raw_file), str(processed_file)]
+        log_verbose(f"Running: {' '.join(cmd)}", verbose)
+        try:
+            subprocess.run(cmd, check=True)
+            log_info(f"Processed output saved to: {processed_file}")
+        except subprocess.CalledProcessError:
+            log_error("Processing failed, but raw output is available")
+    else:
+        log_verbose("No processing script found, copying raw output", verbose)
         try:
             shutil.copy2(raw_file, processed_file)
         except Exception as e:
             log_error(f"Failed to copy raw output to processed: {e}")
-        return
-
-    try:
-        log_info("Processing raw output...")
-        _process_dependencies(raw_file, processed_file)
-        log_info(f"Processed output saved to: {processed_file}")
-    except Exception as e:
-        log_error(f"Processing failed, but raw output is available: {e}")
 
 
 def create_summary(out_dir: Path, nixpkgs_path: str, system: str, allow_unfree: bool) -> None:
@@ -318,7 +296,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Output raw JSON without processing",
     )
-    # --test mode removed: always evaluate full expression
+    parser.add_argument(
+        "--test",
+        dest="test_mode",
+        action="store_true",
+        help="Run with a small subset for testing",
+    )
 
     return parser.parse_args(argv)
 
@@ -339,7 +322,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = timestamp_dir(base_out)
     log_info(f"Created output directory: {out_dir}")
 
-    nix_file = script_dir / "extract-deps.nix"
+    nix_file = script_dir / ("test-working.nix" if args.test_mode else "extract-deps.nix")
     if not nix_file.exists():
         log_error(f"Nix expression not found: {nix_file}")
         return 1
@@ -363,6 +346,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         nixpkgs_path=nixpkgs_arg,
         system=system_value,
         allow_unfree=args.allow_unfree,
+        test_mode=args.test_mode,
         verbose=args.verbose,
     )
 
