@@ -1,1 +1,0 @@
-{"metadata": {"nixpkgs_version": "test"}, "packages": [{"id": "foo-1.0", "pname": "foo", "version": "1.0", "attrPath": "pkgs.foo", "buildInputs": ["/nix/store/abc123-hello-2.0"], "propagatedBuildInputs": []}, {"id": "bar-2.3", "pname": "bar", "version": "2.3", "attrPath": "pkgs.bar", "buildInputs": ["/nix/store/def456-python3.11-requests-2.28.1"], "propagatedBuildInputs": []}]}

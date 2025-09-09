@@ -79,35 +79,17 @@ class NixpkgsExtractor:
             shutil.rmtree(self.temp_dir)
     
     def _extract_dependencies_data(self) -> Dict[str, Any]:
-        """Extract dependency data using extract-dependencies.py module directly."""
-        output_dir = self.temp_dir / "deps_output"
-        
-        # Create arguments for the extract-dependencies module
-        args = [
-            "--nixpkgs", str(self.nixpkgs_path),
-            "--allow-unfree",
-            "--output", str(output_dir),
-            "--verbose"
-        ]
-        
+        """Extract dependency data via library API (no CLI)."""
         try:
-            logger.info("Running dependency extraction directly...")
-            result = extract_dependencies.main(args)
-            
-            if result != 0:
-                raise RuntimeError(f"Dependency extraction failed with exit code {result}")
-            
-            # Find the output file (should be in a timestamped directory)
-            output_files = list(output_dir.glob("*/dependencies_raw.json"))
-            if not output_files:
-                raise RuntimeError("No dependency output file found")
-            
-            with open(output_files[0]) as f:
-                data = json.load(f)
-                
+            logger.info("Extracting dependency data from nixpkgs using sharded evaluation...")
+            data = extract_dependencies.extract_dependencies_data(
+                nixpkgs=str(self.nixpkgs_path),
+                system=None,
+                allow_unfree=True,
+                verbose=True,
+            )
             logger.info("Successfully extracted dependencies data")
             return data
-            
         except Exception as e:
             logger.error("Dependency extraction failed: %s", str(e))
             raise RuntimeError(f"Dependency extraction failed: {str(e)}") from e

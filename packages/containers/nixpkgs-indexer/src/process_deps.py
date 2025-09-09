@@ -9,11 +9,11 @@ for better consumption by external tools.
 import json
 import re
 import sys
-import argparse
 from pathlib import Path
 from typing import Dict, List, Set, Any, Optional
 from collections import defaultdict
 import logging
+import datetime as _dt
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -173,6 +173,11 @@ def calculate_statistics(packages: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def is_sharded_data(raw_data: dict) -> bool:
+    """Check if the data is from sharded extraction"""
+    metadata = raw_data.get('metadata', {})
+    return metadata.get('extraction_method') == 'sharded'
+
 def process_dependencies(input_file: Path, output_file: Path) -> None:
     """Main processing function."""
     logger.info(f"Processing dependencies from {input_file}")
@@ -184,6 +189,12 @@ def process_dependencies(input_file: Path, output_file: Path) -> None:
     except Exception as e:
         logger.error(f"Failed to load input file: {e}")
         sys.exit(1)
+    
+    # Check if this is sharded data and handle accordingly
+    if is_sharded_data(raw_data):
+        logger.info("Processing sharded extraction data")
+    else:
+        logger.info("Processing monolithic extraction data")
     
     # Extract packages and metadata
     raw_packages = raw_data.get('packages', [])
@@ -210,17 +221,41 @@ def process_dependencies(input_file: Path, output_file: Path) -> None:
     # Sort packages by name for consistent output
     unique_packages.sort(key=lambda x: x['pname'])
     
-    # Create processed output
+    # Add processing timestamp
+    processing_timestamp = _dt.datetime.now().isoformat(timespec='seconds')
+    
+    # Create processed output with enhanced metadata for sharded data
+    processed_metadata = {
+        **metadata,
+        "processing": {
+            "processed_at": processing_timestamp,
+            "original_package_count": len(raw_packages),
+            "processed_package_count": len(processed_packages),
+            "unique_package_count": len(unique_packages)
+        }
+    }
+    
+    # Add shard-specific information if available
+    if is_sharded_data(raw_data):
+        shard_details = metadata.get('shard_details', {})
+        processed_metadata["sharding_info"] = {
+            "total_shards_processed": metadata.get('total_shards_processed', 0),
+            "shard_success_rate": f"{len(shard_details)}/{metadata.get('total_shards_processed', 0)}",
+            "shard_details": shard_details
+        }
+        
+        # Log shard statistics
+        logger.info(f"Sharded extraction details:")
+        logger.info(f"  Total shards processed: {metadata.get('total_shards_processed', 0)}")
+        logger.info(f"  Successful shards: {len(shard_details)}")
+        if shard_details:
+            total_shard_duration = sum(s.get('duration_seconds', 0) for s in shard_details.values())
+            logger.info(f"  Total processing time: {total_shard_duration:.1f}s")
+            avg_packages_per_shard = sum(s.get('package_count', 0) for s in shard_details.values()) / len(shard_details)
+            logger.info(f"  Average packages per shard: {avg_packages_per_shard:.1f}")
+    
     processed_data = {
-        "metadata": {
-            **metadata,
-            "processing": {
-                "processed_at": None,  # Could add timestamp here
-                "original_package_count": len(raw_packages),
-                "processed_package_count": len(processed_packages),
-                "unique_package_count": len(unique_packages)
-            }
-        },
+        "metadata": processed_metadata,
         "statistics": stats,
         "packages": unique_packages
     }
@@ -242,49 +277,21 @@ def process_dependencies(input_file: Path, output_file: Path) -> None:
     print(f"   📈 Max dependencies for one package: {stats['maxDependenciesPerPackage']}")
     print(f"   🏗️  Packages with no dependencies: {stats['packagesWithNoDependencies']}")
     
+    # Add sharded-specific summary
+    if is_sharded_data(raw_data):
+        shard_count = metadata.get('total_shards_processed', 0)
+        print(f"   🧩 Shards processed: {shard_count}")
+        if shard_count > 0:
+            success_rate = (len(metadata.get('shard_details', {})) / shard_count) * 100
+            print(f"   ✅ Shard success rate: {success_rate:.1f}%")
+    
     if stats['topDependencies']:
         print(f"\n🔝 Top 5 most depended-upon packages:")
         for name, count in stats['topDependencies'][:5]:
             print(f"   • {name}: {count} packages depend on it")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Process raw NixGraph dependency data into clean JSON"
-    )
-    parser.add_argument(
-        "input_file", 
-        type=Path,
-        help="Input JSON file from Nix evaluation"
-    )
-    parser.add_argument(
-        "output_file",
-        type=Path,
-        help="Output processed JSON file"
-    )
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable verbose logging"
-    )
-    
-    args = parser.parse_args()
-    
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-    # Validate input file
-    if not args.input_file.exists():
-        logger.error(f"Input file does not exist: {args.input_file}")
-        sys.exit(1)
-    
-    # Create output directory if it doesn't exist
-    args.output_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Process dependencies
-    process_dependencies(args.input_file, args.output_file)
-
-
-if __name__ == "__main__":
-    main()
-
+"""
+This module exposes a library function `process_dependencies(input_file, output_file)`
+and no longer provides a CLI entrypoint; call it from Python code.
+"""

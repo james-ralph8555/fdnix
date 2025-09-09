@@ -242,6 +242,8 @@ export class FdnixPipelineStack extends Stack {
       environment: {
         AWS_REGION: this.region,
         PROCESSING_MODE: 'both',
+        // Disable embedding generation in the pipeline by default
+        ENABLE_EMBEDDINGS: 'false',
         // Bedrock configuration
         BEDROCK_MODEL_ID: 'amazon.titan-embed-text-v2:0',
         BEDROCK_OUTPUT_DIMENSIONS: '256',

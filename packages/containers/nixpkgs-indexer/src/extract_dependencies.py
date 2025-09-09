@@ -8,8 +8,6 @@ evaluation, handles output/logs, and optionally post-processes the results.
 """
 
 from __future__ import annotations
-
-import argparse
 import datetime as _dt
 import json
 import os
@@ -17,13 +15,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
-try:
-    # Prefer a normal import of the processor module
-    from process_deps import process_dependencies as _process_dependencies
-    _HAS_PROCESS_DEPS = True
-except Exception:
-    _HAS_PROCESS_DEPS = False
+from typing import List, Optional, Dict, Any
+import time
+import tempfile
+
+# Always require the processor module; no silent fallbacks
+from process_deps import process_dependencies as _process_dependencies
 
 
 # ------------------------- Logging utilities -------------------------
@@ -82,6 +79,9 @@ def build_nix_cmd(
     system: Optional[str],
     allow_unfree: bool,
     verbose: bool,
+    shard: Optional[str] = None,
+    max_depth: int = 10,
+    allow_aliases: bool = False,
 ) -> List[str]:
     base = [
         "nix-instantiate",
@@ -111,6 +111,18 @@ def build_nix_cmd(
 
     # allowUnfree: boolean nix value
     cmd += ["--arg", "allowUnfree", "true" if allow_unfree else "false"]
+    
+    # allowAliases: boolean nix value (false helps avoid alias cycles)
+    cmd += ["--arg", "allowAliases", "true" if allow_aliases else "false"]
+    
+    # maxDepth: integer to limit recursion
+    cmd += ["--arg", "maxDepth", str(max_depth)]
+    
+    # shard: specific shard to process (null for shard listing)
+    if shard:
+        cmd += ["--argstr", "shard", shard]
+    else:
+        cmd += ["--arg", "shard", "null"]
 
     # Add verbose trace for easier debugging
     if verbose:
@@ -121,6 +133,23 @@ def build_nix_cmd(
     log_verbose(f"Built nix command: {' '.join(cmd)}", verbose)
     return cmd
 
+
+def setup_resource_limits(verbose: bool) -> None:
+    """Setup system resource limits to prevent crashes"""
+    import resource
+    
+    try:
+        # Set stack size to 16MB (default is usually 8MB)
+        stack_size = 16 * 1024 * 1024  # 16MB in bytes
+        resource.setrlimit(resource.RLIMIT_STACK, (stack_size, stack_size))
+        log_verbose(f"Set stack size limit to {stack_size // (1024*1024)}MB", verbose)
+        
+        # Get and log current limits
+        current_stack = resource.getrlimit(resource.RLIMIT_STACK)
+        log_verbose(f"Current stack limit: {current_stack[0] // (1024*1024)}MB", verbose)
+        
+    except Exception as e:
+        log_verbose(f"Failed to set resource limits: {e}", verbose)
 
 def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict, verbose: bool) -> bool:
     # Write header to log
@@ -136,6 +165,9 @@ def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict
     log_file.write_text("\n".join(header))
 
     log_verbose("Starting nix-instantiate evaluation...", verbose)
+    
+    # Set up resource limits before starting
+    setup_resource_limits(verbose)
     
     # Capture stderr to both log file and stderr for container visibility
     try:
@@ -186,23 +218,162 @@ def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict
         return False
 
 
+def discover_shards(nix_file: Path, nixpkgs_path: Optional[str], system: str, allow_unfree: bool, verbose: bool) -> List[str]:
+    """Discover available shards by calling the sharded Nix expression with shard=null"""
+    log_verbose("Discovering available shards...", verbose)
+    
+    cmd = build_nix_cmd(
+        nix_file=nix_file,
+        nixpkgs_path=nixpkgs_path,
+        system=system,
+        allow_unfree=allow_unfree,
+        verbose=verbose,
+        shard=None  # This will return the list of available shards
+    )
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data = json.loads(result.stdout)
+        shards = data.get('availableShards', [])
+        log_info(f"Discovered {len(shards)} shards: {', '.join(shards[:5])}{'...' if len(shards) > 5 else ''}")
+        return shards
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        log_error(f"Failed to discover shards: {e}")
+        # Return a minimal set of known-safe shards
+        return ['stdenv', 'coreutils', 'bash', 'gcc']
+
+def is_problematic_shard(shard_name: str) -> bool:
+    """Check if a shard is known to be problematic and should be processed with extra care"""
+    problematic_shards = {
+        'pythonPackages', 'python311Packages', 'python310Packages', 'python39Packages',
+        'haskellPackages', 'haskell', 'nodePackages', 'nodePackages_latest',
+        'rPackages', 'juliaPackages'
+    }
+    return shard_name in problematic_shards
+
+def process_shard(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str], 
+                 system: str, allow_unfree: bool, verbose: bool, 
+                 max_depth: int, allow_aliases: bool, out_dir: Path) -> Optional[Dict[str, Any]]:
+    """Process a single shard and return its data"""
+    log_info(f"Processing shard: {shard_name}")
+    
+    # Adjust parameters for problematic shards
+    if is_problematic_shard(shard_name):
+        log_verbose(f"Shard {shard_name} is problematic, using conservative settings", verbose)
+        max_depth = min(max_depth, 5)  # Reduce depth for problematic shards
+        allow_aliases = False  # Never allow aliases for problematic shards
+        timeout = 600  # 10 minute timeout for problematic shards
+    else:
+        timeout = 300  # 5 minute timeout for normal shards
+    
+    cmd = build_nix_cmd(
+        nix_file=nix_file,
+        nixpkgs_path=nixpkgs_path,
+        system=system,
+        allow_unfree=allow_unfree,
+        verbose=verbose,
+        shard=shard_name,
+        max_depth=max_depth,
+        allow_aliases=allow_aliases
+    )
+    
+    shard_file = out_dir / f"shard_{shard_name}.json"
+    shard_log = out_dir / f"shard_{shard_name}.log"
+    
+    # Set up logging for this shard
+    header = [
+        f"# Shard Processing Log: {shard_name}",
+        f"# Started: {_dt.datetime.now().isoformat(timespec='seconds')}",
+        f"# Command: {' '.join(cmd)}",
+        ""
+    ]
+    shard_log.write_text("\n".join(header))
+    
+    start_time = time.time()
+    try:
+        with shard_file.open("w") as out:
+            proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, 
+                                text=True, timeout=timeout)
+            
+        if proc.stderr:
+            with shard_log.open("a") as err:
+                err.write("\n--- STDERR ---\n")
+                err.write(proc.stderr)
+                err.write("\n--- END STDERR ---\n")
+        
+        if proc.returncode == 0:
+            # Load and return the shard data
+            with shard_file.open() as f:
+                shard_data = json.load(f)
+            
+            duration = time.time() - start_time
+            pkg_count = len(shard_data.get('packages', []))
+            log_info(f"Shard {shard_name} completed in {duration:.1f}s: {pkg_count} packages")
+            return shard_data
+        else:
+            log_error(f"Shard {shard_name} failed with exit code {proc.returncode}")
+            if proc.stderr:
+                log_verbose(f"Shard {shard_name} stderr: {proc.stderr[-200:]}", verbose)
+            return None
+            
+    except subprocess.TimeoutExpired:
+        log_error(f"Shard {shard_name} timed out after {timeout//60} minutes")
+        return None
+    except Exception as e:
+        log_error(f"Shard {shard_name} failed with exception: {e}")
+        return None
+
+def combine_shard_results(shard_results: List[Dict[str, Any]], out_dir: Path) -> Dict[str, Any]:
+    """Combine results from multiple shards into a single dataset"""
+    all_packages = []
+    shard_metadata = {}
+    
+    for shard_data in shard_results:
+        packages = shard_data.get('packages', [])
+        metadata = shard_data.get('metadata', {})
+        shard_name = metadata.get('shard_name', 'unknown')
+        
+        all_packages.extend(packages)
+        shard_metadata[shard_name] = {
+            'package_count': len(packages),
+            'duration_seconds': metadata.get('shard_duration_seconds', 0),
+            'extraction_timestamp': metadata.get('extraction_timestamp', '')
+        }
+    
+    # Remove duplicates across shards
+    seen_ids = set()
+    unique_packages = []
+    for pkg in all_packages:
+        pkg_id = pkg.get('id')
+        if pkg_id and pkg_id not in seen_ids:
+            unique_packages.append(pkg)
+            seen_ids.add(pkg_id)
+    
+    log_info(f"Combined {len(all_packages)} packages from shards into {len(unique_packages)} unique packages")
+    
+    # Use metadata from first shard as base, update with combined info
+    base_metadata = shard_results[0].get('metadata', {}) if shard_results else {}
+    combined_metadata = {
+        **base_metadata,
+        'extraction_method': 'sharded',
+        'total_shards_processed': len(shard_results),
+        'total_packages': len(unique_packages),
+        'shard_details': shard_metadata,
+        'extraction_timestamp': str(int(time.time()))
+    }
+    
+    return {
+        'metadata': combined_metadata,
+        'packages': unique_packages
+    }
+
 def process_output(script_dir: Path, out_dir: Path, verbose: bool) -> None:
     raw_file = out_dir / "dependencies_raw.json"
     processed_file = out_dir / "dependencies_processed.json"
-    if not _HAS_PROCESS_DEPS:
-        log_verbose("No processing module found, copying raw output", verbose)
-        try:
-            shutil.copy2(raw_file, processed_file)
-        except Exception as e:
-            log_error(f"Failed to copy raw output to processed: {e}")
-        return
-
-    try:
-        log_info("Processing raw output...")
-        _process_dependencies(raw_file, processed_file)
-        log_info(f"Processed output saved to: {processed_file}")
-    except Exception as e:
-        log_error(f"Processing failed, but raw output is available: {e}")
+    log_info("Processing raw output...")
+    # Let exceptions propagate; do not silently copy or swallow errors
+    _process_dependencies(raw_file, processed_file)
+    log_info(f"Processed output saved to: {processed_file}")
 
 
 def create_summary(out_dir: Path, nixpkgs_path: str, system: str, allow_unfree: bool) -> None:
@@ -256,135 +427,175 @@ def create_summary(out_dir: Path, nixpkgs_path: str, system: str, allow_unfree: 
         pass
 
 
-# ------------------------- CLI -------------------------
+# ------------------------- In-memory orchestration API -------------------------
 
 
-def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    # Defaults from environment (matching the bash script semantics)
-    env_nixpkgs = os.environ.get("NIXPKGS_PATH", "<nixpkgs>")
-    env_output = os.environ.get("OUTPUT_DIR", "./output")
-    env_verbose = os.environ.get("VERBOSE", "false").lower() == "true"
-    env_allow_unfree = os.environ.get("ALLOW_UNFREE", "false").lower() == "true"
+def prioritize_shards(shards: List[str]) -> List[str]:
+    """Prioritize shards to process safe ones first, problematic ones last"""
+    safe_shards = []
+    normal_shards = []
+    problematic_shards = []
+    
+    for shard in shards:
+        if shard in {'stdenv', 'coreutils', 'bash', 'gcc'}:
+            safe_shards.append(shard)
+        elif is_problematic_shard(shard):
+            problematic_shards.append(shard)
+        else:
+            normal_shards.append(shard)
+    
+    # Process in order: safe -> normal -> problematic
+    return safe_shards + normal_shards + problematic_shards
 
-    parser = argparse.ArgumentParser(
-        prog="extract-dependencies.py",
-        description=(
-            "NixGraph Dependency Extractor (Python)\n\n"
-            "Extract runtime dependency information from nixpkgs packages without building them."
-        ),
-        formatter_class=argparse.RawTextHelpFormatter,
+def run_sharded_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict, verbose: bool,
+                          nix_file: Path, nixpkgs_path: Optional[str], system: str, 
+                          allow_unfree: bool, out_dir: Path) -> bool:
+    """Run sharded extraction instead of monolithic extraction"""
+    log_info("Starting sharded extraction...")
+    
+    # Check if we should use sharded approach
+    sharded_nix_file = nix_file.parent / "extract-deps-sharded.nix"
+    if not sharded_nix_file.exists():
+        log_error(f"Sharded Nix file not found: {sharded_nix_file}")
+        return False
+    
+    # Discover available shards
+    shards = discover_shards(
+        nix_file=sharded_nix_file,
+        nixpkgs_path=nixpkgs_path,
+        system=system,
+        allow_unfree=allow_unfree,
+        verbose=verbose
     )
+    
+    if not shards:
+        log_error("No shards discovered")
+        return False
+    
+    # Prioritize shard processing order
+    prioritized_shards = prioritize_shards(shards)
+    log_info(f"Processing {len(prioritized_shards)} shards in priority order")
+    
+    # Set up resource limits
+    setup_resource_limits(verbose)
+    
+    # Process each shard
+    successful_shards = []
+    failed_shards = []
+    
+    for i, shard_name in enumerate(prioritized_shards, 1):
+        log_info(f"[{i}/{len(prioritized_shards)}] Processing shard: {shard_name}")
+        shard_result = process_shard(
+            shard_name=shard_name,
+            nix_file=sharded_nix_file,
+            nixpkgs_path=nixpkgs_path,
+            system=system,
+            allow_unfree=allow_unfree,
+            verbose=verbose,
+            max_depth=10,
+            allow_aliases=False,  # Safer default
+            out_dir=out_dir
+        )
+        
+        if shard_result:
+            successful_shards.append(shard_result)
+        else:
+            failed_shards.append(shard_name)
+            log_error(f"Shard {shard_name} failed, continuing with others...")
+            # If too many shards are failing, something might be wrong
+            if len(failed_shards) > len(prioritized_shards) // 2:
+                log_error(f"More than half of shards have failed ({len(failed_shards)}/{len(prioritized_shards)}), stopping")
+                break
+    
+    if not successful_shards:
+        log_error("All shards failed")
+        return False
+    
+    log_info(f"Extraction completed: {len(successful_shards)} successful, {len(failed_shards)} failed")
+    if failed_shards:
+        log_info(f"Failed shards: {', '.join(failed_shards)}")
+    
+    # Combine results
+    log_info(f"Combining results from {len(successful_shards)} successful shards...")
+    combined_data = combine_shard_results(successful_shards, out_dir)
+    
+    # Save combined results
+    try:
+        with output_file.open("w") as f:
+            json.dump(combined_data, f, indent=2)
+        log_info(f"Combined results saved to: {output_file}")
+        log_info(f"Total packages extracted: {len(combined_data.get('packages', []))}")
+        return True
+    except Exception as e:
+        log_error(f"Failed to save combined results: {e}")
+    return False
 
-    parser.add_argument(
-        "-p",
-        "--nixpkgs",
-        dest="nixpkgs",
-        default=env_nixpkgs,
-        help="Path to nixpkgs (default: <nixpkgs>)",
-    )
-    parser.add_argument(
-        "-s",
-        "--system",
-        dest="system",
-        default=os.environ.get("SYSTEM"),
-        help="Target system (default: current system)",
-    )
-    parser.add_argument(
-        "-u",
-        "--allow-unfree",
-        dest="allow_unfree",
-        action="store_true",
-        default=env_allow_unfree,
-        help="Allow unfree packages",
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        dest="output_dir",
-        default=env_output,
-        help="Output directory (default: ./output)",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        dest="verbose",
-        action="store_true",
-        default=env_verbose,
-        help="Verbose output",
-    )
-    parser.add_argument(
-        "--raw",
-        dest="raw_only",
-        action="store_true",
-        help="Output raw JSON without processing",
-    )
-    # --test mode removed: always evaluate full expression
+def extract_dependencies_data(
+    *,
+    nixpkgs: Optional[str] = None,
+    system: Optional[str] = None,
+    allow_unfree: bool = False,
+    verbose: bool = False,
+    max_depth: int = 10,
+    allow_aliases: bool = False,
+) -> Dict[str, Any]:
+    """Library API: extract dependency data via sharded evaluation only.
 
-    return parser.parse_args(argv)
-
-
-def main(argv: Optional[List[str]] = None) -> int:
-    args = parse_args(argv)
-
+    This avoids any CLI entrypoints and file-based contract for callers that
+    import this module. Monolithic extraction is intentionally not supported.
+    """
     script_dir = Path(__file__).resolve().parent
 
-    # Check dependencies early
+    setup_resource_limits(verbose)
     which_required(["nix-instantiate", "nix"])  # matches bash check
 
-    # Determine system default if not provided
-    system_value = args.system or current_system(args.verbose)
+    system_value = system or current_system(verbose)
 
-    # Compose output dir
-    base_out = Path(args.output_dir)
-    out_dir = timestamp_dir(base_out)
-    log_info(f"Created output directory: {out_dir}")
-
-    nix_file = script_dir / "extract-deps.nix"
-    if not nix_file.exists():
-        log_error(f"Nix expression not found: {nix_file}")
-        return 1
-
-    # nixpkgs path handling: for CLI -p we mirror bash behavior by realpathing
     nixpkgs_arg: Optional[str]
-    if args.nixpkgs and not (args.nixpkgs.startswith("<") and args.nixpkgs.endswith(">")):
-        nixpkgs_arg = str(Path(args.nixpkgs).resolve())
+    if nixpkgs and not (nixpkgs.startswith("<") and nixpkgs.endswith(">")):
+        nixpkgs_arg = str(Path(nixpkgs).resolve())
     else:
-        nixpkgs_arg = args.nixpkgs
+        nixpkgs_arg = nixpkgs or os.environ.get("NIXPKGS_PATH", "<nixpkgs>")
 
-    log_verbose(f"Nixpkgs path: {nixpkgs_arg}", args.verbose)
-    log_verbose(f"System: {system_value}", args.verbose)
-    log_verbose(f"Allow unfree: {str(args.allow_unfree).lower()}", args.verbose)
+    # Use sharded nix file exclusively
+    sharded_nix = script_dir / "extract-deps-sharded.nix"
+    if not sharded_nix.exists():
+        raise RuntimeError(f"Sharded Nix file not found: {sharded_nix}")
 
-    output_file = out_dir / "dependencies_raw.json"
-    log_file = out_dir / "extraction.log"
-
-    cmd = build_nix_cmd(
-        nix_file=nix_file,
+    # Discover and prioritize shards
+    shards = discover_shards(
+        nix_file=sharded_nix,
         nixpkgs_path=nixpkgs_arg,
         system=system_value,
-        allow_unfree=args.allow_unfree,
-        verbose=args.verbose,
+        allow_unfree=allow_unfree,
+        verbose=verbose,
     )
+    prioritized = prioritize_shards(shards)
 
-    meta = {
-        "nixpkgs_path": nixpkgs_arg,
-        "system": system_value,
-        "allow_unfree": args.allow_unfree,
-    }
+    out_dir = Path(tempfile.mkdtemp(prefix="nixgraph_shards_"))
+    successful: List[Dict[str, Any]] = []
+    failed: List[str] = []
 
-    ok = run_extraction(cmd, output_file, log_file, meta, args.verbose)
-    if not ok:
-        return 1
+    for shard in prioritized:
+        shard_data = process_shard(
+            shard,
+            sharded_nix,
+            nixpkgs_arg,
+            system_value,
+            allow_unfree,
+            verbose,
+            max_depth,
+            allow_aliases,
+            out_dir,
+        )
+        if shard_data:
+            successful.append(shard_data)
+        else:
+            failed.append(shard)
+            if len(failed) > len(prioritized) // 2:
+                break
 
-    if not args.raw_only:
-        process_output(script_dir, out_dir, args.verbose)
+    if not successful:
+        raise RuntimeError("Sharded extraction failed for all shards")
 
-    create_summary(out_dir, nixpkgs_arg or "<nixpkgs>", system_value, args.allow_unfree)
-
-    log_info("Extraction completed")
-    log_info(f"All outputs saved to: {out_dir}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    return combine_shard_results(successful, out_dir)
