@@ -270,25 +270,25 @@ def process_dependencies(input_file: Path, output_file: Path) -> None:
         sys.exit(1)
     
     # Print summary
-    print(f"\n📊 Processing Summary:")
-    print(f"   📦 Total packages: {stats['totalPackages']}")
-    print(f"   🔗 Total dependency relations: {stats['totalDependencyRelations']}")
-    print(f"   🎯 Average dependencies per package: {stats['averageDependenciesPerPackage']}")
-    print(f"   📈 Max dependencies for one package: {stats['maxDependenciesPerPackage']}")
-    print(f"   🏗️  Packages with no dependencies: {stats['packagesWithNoDependencies']}")
+    logger.info(f"\n📊 Processing Summary:")
+    logger.info(f"   📦 Total packages: {stats['totalPackages']}")
+    logger.info(f"   🔗 Total dependency relations: {stats['totalDependencyRelations']}")
+    logger.info(f"   🎯 Average dependencies per package: {stats['averageDependenciesPerPackage']}")
+    logger.info(f"   📈 Max dependencies for one package: {stats['maxDependenciesPerPackage']}")
+    logger.info(f"   🏗️  Packages with no dependencies: {stats['packagesWithNoDependencies']}")
     
     # Add sharded-specific summary
     if is_sharded_data(raw_data):
         shard_count = metadata.get('total_shards_processed', 0)
-        print(f"   🧩 Shards processed: {shard_count}")
+        logger.info(f"   🧩 Shards processed: {shard_count}")
         if shard_count > 0:
             success_rate = (len(metadata.get('shard_details', {})) / shard_count) * 100
-            print(f"   ✅ Shard success rate: {success_rate:.1f}%")
+            logger.info(f"   ✅ Shard success rate: {success_rate:.1f}%")
     
     if stats['topDependencies']:
-        print(f"\n🔝 Top 5 most depended-upon packages:")
+        logger.info(f"\n🔝 Top 5 most depended-upon packages:")
         for name, count in stats['topDependencies'][:5]:
-            print(f"   • {name}: {count} packages depend on it")
+            logger.info(f"   • {name}: {count} packages depend on it")
 
 
 """

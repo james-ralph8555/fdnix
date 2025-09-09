@@ -10,6 +10,7 @@ evaluation, handles output/logs, and optionally post-processes the results.
 from __future__ import annotations
 import datetime as _dt
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -22,20 +23,23 @@ import tempfile
 # Always require the processor module; no silent fallbacks
 from process_deps import process_dependencies as _process_dependencies
 
+# Setup logger
+logger = logging.getLogger("fdnix.extract-dependencies")
+
 
 # ------------------------- Logging utilities -------------------------
 
 def log_info(msg: str) -> None:
-    print(f"[INFO] {msg}", file=sys.stderr)
+    logger.info(msg)
 
 
 def log_error(msg: str) -> None:
-    print(f"[ERROR] {msg}", file=sys.stderr)
+    logger.error(msg)
 
 
 def log_verbose(msg: str, verbose: bool) -> None:
     if verbose:
-        print(f"[VERBOSE] {msg}", file=sys.stderr)
+        logger.debug(msg)
 
 
 # ------------------------- Helpers -------------------------
@@ -422,7 +426,10 @@ def create_summary(out_dir: Path, nixpkgs_path: str, system: str, allow_unfree: 
     log_info(f"Summary saved to: {summary_file}")
     # Display summary
     try:
-        print(summary_file.read_text())
+        logger.info("NixGraph Dependency Extraction Summary:")
+        for line in lines:
+            if line.strip():
+                logger.info(line)
     except Exception:
         pass
 
