@@ -170,28 +170,54 @@ impl LanceDBClient {
         let table = self.table.as_ref()
             .ok_or(LanceDBClientError::NotInitialized)?;
 
-        if self.embeddings_enabled && query_embedding.is_some() && !query_embedding.unwrap().is_empty() {
-            // True hybrid search mode using LanceDB's built-in hybrid search
+        // Determine search strategy based on available data
+        let has_embeddings = self.embeddings_enabled && query_embedding.is_some() && !query_embedding.unwrap().is_empty();
+        let has_text_query = !params.query.is_empty();
+
+        if has_embeddings && has_text_query {
+            // True hybrid search mode using both vector and FTS
             results.search_type = "hybrid".to_string();
             
             let query_vec: Vec<f32> = query_embedding.unwrap().iter().map(|&x| x as f32).collect();
             
-            let search_results = table
+            match table
                 .query()
-                .full_text_search(FullTextSearchQuery::new(params.query.clone()))
                 .nearest_to(query_vec)?
                 .distance_type(DistanceType::Cosine)
+                .full_text_search(FullTextSearchQuery::new(params.query.clone()))
                 .limit(params.limit as usize)
-                .execute_hybrid(QueryExecutionOptions::default())
-                .await?;
-
-            let batches: Vec<RecordBatch> = search_results.try_collect().await?;
-            results.packages = self.arrow_batches_to_packages(batches)?;
-        } else {
-            // FTS-only search mode
+                .execute()
+                .await 
+            {
+                Ok(search_results) => {
+                    let batches: Vec<RecordBatch> = search_results.try_collect().await?;
+                    results.packages = self.arrow_batches_to_packages(batches)?;
+                }
+                Err(e) => {
+                    warn!("Hybrid search failed, falling back to individual searches: {}", e);
+                    // Fallback to separate vector and FTS searches, then merge
+                    let vector_results = self.vector_search(query_embedding.unwrap(), params.limit / 2).await?;
+                    let fts_results = self.fts_search(&params.query, params.limit / 2).await?;
+                    
+                    // Simple merge by interleaving results
+                    results.packages = self.merge_search_results(vector_results.packages, fts_results.packages);
+                    results.search_type = "hybrid_fallback".to_string();
+                }
+            }
+        } else if has_embeddings && !has_text_query {
+            // Vector-only search mode
+            results.search_type = "vector".to_string();
+            let vector_results = self.vector_search(query_embedding.unwrap(), params.limit).await?;
+            results.packages = vector_results.packages;
+        } else if has_text_query {
+            // FTS-only search mode when embeddings are not available
             results.search_type = "fts".to_string();
             let fts_results = self.fts_search(&params.query, params.limit).await?;
             results.packages = fts_results.packages;
+        } else {
+            // No valid search criteria provided
+            warn!("No valid search criteria provided (no text query or embeddings)");
+            results.search_type = "empty".to_string();
         }
 
         // Apply filters
@@ -288,6 +314,8 @@ impl LanceDBClient {
             return Ok(results);
         }
 
+        // FTS search across indexed text columns 
+        // The index includes: package_id, package_name, attribute_path, description, long_description, main_program
         let search_results = table
             .query()
             .full_text_search(FullTextSearchQuery::new(query.to_owned()))
@@ -397,6 +425,41 @@ impl LanceDBClient {
             all_packages.append(&mut packages);
         }
         Ok(all_packages)
+    }
+
+    fn merge_search_results(&self, mut vector_packages: Vec<Package>, mut fts_packages: Vec<Package>) -> Vec<Package> {
+        // Simple interleaving merge strategy for hybrid fallback
+        // In production, you might want more sophisticated ranking fusion (RRF, etc.)
+        let mut merged = Vec::new();
+        let mut v_idx = 0;
+        let mut f_idx = 0;
+        
+        // Interleave results, prioritizing higher relevance scores
+        while v_idx < vector_packages.len() && f_idx < fts_packages.len() {
+            if vector_packages[v_idx].relevance_score >= fts_packages[f_idx].relevance_score {
+                merged.push(vector_packages[v_idx].clone());
+                v_idx += 1;
+            } else {
+                merged.push(fts_packages[f_idx].clone());
+                f_idx += 1;
+            }
+        }
+        
+        // Add remaining results
+        while v_idx < vector_packages.len() {
+            merged.push(vector_packages[v_idx].clone());
+            v_idx += 1;
+        }
+        while f_idx < fts_packages.len() {
+            merged.push(fts_packages[f_idx].clone());
+            f_idx += 1;
+        }
+        
+        // Remove duplicates based on package_id
+        let mut seen = std::collections::HashSet::new();
+        merged.retain(|pkg| seen.insert(pkg.package_id.clone()));
+        
+        merged
     }
 
     fn arrow_to_packages(&self, batch: RecordBatch) -> Result<Vec<Package>, LanceDBClientError> {

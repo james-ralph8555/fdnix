@@ -58,22 +58,27 @@ class EmbeddingGenerator:
         except (FileNotFoundError, ValueError) as e:
             raise RuntimeError("Expected 'packages' table not found in LanceDB. Run metadata phase first.") from e
 
-        # Get all packages data
-        if force_rebuild:
-            # Force rebuild: process all packages regardless of has_embedding status
-            # Use head with count_rows to get all data (workaround for to_pandas limit)
-            row_count = table.count_rows()
-            if limit:
-                row_count = min(row_count, limit)
-            df = table.head(row_count).to_pandas()
-        else:
+        # Get all packages data using direct table scan instead of vector search
+        # This approach is much more reliable than using dummy vector searches
+        logger.info(f"Fetching packages to embed (force_rebuild={force_rebuild}, limit={limit})")
+        
+        # Convert entire table to pandas for reliable filtering
+        df = table.to_pandas()
+        total_rows = len(df)
+        logger.info(f"Loaded {total_rows} total packages from database")
+        
+        if not force_rebuild:
             # Incremental: process packages that need embeddings
-            # Use vector search with where clause (need a dummy vector for search API)
-            dummy_vector = [0.0] * 256  # Match the vector dimension
-            query = table.search(dummy_vector).where("has_embedding = false")
-            if limit:
-                query = query.limit(limit)
-            df = query.to_pandas()
+            # Filter for packages without embeddings using pandas boolean indexing
+            df = df[df['has_embedding'] == False]
+            logger.info(f"Found {len(df)} packages without embeddings")
+        else:
+            logger.info(f"Force rebuild enabled - processing all {len(df)} packages")
+        
+        # Apply limit if specified
+        if limit:
+            df = df.head(limit)
+            logger.info(f"Limited to {len(df)} packages for processing")
         
         # Convert to list of dictionaries
         out: List[Dict[str, Any]] = []
@@ -89,6 +94,8 @@ class EmbeddingGenerator:
                         # keep as-is if not valid JSON
                         pass
             out.append(rec)
+        
+        logger.info(f"Prepared {len(out)} packages for embedding generation")
         return out
 
     def insert_embeddings(self, table: lancedb.table.Table, rows: List[Tuple[str, list]]) -> None:
@@ -116,7 +123,8 @@ class EmbeddingGenerator:
         try:
             logger.info(f"Creating vector index (partitions={self.vector_index_partitions}, sub_vectors={self.vector_index_sub_vectors})")
             
-            # Create IVF-PQ index on vector column
+            # Create IVF-PQ index on vector column with optimal defaults
+            # For 256-dimension vectors with cosine distance for semantic search
             table.create_index(
                 "vector",
                 index_type="IVF_PQ",
@@ -128,7 +136,19 @@ class EmbeddingGenerator:
             logger.info("Vector index created successfully")
         except Exception as e:
             logger.error("Failed to create vector index: %s", e)
-            # Don't raise - vector index is optional
+            # Try without distance_type parameter in case of version compatibility issues
+            try:
+                logger.info("Retrying index creation without distance_type parameter...")
+                table.create_index(
+                    "vector",
+                    index_type="IVF_PQ", 
+                    num_partitions=self.vector_index_partitions,
+                    num_sub_vectors=self.vector_index_sub_vectors
+                )
+                logger.info("Vector index created successfully (without distance_type)")
+            except Exception as e2:
+                logger.error("Failed to create vector index on retry: %s", e2)
+                # Don't raise - vector index is optional for functionality
 
     def create_embedding_text(self, package: Dict[str, Any]) -> str:
         """Create a text representation of the package for embedding"""

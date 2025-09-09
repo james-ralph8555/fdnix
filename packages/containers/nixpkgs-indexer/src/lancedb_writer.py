@@ -159,20 +159,30 @@ class LanceDBWriter:
             # Get table schema to check which fields exist
             schema = self._table.schema
             available_fields = [field.name for field in schema]
+            logger.debug("Available fields in table: %s", available_fields)
             
-            # Create FTS index on text fields that actually exist
-            potential_fts_fields = ["package_id", "package_name", "attribute_path", "description", "long_description", "main_program"]
+            # Create FTS index on text fields that actually exist - prioritized for search relevance
+            potential_fts_fields = [
+                "package_name",      # Most important for name searches
+                "description",       # Key for content searches
+                "long_description",  # Extended content
+                "attribute_path",    # Important for Nix attribute searches
+                "main_program",      # Executable names
+                "package_id"         # Full identifiers
+            ]
             fts_fields = [field for field in potential_fts_fields if field in available_fields]
             
             if not fts_fields:
                 logger.warning("No suitable text fields found for FTS index")
+                logger.warning("Available fields: %s", available_fields)
+                logger.warning("Attempted fields: %s", potential_fts_fields)
                 return
             
             logger.info("Creating FTS index on fields: %s (stopwords=%s, stemmer=%s)", 
                        fts_fields, stopwords, stemmer or "<none>")
             
             # LanceDB's native FTS index creation (Lance-based, not tantivy)
-            # Index all relevant fields for comprehensive search
+            # Index all relevant fields for comprehensive hybrid search
             self._table.create_fts_index(fts_fields, use_tantivy=False)
             
             logger.info("FTS index created successfully")
@@ -194,7 +204,7 @@ class LanceDBWriter:
             logger.info("Creating vector index (partitions=%d, sub_vectors=%d)", 
                        num_partitions, num_sub_vectors)
             
-            # Create IVF-PQ index on vector column
+            # Create IVF-PQ index on vector column with cosine distance for semantic search
             self._table.create_index(
                 "vector",
                 index_type="IVF_PQ",
@@ -206,7 +216,19 @@ class LanceDBWriter:
             logger.info("Vector index created successfully")
         except Exception as e:
             logger.error("Failed to create vector index: %s", e)
-            # Don't raise - vector index is optional
+            # Try without distance_type parameter in case of version compatibility issues
+            try:
+                logger.info("Retrying index creation without distance_type parameter...")
+                self._table.create_index(
+                    "vector",
+                    index_type="IVF_PQ",
+                    num_partitions=num_partitions,
+                    num_sub_vectors=num_sub_vectors
+                )
+                logger.info("Vector index created successfully (without distance_type)")
+            except Exception as e2:
+                logger.error("Failed to create vector index on retry: %s", e2)
+                # Don't raise - vector index is optional for functionality
 
     def _package_id(self, p: Dict[str, Any]) -> str:
         # Prefer attributePath, fallback to name@version

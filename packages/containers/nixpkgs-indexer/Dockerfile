@@ -29,6 +29,10 @@ ENV PYTHONUNBUFFERED=1
 ENV AWS_REGION=us-east-1
 ENV PROCESSING_MODE=both
 
+# Lance Core thread configuration to prevent CPU reservation warnings
+ENV LANCE_CPU_THREADS=1
+ENV LANCE_IO_THREADS=4
+
 # Define the entry point for the container.
 # We can now call python directly since all dependencies were installed
 # into the default Nix profile, which is already on the PATH.
