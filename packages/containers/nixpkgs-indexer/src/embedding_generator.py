@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Tuple
 import lancedb
 import pandas as pd
 from botocore.exceptions import ClientError
-from bedrock_client import BedrockBatchClient, BedrockIndividualClient
+from bedrock_client import BedrockClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,19 +17,14 @@ class EmbeddingGenerator:
     def __init__(self):
         self.validate_environment()
         
-        # Initialize both batch and individual clients
-        self.bedrock_batch_client = BedrockBatchClient(
+        # Initialize Bedrock client
+        self.bedrock_client = BedrockClient(
             region=os.environ.get('AWS_REGION'),
             model_id=os.environ.get('BEDROCK_MODEL_ID')
         )
-        self.bedrock_individual_client = BedrockIndividualClient(
-            region=os.environ.get('AWS_REGION'),
-            model_id=os.environ.get('BEDROCK_MODEL_ID')
-        )
-        self.use_batch_api = True  # Start with batch, fall back to individual if needed
         
-        # Use Bedrock batch size for processing (up to 50,000)
-        self.batch_size = int(os.environ.get('BEDROCK_BATCH_SIZE', '10000'))
+        # Process packages in smaller batches for better rate limiting
+        self.batch_size = int(os.environ.get('PROCESSING_BATCH_SIZE', '100'))
         self.max_text_length = 8192  # Titan Text v2 supports up to 8,192 tokens
         # LanceDB + artifact settings (operate on the main database)
         self.lancedb_path = os.environ.get('LANCEDB_PATH', '/out/fdnix-data.lancedb').strip()
@@ -43,13 +38,9 @@ class EmbeddingGenerator:
 
     def validate_environment(self):
         """Validate required environment variables"""
-        required_vars = [
-            'BEDROCK_ROLE_ARN'
-        ]
-        
-        missing_vars = [var for var in required_vars if not os.environ.get(var)]
-        if missing_vars:
-            raise ValueError(f"Missing required environment variables: {', '.join(missing_vars)}")
+        # No longer require batch-related environment variables
+        # AWS credentials and region are handled by boto3's standard credential chain
+        pass
 
     # -----------------------
     # LanceDB helpers
@@ -244,7 +235,7 @@ class EmbeddingGenerator:
         
         Returns: (processed_count, reused_count) 
         """
-        logger.info(f"Processing Bedrock batch of {len(packages)} packages...")
+        logger.info(f"Processing batch of {len(packages)} packages...")
         
         # Separate packages that can reuse embeddings vs need new ones
         packages_need_embedding = []
@@ -313,16 +304,7 @@ class EmbeddingGenerator:
                 logger.info(f"Generating embeddings for {len(texts)} new/changed texts...")
                 texts_with_ids = [(pkg_id, text) for pkg_id, text in zip(new_package_ids, texts)]
                 
-                if self.use_batch_api:
-                    try:
-                        embeddings_with_ids = await self.bedrock_batch_client.generate_embeddings_batch(texts_with_ids)
-                    except Exception as e:
-                        logger.error(f"Batch embedding generation failed: {e}")
-                        logger.info("Falling back to individual API...")
-                        self.use_batch_api = False
-                        embeddings_with_ids = await self.bedrock_individual_client.generate_embeddings_batch(texts_with_ids)
-                else:
-                    embeddings_with_ids = await self.bedrock_individual_client.generate_embeddings_batch(texts_with_ids)
+                embeddings_with_ids = await self.bedrock_client.generate_embeddings_batch(texts_with_ids)
                 
                 # Convert to list indexed by original order
                 embeddings_dict = {record_id: embedding for record_id, embedding in embeddings_with_ids}
@@ -359,7 +341,7 @@ class EmbeddingGenerator:
                 logger.error(f"Error processing batch: {str(error)}")
                 return processed_count, reused_count
         
-        logger.info(f"Successfully processed Bedrock batch: {len(packages_need_embedding)} new, {reused_count} reused")
+        logger.info(f"Successfully processed batch: {len(packages_need_embedding)} new, {reused_count} reused")
         return processed_count, reused_count
 
     async def run(self, force_rebuild: bool = False):
@@ -367,15 +349,10 @@ class EmbeddingGenerator:
         logger.info("Starting fdnix embedding generation process...")
         
         try:
-            # Test Bedrock access first - try batch, then individual
+            # Test Bedrock access
             logger.info("Validating Bedrock model access...")
-            if self.use_batch_api and self.bedrock_batch_client.validate_model_access():
-                logger.info("Batch API model access validated successfully")
-            elif self.bedrock_individual_client.validate_model_access():
-                logger.info("Individual API model access validated successfully")
-                if self.use_batch_api:
-                    logger.info("Falling back to individual API due to batch API access issues")
-                    self.use_batch_api = False
+            if self.bedrock_client.validate_model_access():
+                logger.info("Bedrock model access validated successfully")
             else:
                 raise RuntimeError("Cannot access Bedrock model. Check IAM permissions and model availability.")
             
@@ -435,14 +412,14 @@ class EmbeddingGenerator:
                 batch = candidates[i:i + self.batch_size]
                 batch_num = i//self.batch_size + 1
                 total_batches = (total_packages + self.batch_size - 1)//self.batch_size
-                logger.info(f"Processing Bedrock batch {batch_num}/{total_batches} ({len(batch)} packages)")
+                logger.info(f"Processing batch {batch_num}/{total_batches} ({len(batch)} packages)")
                 
                 try:
                     batch_processed, batch_reused = await self.process_packages_batch(batch)
                     total_processed += batch_processed
                     total_reused += batch_reused
                     
-                    logger.info(f"Bedrock batch {batch_num} complete: {total_processed}/{total_packages} total, "
+                    logger.info(f"Batch {batch_num} complete: {total_processed}/{total_packages} total, "
                                f"{batch_processed - batch_reused} new embeddings, "
                                f"{total_reused} reused from cache")
                 except Exception as e:

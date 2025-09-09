@@ -30,11 +30,57 @@ export class FdnixPipelineStack extends Stack {
 
     const { databaseStack } = props;
 
-    // Create VPC for Fargate tasks
+    // Create VPC for Fargate tasks with $0/hr configuration
+    // 
+    // This configuration eliminates hourly charges by:
+    // - Using public subnets only (no NAT Gateway: saves ~$45/month)  
+    // - Gateway VPC endpoints for S3/DynamoDB (no hourly fees, no data transfer costs)
+    // - Public IP assignment for internet access to other AWS services
+    // - Security group restricting egress to HTTPS only for security
     const vpc = new ec2.Vpc(this, 'PipelineVpc', {
       maxAzs: 2,
-      natGateways: 1,
+      natGateways: 0, // $0/hr: No NAT Gateway
+      subnetConfiguration: [
+        {
+          name: 'Public',
+          subnetType: ec2.SubnetType.PUBLIC,
+          cidrMask: 24,
+        },
+        // No private subnets to avoid NAT Gateway requirement
+      ],
     });
+
+    // Add Gateway VPC Endpoints for $0/hr AWS service access
+    // S3 Gateway endpoint - no hourly charges, no data transfer costs
+    vpc.addGatewayEndpoint('S3GatewayEndpoint', {
+      service: ec2.GatewayVpcEndpointAwsService.S3,
+    });
+
+    // DynamoDB Gateway endpoint - no hourly charges, no data transfer costs  
+    vpc.addGatewayEndpoint('DynamoDbGatewayEndpoint', {
+      service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+    });
+
+    // Security Group for Fargate tasks - HTTPS egress only
+    const fargateSecurityGroup = new ec2.SecurityGroup(this, 'FargateSecurityGroup', {
+      vpc,
+      description: 'Security group for Fargate tasks with HTTPS egress only',
+      allowAllOutbound: false, // Explicitly deny all outbound by default
+    });
+
+    // Allow HTTPS (443) outbound traffic only - for AWS APIs, Bedrock, etc.
+    fargateSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS outbound for AWS services'
+    );
+
+    // Allow HTTP (80) for package downloads (Nix, pip, etc.) - can be removed if not needed
+    fargateSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(80),
+      'HTTP outbound for package downloads'
+    );
 
     // ECS Cluster
     this.cluster = new ecs.Cluster(this, 'ProcessingCluster', {
@@ -132,28 +178,16 @@ export class FdnixPipelineStack extends Stack {
     fargateTaskRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
-        'bedrock:CreateModelInvocationJob',
-        'bedrock:GetModelInvocationJob',
-        'bedrock:StopModelInvocationJob',
-        'bedrock:ListModelInvocationJobs',
+        'bedrock:InvokeModel', // Standard API for individual embedding requests
         'bedrock:ListFoundationModels',
       ],
-      resources: ['*'], // Bedrock batch jobs require wildcard permissions
+      resources: [
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+        '*', // ListFoundationModels requires wildcard
+      ],
     }));
 
-    // Grant permission to pass the Bedrock batch role
-    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'iam:PassRole',
-      ],
-      resources: [this.bedrockBatchRole.roleArn],
-      conditions: {
-        StringEquals: {
-          'iam:PassedToService': 'bedrock.amazonaws.com',
-        },
-      },
-    }));
+    // No longer need batch role passing since we use standard API
 
     // Grant Lambda layer publishing permissions using safe ARN handling
     const dbLayerParts = Arn.split(databaseStack.databaseLayer.layerVersionArn, ArnFormat.COLON_RESOURCE_NAME);
@@ -211,12 +245,11 @@ export class FdnixPipelineStack extends Stack {
         // Bedrock configuration
         BEDROCK_MODEL_ID: 'amazon.titan-embed-text-v2:0',
         BEDROCK_OUTPUT_DIMENSIONS: '256',
-        BEDROCK_BATCH_SIZE: '50000',
-        BEDROCK_ROLE_ARN: this.bedrockBatchRole.roleArn,
+        BEDROCK_MAX_RPM: '600', // Account service quota
+        BEDROCK_MAX_TOKENS_PER_MINUTE: '300000', // Account service quota
+        PROCESSING_BATCH_SIZE: '100', // Smaller batches for better rate limiting
         // S3 configuration
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
-        BEDROCK_INPUT_BUCKET: databaseStack.artifactsBucket.bucketName,
-        BEDROCK_OUTPUT_BUCKET: databaseStack.artifactsBucket.bucketName,
         // Dual database configuration
         LANCEDB_DATA_KEY: 'snapshots/fdnix-data.lancedb',        // Main database with all metadata
         LANCEDB_MINIFIED_KEY: 'snapshots/fdnix.lancedb',        // Minified database for Lambda layer
@@ -225,9 +258,6 @@ export class FdnixPipelineStack extends Stack {
         // Layer publish configuration
         PUBLISH_LAYER: 'true',
         LAYER_ARN: dbLayerUnversionedArn,
-        // Batch job polling configuration
-        BEDROCK_POLL_INTERVAL: '60',                           // Poll every 60 seconds
-        BEDROCK_MAX_WAIT_TIME: '7200',                         // Max 2 hours per batch job
       },
     });
 
@@ -236,8 +266,12 @@ export class FdnixPipelineStack extends Stack {
       integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
       cluster: this.cluster,
       taskDefinition: this.nixpkgsIndexerTaskDefinition,
-      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget(),
-      assignPublicIp: true,
+      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
+        platformVersion: ecs.FargatePlatformVersion.LATEST,
+      }),
+      assignPublicIp: true, // Required for public subnet access to AWS services
+      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
+      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
     });
 
     // Define the simplified state machine (single indexer task; layer publish moved into container)

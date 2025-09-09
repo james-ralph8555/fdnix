@@ -5,6 +5,7 @@ import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as path from 'path';
+import * as fs from 'fs';
 import { FdnixDatabaseStack } from './database-stack';
 
 export interface FdnixSearchApiStackProps extends StackProps {
@@ -20,6 +21,24 @@ export class FdnixSearchApiStack extends Stack {
     super(scope, id, props);
 
     const { databaseStack } = props;
+
+    // Validate that search-lambda build artifacts exist
+    const lambdaFilesPath = path.join(__dirname, '../../search-lambda/result/lambda-files');
+    const lambdaBootstrap = path.join(lambdaFilesPath, 'bootstrap');
+    
+    if (!fs.existsSync(lambdaFilesPath)) {
+      throw new Error(
+        `Search Lambda build artifacts not found at ${lambdaFilesPath}. ` +
+        'Please run "cd packages/search-lambda && nix build .#lambda-package" before deploying the search API stack.'
+      );
+    }
+
+    if (!fs.existsSync(lambdaBootstrap)) {
+      throw new Error(
+        `Search Lambda bootstrap binary not found at ${lambdaBootstrap}. ` +
+        'Please run "cd packages/search-lambda && nix build .#lambda-package" to build the lambda deployment package.'
+      );
+    }
 
     // IAM role for Lambda execution
     this.lambdaExecutionRole = new iam.Role(this, 'LambdaExecutionRole', {
@@ -56,7 +75,7 @@ export class FdnixSearchApiStack extends Stack {
         LANCEDB_PATH: '/opt/fdnix/fdnix.lancedb',
         BEDROCK_MODEL_ID: bedrockModelId,
         BEDROCK_OUTPUT_DIMENSIONS: '256',
-        ENABLE_EMBEDDINGS: 'true', // Set to 'false' for FTS-only mode
+        ENABLE_EMBEDDINGS: 'false', // Set to 'true' for hybrid mode when embeddings available
       },
     });
 

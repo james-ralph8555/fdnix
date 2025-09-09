@@ -6,6 +6,7 @@ import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as path from 'path';
+import * as fs from 'fs';
 import { FdnixSearchApiStack } from './search-api-stack';
 
 export interface FdnixFrontendStackProps extends StackProps {
@@ -21,6 +22,15 @@ export class FdnixFrontendStack extends Stack {
     super(scope, id, props);
 
     const { searchApiStack } = props;
+
+    // Validate that frontend build exists
+    const frontendDistPath = path.join(__dirname, '../../frontend/dist');
+    if (!fs.existsSync(frontendDistPath)) {
+      throw new Error(
+        `Frontend build not found at ${frontendDistPath}. ` +
+        'Please run "cd packages/frontend && npm run build" before deploying the frontend stack.'
+      );
+    }
 
     // S3 bucket for static site hosting (CDK-managed for idempotency)
     this.hostingBucket = new s3.Bucket(this, 'FrontendHostingBucket', {

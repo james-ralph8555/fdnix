@@ -51,11 +51,13 @@ class LanceDBWriter:
         s3_bucket: Optional[str] = None,
         s3_key: Optional[str] = None,
         region: Optional[str] = None,
+        clear_before_upload: bool = True,
     ) -> None:
         self.output_path = Path(output_path)
         self.s3_bucket = s3_bucket
         self.s3_key = s3_key
         self.region = region
+        self.clear_before_upload = clear_before_upload
         self._db = None
         self._table = None
 
@@ -123,6 +125,7 @@ class LanceDBWriter:
                 "license": json.dumps(p.get("license")) if p.get("license") is not None else "",
                 "platforms": json.dumps(p.get("platforms")) if p.get("platforms") is not None else "",
                 "maintainers": json.dumps(p.get("maintainers")) if p.get("maintainers") is not None else "",
+                "category": p.get("category") or "",
                 "broken": bool(p.get("broken", False)),
                 "unfree": bool(p.get("unfree", False)),
                 "available": bool(p.get("available", True)),
@@ -133,7 +136,8 @@ class LanceDBWriter:
                 "outputs_to_install": json.dumps(p.get("outputsToInstall")) if p.get("outputsToInstall") is not None else "",
                 "last_updated": p.get("lastUpdated") or "",
                 "has_embedding": bool(p.get("hasEmbedding", False)),
-                "content_hash": int(p.get("content_hash", 0)),
+                # Be tolerant of None/empty values
+                "content_hash": int(p.get("content_hash") or 0),
                 "vector": p.get("vector", [0.0] * 256)  # Default to zero vector if no embedding
             }
             
@@ -213,6 +217,32 @@ class LanceDBWriter:
         ver = (p.get("version") or "").strip()
         return f"{name}@{ver}" if name or ver else "unknown"
 
+    def _delete_s3_objects(self, bucket: str, prefix: str) -> None:
+        """Delete all objects with given prefix from S3 bucket."""
+        if boto3 is None:
+            logger.error("boto3 not available for S3 deletion")
+            return
+            
+        try:
+            s3 = boto3.client("s3", region_name=self.region)
+            response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+            
+            if 'Contents' in response:
+                objects = [{'Key': obj['Key']} for obj in response['Contents']]
+                if objects:
+                    logger.info("Deleting %d objects from s3://%s/%s", len(objects), bucket, prefix)
+                    s3.delete_objects(
+                        Bucket=bucket,
+                        Delete={'Objects': objects}
+                    )
+                    logger.info("Successfully deleted %d objects", len(objects))
+                else:
+                    logger.info("No objects found to delete at s3://%s/%s", bucket, prefix)
+            else:
+                logger.info("No objects found to delete at s3://%s/%s", bucket, prefix)
+        except Exception as e:
+            logger.warning("Failed to delete S3 objects at %s/%s: %s", bucket, prefix, e)
+
     def _upload_to_s3(self) -> None:
         if not (self.region and self.s3_bucket and self.s3_key):
             logger.info("S3 upload not configured; skipping.")
@@ -228,6 +258,11 @@ class LanceDBWriter:
             self.s3_key,
             self.region,
         )
+        
+        # Clear existing objects if requested
+        if self.clear_before_upload:
+            logger.info("Clearing existing objects before upload...")
+            self._delete_s3_objects(self.s3_bucket, self.s3_key)
         
         # Upload the entire LanceDB directory
         s3 = boto3.client("s3", region_name=self.region)
