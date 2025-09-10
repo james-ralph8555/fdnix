@@ -65,7 +65,7 @@ Vector index tuning (embedding/minified phases):
 
 ### "metadata"
 1. Clones nixpkgs (shallow, `release-25.05` by default) and evaluates metadata and dependency info without building.
-2. Extracts dependency relationships using `nix-instantiate` over `src/extract-deps.nix` (captures `buildInputs` and `propagatedBuildInputs`).
+2. Extracts dependency relationships using `nix-instantiate` over `src/extract-deps-sharded.nix` (captures `buildInputs` and `propagatedBuildInputs`) using a sharded evaluation strategy.
 3. Creates the main LanceDB dataset (`fdnix-data.lancedb`) with complete metadata and a `dependencies` table.
 4. Uploads the dataset directory to S3 when `ARTIFACTS_BUCKET` and `LANCEDB_DATA_KEY` are provided; when `DEPENDENCY_S3_KEY` is set, also uploads a comprehensive dependency JSON.
 
@@ -90,7 +90,7 @@ Vector index tuning (embedding/minified phases):
 ## How It Works
 
 - Nixpkgs clone: Shallow clone of `NixOS/nixpkgs` (branch `release-25.05`) into a temp directory for evaluation only.
-- Dependencies: `nix-instantiate` evaluates `src/extract-deps.nix` to read `buildInputs` and `propagatedBuildInputs` for all derivations, without building.
+- Dependencies: `nix-instantiate` evaluates `src/extract-deps-sharded.nix` to read `buildInputs` and `propagatedBuildInputs` for all derivations, without building.
 - Metadata: `nix-env -qaP --json --meta -f <cloned nixpkgs>` extracts package metadata; results are merged with dependency info.
 - Storage: Writes a LanceDB dataset with a `packages` table and a `dependencies` table; optional comprehensive dependency JSON can also be uploaded to S3.
 - Indexes: Uses LanceDB-native full-text search for text fields and IVF-PQ for vectors when embeddings exist.

@@ -11,7 +11,8 @@
 }:
 
 let
-  lib = import "${nixpkgs}/lib";
+  # Import lib from the nixpkgs path (treat nixpkgs as a path, not a string)
+  lib = import (nixpkgs + "/lib");
   
   # Safely convert any value to string, falling back to "unknown"
   toStringOrUnknown = v:
@@ -118,13 +119,12 @@ let
         in if extracted != null then [extracted] else []
       else if lib.isAttrs value then
         let
-          shouldRecurse = value.recurseForDerivations or false;
+          # For language package sets, they should always recurse even without recurseForDerivations
+          shouldRecurse = value.recurseForDerivations or true; # Changed to default true
           children = builtins.removeAttrs value ["recurseForDerivations"];
           childAttrs = lib.attrNames children;
-          # Limit number of children to prevent explosion
-          limitedAttrs = if lib.length childAttrs > 1000 
-                        then lib.take 1000 childAttrs 
-                        else childAttrs;
+          # No longer limiting children - we want all packages
+          limitedAttrs = childAttrs;
         in
         if shouldRecurse then
           lib.concatMap 
@@ -138,73 +138,249 @@ let
         else []
       else [];
 
-  # Define known shards to process
-  knownShards = {
-    # Core packages - usually safe and fast
-    "stdenv" = pkgs.stdenv or {};
-    "coreutils" = pkgs.coreutils or {};
-    "bash" = pkgs.bash or {};
-    "gcc" = pkgs.gcc or {};
-    
-    # Language ecosystems - these are the problematic ones we're sharding
-    "pythonPackages" = pkgs.python3Packages or {};
-    "python311Packages" = pkgs.python311Packages or {};
-    "python310Packages" = pkgs.python310Packages or {};
-    "python39Packages" = pkgs.python39Packages or {};
-    
-    "haskellPackages" = pkgs.haskellPackages or {};
-    "haskell" = pkgs.haskell.packages.ghc94 or {};
-    
-    "nodePackages" = pkgs.nodePackages or {};
-    "nodePackages_latest" = pkgs.nodePackages_latest or {};
-    
-    "perlPackages" = pkgs.perlPackages or {};
-    "rubyPackages" = pkgs.rubyPackages or {};
-    "phpPackages" = pkgs.php82Packages or {};
-    
-    "rPackages" = pkgs.rPackages or {};
-    "juliaPackages" = pkgs.julia.pkgs or {};
-    
-    # Development tools
-    "gitAndTools" = pkgs.gitAndTools or {};
-    "linuxPackages" = pkgs.linuxPackages or {};
-    
-    # Desktop environments
-    "gnome" = pkgs.gnome or {};
-    "kde" = pkgs.kdePackages or {};
-    "xorg" = pkgs.xorg or {};
-    
-    # Servers and databases
-    "postgresql" = pkgs.postgresql or {};
-    "mysql" = pkgs.mysql80 or {};
-    "nginx" = pkgs.nginx or {};
-    
-    # System libraries
-    "gst_all_1" = pkgs.gst_all_1 or {};
-    "llvmPackages" = pkgs.llvmPackages or {};
-    "qt6" = pkgs.qt6 or {};
-    "gtk3" = pkgs.gtk3 or {};
-  };
+  # Helper function to create sub-shards from large package sets
+  createSubShards = packageSet: prefixChar:
+    let
+      allAttrs = lib.attrNames packageSet;
+      # Filter attributes that start with the prefix character (case-insensitive)
+      matchingAttrs = lib.filter 
+        (name: 
+          let firstChar = lib.toLower (lib.substring 0 1 name);
+          in firstChar == lib.toLower prefixChar)
+        allAttrs;
+      # Create a new attribute set with only matching packages
+      subShard = lib.genAttrs matchingAttrs (name: packageSet.${name});
+    in subShard;
+
+  # Helper to create alphabetical sub-shards for very large package sets
+  createAlphabeticalSubShards = packageSet: ranges:
+    lib.listToAttrs (map (range:
+      let
+        rangeName = builtins.replaceStrings ["-"] ["_"] range;
+        startChar = lib.substring 0 1 range;
+        endChar = lib.substring 2 1 range;
+        allAttrs = lib.attrNames packageSet;
+        matchingAttrs = lib.filter 
+          (name: 
+            let firstChar = lib.toLower (lib.substring 0 1 name);
+                startLower = lib.toLower startChar;
+                endLower = lib.toLower endChar;
+            in firstChar >= startLower && firstChar <= endLower)
+          allAttrs;
+        subShard = lib.genAttrs matchingAttrs (name: packageSet.${name});
+      in {
+        name = rangeName;
+        value = subShard;
+      }) ranges);
+
+  # Dynamic shard discovery - traverse nixpkgs to find all package collections
+  discoverAllShards = 
+    let
+      # Build a comprehensive set of known package collections from nixpkgs
+      # This is more reliable than complex recursive discovery
+      
+      # Core single packages
+      corePackages = {
+        "stdenv" = pkgs.stdenv or {};
+        "coreutils" = pkgs.coreutils or {};  
+        "bash" = pkgs.bash or {};
+        "gcc" = pkgs.gcc or {};
+        "glibc" = pkgs.glibc or {};
+        "binutils" = pkgs.binutils or {};
+        "findutils" = pkgs.findutils or {};
+        "diffutils" = pkgs.diffutils or {};
+        "gnused" = pkgs.gnused or {};
+        "gawk" = pkgs.gawk or {};
+        "gnutar" = pkgs.gnutar or {};
+        "gzip" = pkgs.gzip or {};
+        "bzip2" = pkgs.bzip2 or {};
+        "xz" = pkgs.xz or {};
+        "curl" = pkgs.curl or {};
+        "wget" = pkgs.wget or {};
+        "git" = pkgs.git or {};
+      };
+      
+      # Language-specific package collections
+      languagePackages = {
+        # Python packages
+        "pythonPackages" = pkgs.python3Packages or pkgs.pythonPackages or {};
+        "python311Packages" = pkgs.python311Packages or {};
+        "python310Packages" = pkgs.python310Packages or {};
+        "python39Packages" = pkgs.python39Packages or {};
+        "python312Packages" = pkgs.python312Packages or {};
+        
+        # Node packages
+        "nodePackages" = pkgs.nodePackages or {};
+        "nodePackages_latest" = pkgs.nodePackages_latest or {};
+        
+        # Other language packages  
+        "perlPackages" = pkgs.perlPackages or {};
+        "rubyPackages" = pkgs.rubyPackages or {};
+        "phpPackages" = pkgs.php82Packages or {};
+        "rPackages" = pkgs.rPackages or {};
+        "juliaPackages" = if pkgs ? julia then (pkgs.julia.pkgs or {}) else {};
+        "luaPackages" = pkgs.luaPackages or {};
+        "ocamlPackages" = pkgs.ocamlPackages or {};
+        "rustPackages" = pkgs.rustPackages or {};
+        "goPackages" = pkgs.goPackages or {};
+      };
+      
+      # Haskell packages - split alphabetically to avoid stack overflow
+      haskellShards = if pkgs ? haskellPackages && pkgs.haskellPackages != {} then
+        lib.mapAttrs' (subName: subValue: {
+          name = "haskellPackages_${subName}";
+          value = subValue;
+        }) (createAlphabeticalSubShards pkgs.haskellPackages ["a-d" "e-h" "i-l" "m-p" "q-t" "u-z"])
+      else {};
+      
+      # Desktop environments and window managers
+      desktopPackages = {
+        "gnome" = pkgs.gnome or {};
+        "gnomeExtensions" = pkgs.gnomeExtensions or {};
+        "kde" = pkgs.kdePackages or {};
+        "plasma5Packages" = pkgs.plasma5Packages or {};
+        "xfce" = pkgs.xfce or {};
+        "lxqt" = pkgs.lxqt or {};
+        "mate" = pkgs.mate or {};
+        "pantheon" = pkgs.pantheon or {};
+        "enlightenment" = pkgs.enlightenment or {};
+        "xorg" = pkgs.xorg or {};
+        "wayland" = pkgs.wayland or {};
+      };
+      
+      # System and hardware packages
+      systemPackages = {
+        "linuxPackages" = pkgs.linuxPackages or {};
+        "linuxPackages_latest" = pkgs.linuxPackages_latest or {};
+        "firmwareLinuxNonfree" = pkgs.firmwareLinuxNonfree or {};
+        "udev" = pkgs.udev or {};
+        "systemd" = pkgs.systemd or {};
+        "dbus" = pkgs.dbus or {};
+        "polkit" = pkgs.polkit or {};
+        "networkmanager" = pkgs.networkmanager or {};
+        "bluez" = pkgs.bluez or {};
+        "pulseaudio" = pkgs.pulseaudio or {};
+        "pipewire" = pkgs.pipewire or {};
+        "alsa-lib" = pkgs."alsa-lib" or {};
+      };
+      
+      # Development tools and libraries
+      developmentPackages = {
+        "buildPackages" = pkgs.buildPackages or {};
+        "pkgsCross" = pkgs.pkgsCross or {};
+        "llvmPackages" = pkgs.llvmPackages or {};
+        "llvmPackages_latest" = pkgs.llvmPackages_latest or {};
+        "gccStdenv" = pkgs.gccStdenv or {};
+        "clangStdenv" = pkgs.clangStdenv or {};
+        "cmake" = pkgs.cmake or {};
+        "meson" = pkgs.meson or {};
+        "ninja" = pkgs.ninja or {};
+        "pkgconfig" = pkgs.pkgconfig or {};
+        "autoconf" = pkgs.autoconf or {};
+        "automake" = pkgs.automake or {};
+        "libtool" = pkgs.libtool or {};
+      };
+      
+      # Graphics and multimedia libraries
+      graphicsPackages = {
+        "gst_all_1" = pkgs.gst_all_1 or {};
+        "ffmpeg" = pkgs.ffmpeg or {};
+        "mesa" = pkgs.mesa or {};
+        "vulkan-loader" = pkgs."vulkan-loader" or {};
+        "opengl" = pkgs.opengl or {};
+        "xwayland" = pkgs.xwayland or {};
+        "cairo" = pkgs.cairo or {};
+        "pango" = pkgs.pango or {};
+        "gdk-pixbuf" = pkgs."gdk-pixbuf" or {};
+        "gtk3" = pkgs.gtk3 or {};
+        "gtk4" = pkgs.gtk4 or {};
+        "qt5" = pkgs.qt5 or {};
+        "qt6" = pkgs.qt6 or {};
+      };
+      
+      # Server software
+      serverPackages = {
+        "nginx" = pkgs.nginx or {};
+        "apache-httpd" = pkgs."apache-httpd" or {};
+        "postgresql" = pkgs.postgresql or {};
+        "mysql" = pkgs.mysql80 or {};
+        "mariadb" = pkgs.mariadb or {};
+        "sqlite" = pkgs.sqlite or {};
+        "redis" = pkgs.redis or {};
+        "mongodb" = pkgs.mongodb or {};
+        "elasticsearch" = pkgs.elasticsearch or {};
+        "docker" = pkgs.docker or {};
+        "podman" = pkgs.podman or {};
+      };
+      
+      # Gaming
+      gamingPackages = {
+        "steam" = pkgs.steam or {};
+        "wine" = pkgs.wine or {};
+        "lutris" = pkgs.lutris or {};
+        "gamemode" = pkgs.gamemode or {};
+      };
+      
+      # Try to discover top-level categories dynamically as fallback
+      discoverTopLevel =
+        let
+          topLevelNames = lib.attrNames pkgs;
+          # Only include true package collections, not individual derivations
+          # Heuristics:
+          #  - must be an attrset AND NOT a derivation
+          #  - should opt-in to recursion (recurseForDerivations = true)
+          #  - have a reasonable number of members (avoid tiny helper sets)
+          isCollection = value:
+            let
+              evaluated = builtins.tryEval value;
+            in evaluated.success && lib.isAttrs evaluated.value && !lib.isDerivation evaluated.value &&
+               (evaluated.value.recurseForDerivations or false) &&
+               (lib.length (lib.attrNames (builtins.removeAttrs evaluated.value ["recurseForDerivations"])) >= 20);
+          candidateCollections = lib.filter (name: isCollection (pkgs.${name} or {})) topLevelNames;
+          discoveredCollections = lib.genAttrs candidateCollections (name: pkgs.${name} or {});
+        in discoveredCollections;
+      
+    in 
+    corePackages // 
+    languagePackages // 
+    haskellShards // 
+    desktopPackages // 
+    systemPackages // 
+    developmentPackages // 
+    graphicsPackages // 
+    serverPackages // 
+    gamingPackages // 
+    discoverTopLevel;
+
+  # Generate all available shards dynamically
+  allShards = discoverAllShards;
 
   # Process specific shard or list available shards
   processedData = 
     if shard == null then
       # List available shards
+      let
+        shardNames = lib.attrNames allShards;
+        totalShards = lib.length shardNames;
+        # Add debug trace to show discovery results
+        discoveryTrace = builtins.trace "[DISCOVERY] Found ${toString totalShards} shards dynamically" true;
+      in
       {
-        availableShards = lib.attrNames knownShards;
+        availableShards = shardNames;
         metadata = {
           nixpkgs_version = lib.version or "unknown";
           system = system;
           allow_unfree = allowUnfree;
           allow_aliases = allowAliases;
-          total_shards = lib.length (lib.attrNames knownShards);
+          total_shards = totalShards;
+          discovery_method = "dynamic";
         };
       }
-    else if !lib.hasAttr shard knownShards then
+    else if !lib.hasAttr shard allShards then
       # Invalid shard specified
       {
         error = "Invalid shard specified: ${shard}";
-        availableShards = lib.attrNames knownShards;
+        availableShards = lib.attrNames allShards;
       }
     else
       # Process the specified shard
@@ -212,7 +388,9 @@ let
         startTime = builtins.currentTime;
         startTrace = builtins.trace "[SHARD-START] Processing shard: ${shard}" true;
         
-        shardAttrSet = knownShards.${shard};
+        shardAttrSet = allShards.${shard};
+        # Debug trace to see if the shard exists and has attributes
+        debugTrace = builtins.trace "[SHARD-DEBUG] Shard ${shard} exists: ${toString (shardAttrSet != null)}, isAttrs: ${toString (lib.isAttrs shardAttrSet)}, attrCount: ${toString (lib.length (lib.attrNames shardAttrSet))}" true;
         packages = collectDerivationsInShard shardAttrSet shard maxDepth [];
         validPackages = lib.filter (pkg: pkg != null && pkg.pname != null) packages;
         
@@ -240,6 +418,7 @@ let
           allow_unfree = allowUnfree;
           allow_aliases = allowAliases;
           max_depth = maxDepth;
+          discovery_method = "dynamic";
         };
         packages = uniquePackages;
       };

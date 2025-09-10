@@ -62,11 +62,13 @@ def current_system(verbose: bool) -> str:
     ]
     log_verbose(f"Detecting current system via: {' '.join(cmd)}", verbose)
     try:
-        res = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        return res.stdout.strip().strip('"')
+        res = subprocess.run(cmd, check=True, capture_output=True)
+        stdout_text = res.stdout.decode('utf-8', errors='replace')
+        return stdout_text.strip().strip('"')
     except subprocess.CalledProcessError as e:
         log_error("Failed to detect current system")
-        log_error(e.stderr.strip())
+        stderr_text = e.stderr.decode('utf-8', errors='replace')
+        log_error(stderr_text.strip())
         sys.exit(1)
 
 
@@ -101,13 +103,12 @@ def build_nix_cmd(
     if nixpkgs_path:
         value = nixpkgs_path
         if value.startswith("<") and value.endswith(">"):
-            # Let default parameter <nixpkgs> stand, or pass the literal path expr
-            # Passing as an expression is fine (not a string)
+            # Pass the angle-bracket path expression directly (e.g. <nixpkgs>)
             cmd += ["--arg", "nixpkgs", value]
         else:
-            # Pass as a plain string so import "${nixpkgs}/lib" works without store context
+            # Pass as a Nix path value, not a string, so 'import nixpkgs' works
             abs_path = str(Path(value).resolve())
-            cmd += ["--argstr", "nixpkgs", abs_path]
+            cmd += ["--arg", "nixpkgs", abs_path]
 
     # system: use --argstr to avoid manual quoting
     if system:
@@ -138,15 +139,31 @@ def build_nix_cmd(
     return cmd
 
 
-def setup_resource_limits(verbose: bool) -> None:
+def setup_resource_limits(verbose: bool, memory_intensive: bool = False) -> None:
     """Setup system resource limits to prevent crashes"""
     import resource
     
     try:
-        # Set stack size to 16MB (default is usually 8MB)
-        stack_size = 16 * 1024 * 1024  # 16MB in bytes
+        # Set stack size - larger for memory intensive shards
+        if memory_intensive:
+            stack_size = 32 * 1024 * 1024  # 32MB for memory intensive shards
+        else:
+            stack_size = 16 * 1024 * 1024  # 16MB for normal shards
+        
         resource.setrlimit(resource.RLIMIT_STACK, (stack_size, stack_size))
-        log_verbose(f"Set stack size limit to {stack_size // (1024*1024)}MB", verbose)
+        log_verbose(f"Set stack size limit to {stack_size // (1024*1024)}MB (memory_intensive={memory_intensive})", verbose)
+        
+        # Try to increase virtual memory limit if possible
+        try:
+            current_vmem = resource.getrlimit(resource.RLIMIT_AS)
+            if current_vmem[0] != resource.RLIM_INFINITY:
+                # Increase virtual memory to 8GB for memory intensive shards
+                if memory_intensive:
+                    new_vmem = min(8 * 1024 * 1024 * 1024, current_vmem[1])  # 8GB or max allowed
+                    resource.setrlimit(resource.RLIMIT_AS, (new_vmem, current_vmem[1]))
+                    log_verbose(f"Set virtual memory limit to {new_vmem // (1024*1024*1024)}GB", verbose)
+        except (OSError, ValueError) as e:
+            log_verbose(f"Could not adjust virtual memory limit: {e}", verbose)
         
         # Get and log current limits
         current_stack = resource.getrlimit(resource.RLIMIT_STACK)
@@ -173,23 +190,24 @@ def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict
     # Set up resource limits before starting
     setup_resource_limits(verbose)
     
-    # Capture stderr to both log file and stderr for container visibility
+    # Write output directly to file, capture only stderr
     try:
-        with output_file.open("w") as out:
-            proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, text=True)
+        with output_file.open("wb") as out, log_file.open("a") as err_log:
+            proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE)
             
-            # Write stderr to log file
+            # Write stderr to log file if present
             if proc.stderr:
-                with log_file.open("a") as err:
-                    err.write("\n--- STDERR ---\n")
-                    err.write(proc.stderr)
-                    err.write("\n--- END STDERR ---\n")
+                stderr_text = proc.stderr.decode('utf-8', errors='replace')
+                err_log.write("\n--- STDERR ---\n")
+                err_log.write(stderr_text)
+                err_log.write("\n--- END STDERR ---\n")
                 
-                # Also output to stderr for CloudWatch/container logs
-                log_error("nix-instantiate stderr output:")
-                for line in proc.stderr.strip().split('\n'):
-                    if line.strip():
-                        log_error(f"  {line}")
+                # Also output to logger for CloudWatch/container logs
+                if stderr_text.strip():
+                    log_error("nix-instantiate stderr output:")
+                    for line in stderr_text.strip().split('\n'):
+                        if line.strip():
+                            log_error(f"  {line}")
             
     except Exception as e:
         log_error(f"Failed to run nix-instantiate: {e}")
@@ -200,8 +218,14 @@ def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict
         log_info(f"Raw output saved to: {output_file}")
         # Try to show basic stats
         try:
-            with output_file.open() as f:
-                data = json.load(f)
+            with output_file.open('rb') as f:
+                raw_data = f.read()
+            # Decode with error handling
+            try:
+                json_text = raw_data.decode('utf-8')
+            except UnicodeDecodeError:
+                json_text = raw_data.decode('utf-8', errors='replace')
+            data = json.loads(json_text)
             pkg_count = (
                 (len(data.get("packages", [])))
                 if isinstance(data, dict)
@@ -214,11 +238,6 @@ def run_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict
     else:
         log_error(f"Extraction failed with exit code {proc.returncode}")
         log_error(f"Check log file for details: {log_file}")
-        if proc.stderr:
-            log_error("Last stderr output:")
-            for line in proc.stderr.strip().split('\n')[-10:]:  # Show last 10 lines
-                if line.strip():
-                    log_error(f"  {line}")
         return False
 
 
@@ -236,24 +255,83 @@ def discover_shards(nix_file: Path, nixpkgs_path: Optional[str], system: str, al
     )
     
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        data = json.loads(result.stdout)
+        result = subprocess.run(cmd, capture_output=True, check=True)
+        # Decode stdout with error handling
+        stdout_text = result.stdout.decode('utf-8', errors='replace')
+        data = json.loads(stdout_text)
         shards = data.get('availableShards', [])
-        log_info(f"Discovered {len(shards)} shards: {', '.join(shards[:5])}{'...' if len(shards) > 5 else ''}")
+        # Show all shards without truncation as requested
+        if len(shards) <= 10:
+            log_info(f"Discovered {len(shards)} shards: {', '.join(shards)}")
+        else:
+            log_info(f"Discovered {len(shards)} shards:")
+            for i, shard in enumerate(shards):
+                log_info(f"  [{i+1:2d}] {shard}")
         return shards
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
-        log_error(f"Failed to discover shards: {e}")
+    except subprocess.CalledProcessError as e:
+        log_error("Failed to discover shards: nix-instantiate exited non-zero")
+        if e.stderr:
+            stderr_text = e.stderr.decode('utf-8', errors='replace')
+            log_error("nix-instantiate stderr (discovery):")
+            for line in stderr_text.strip().splitlines():
+                if line.strip():
+                    log_error(f"  {line}")
+        if e.stdout:
+            try:
+                stdout_text = e.stdout.decode('utf-8', errors='replace')
+                preview = stdout_text.strip()[:500]
+                if preview:
+                    log_verbose(f"stdout preview: {preview}", verbose)
+            except Exception:
+                pass
         # Return a minimal set of known-safe shards
+        return ['stdenv', 'coreutils', 'bash', 'gcc']
+    except json.JSONDecodeError as e:
+        log_error(f"Failed to parse shard discovery JSON: {e}")
         return ['stdenv', 'coreutils', 'bash', 'gcc']
 
 def is_problematic_shard(shard_name: str) -> bool:
     """Check if a shard is known to be problematic and should be processed with extra care"""
     problematic_shards = {
         'pythonPackages', 'python311Packages', 'python310Packages', 'python39Packages',
-        'haskellPackages', 'haskell', 'nodePackages', 'nodePackages_latest',
-        'rPackages', 'juliaPackages'
+        'haskellPackages', 'haskellPackages_a_d', 'haskellPackages_e_h', 'haskellPackages_i_l',
+        'haskellPackages_m_p', 'haskellPackages_q_t', 'haskellPackages_u_z', 'haskell', 
+        'nodePackages', 'nodePackages_latest', 'rPackages', 'juliaPackages'
     }
     return shard_name in problematic_shards
+
+def is_memory_intensive_shard(shard_name: str) -> bool:
+    """Check if a shard requires extra memory and processing time"""
+    memory_intensive_shards = {
+        'haskellPackages_a_d', 'haskellPackages_e_h', 'haskellPackages_i_l',
+        'haskellPackages_m_p', 'haskellPackages_q_t', 'haskellPackages_u_z',
+        'pythonPackages', 'nodePackages', 'perlPackages', 'rPackages'
+    }
+    return shard_name in memory_intensive_shards
+
+def process_shard_with_fallback(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str], 
+                               system: str, allow_unfree: bool, verbose: bool, 
+                               max_depth: int, allow_aliases: bool, out_dir: Path) -> Optional[Dict[str, Any]]:
+    """Process a shard with fallback strategies if initial attempt fails."""
+    
+    # Strategy 1: Normal processing
+    result = process_shard(shard_name, nix_file, nixpkgs_path, system, allow_unfree, 
+                          verbose, max_depth, allow_aliases, out_dir)
+    if result is not None:
+        return result
+    
+    # Strategy 2: Conservative fallback for problematic shards
+    if is_problematic_shard(shard_name) or is_memory_intensive_shard(shard_name):
+        log_info(f"Attempting fallback strategy for {shard_name} with reduced parameters...")
+        fallback_result = process_shard(shard_name, nix_file, nixpkgs_path, system, allow_unfree, 
+                                       verbose, 3, False, out_dir)
+        if fallback_result is not None:
+            log_info(f"Fallback strategy succeeded for {shard_name}")
+            return fallback_result
+    
+    # Strategy 3: Skip and log for manual investigation
+    log_error(f"All strategies failed for shard {shard_name} - requires manual investigation")
+    return None
 
 def process_shard(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str], 
                  system: str, allow_unfree: bool, verbose: bool, 
@@ -261,14 +339,24 @@ def process_shard(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str],
     """Process a single shard and return its data"""
     log_info(f"Processing shard: {shard_name}")
     
+    # Check shard characteristics
+    is_problematic = is_problematic_shard(shard_name)
+    is_memory_intensive = is_memory_intensive_shard(shard_name)
+    
     # Adjust parameters for problematic shards
-    if is_problematic_shard(shard_name):
+    if is_problematic:
         log_verbose(f"Shard {shard_name} is problematic, using conservative settings", verbose)
         max_depth = min(max_depth, 5)  # Reduce depth for problematic shards
         allow_aliases = False  # Never allow aliases for problematic shards
-        timeout = 600  # 10 minute timeout for problematic shards
+        
+    # Set timeout based on shard type
+    if is_memory_intensive:
+        timeout = 1800  # 30 minute timeout for memory intensive shards
+        log_verbose(f"Shard {shard_name} is memory intensive, using extended timeout", verbose)
+    elif is_problematic:
+        timeout = 900   # 15 minute timeout for problematic shards
     else:
-        timeout = 300  # 5 minute timeout for normal shards
+        timeout = 300   # 5 minute timeout for normal shards
     
     cmd = build_nix_cmd(
         nix_file=nix_file,
@@ -284,10 +372,16 @@ def process_shard(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str],
     shard_file = out_dir / f"shard_{shard_name}.json"
     shard_log = out_dir / f"shard_{shard_name}.log"
     
+    # Set up resource limits based on shard type
+    setup_resource_limits(verbose, is_memory_intensive)
+    
     # Set up logging for this shard
     header = [
         f"# Shard Processing Log: {shard_name}",
         f"# Started: {_dt.datetime.now().isoformat(timespec='seconds')}",
+        f"# Memory Intensive: {is_memory_intensive}",
+        f"# Problematic: {is_problematic}",
+        f"# Timeout: {timeout}s",
         f"# Command: {' '.join(cmd)}",
         ""
     ]
@@ -295,37 +389,83 @@ def process_shard(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str],
     
     start_time = time.time()
     try:
-        with shard_file.open("w") as out:
+        with shard_file.open("wb") as out:
             proc = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, 
-                                text=True, timeout=timeout)
+                                timeout=timeout)
             
+        stderr_text = ""
         if proc.stderr:
+            stderr_text = proc.stderr.decode('utf-8', errors='replace')
             with shard_log.open("a") as err:
                 err.write("\n--- STDERR ---\n")
-                err.write(proc.stderr)
+                err.write(stderr_text)
                 err.write("\n--- END STDERR ---\n")
         
         if proc.returncode == 0:
-            # Load and return the shard data
-            with shard_file.open() as f:
-                shard_data = json.load(f)
+            # Load and return the shard data with proper encoding handling
+            try:
+                with shard_file.open('rb') as f:
+                    raw_data = f.read()
+                # Decode with error handling
+                try:
+                    json_text = raw_data.decode('utf-8')
+                except UnicodeDecodeError:
+                    json_text = raw_data.decode('utf-8', errors='replace')
+                shard_data = json.loads(json_text)
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                log_error(f"Shard {shard_name} produced invalid JSON: {str(e)[:100]}")
+                return None
             
             duration = time.time() - start_time
             pkg_count = len(shard_data.get('packages', []))
             log_info(f"Shard {shard_name} completed in {duration:.1f}s: {pkg_count} packages")
             return shard_data
         else:
-            log_error(f"Shard {shard_name} failed with exit code {proc.returncode}")
-            if proc.stderr:
-                log_verbose(f"Shard {shard_name} stderr: {proc.stderr[-200:]}", verbose)
+            failure_reason = _categorize_shard_failure(proc.returncode, stderr_text)
+            log_error(f"Shard {shard_name} failed: {failure_reason}")
+            if verbose and stderr_text:
+                # Only show stderr details in verbose mode
+                stderr_preview = stderr_text[-500:] if len(stderr_text) > 500 else stderr_text
+                log_verbose(f"Shard {shard_name} stderr preview: {stderr_preview}", verbose)
             return None
             
     except subprocess.TimeoutExpired:
-        log_error(f"Shard {shard_name} timed out after {timeout//60} minutes")
+        duration_mins = timeout // 60
+        log_error(f"Shard {shard_name} timed out after {duration_mins} minutes (memory-intensive: {is_memory_intensive})")
         return None
     except Exception as e:
-        log_error(f"Shard {shard_name} failed with exception: {e}")
+        error_type = type(e).__name__
+        log_error(f"Shard {shard_name} failed with {error_type}: {str(e)[:200]}")
         return None
+
+def _categorize_shard_failure(exit_code: int, stderr: str) -> str:
+    """Categorize shard failure based on exit code and stderr content."""
+    if not stderr:
+        return f"exit code {exit_code} (no error details)"
+    
+    stderr_lower = stderr.lower()
+    
+    # Common failure patterns
+    if "stack overflow" in stderr_lower or "segmentation fault" in stderr_lower:
+        return f"memory/stack overflow (exit {exit_code})"
+    elif "killed" in stderr_lower or exit_code == -9:
+        return f"process killed (likely OOM, exit {exit_code})"
+    elif "out of memory" in stderr_lower or "cannot allocate memory" in stderr_lower:
+        return f"out of memory (exit {exit_code})"
+    elif "assertion" in stderr_lower:
+        return f"assertion failure (exit {exit_code})"
+    elif "infinite recursion" in stderr_lower:
+        return f"infinite recursion (exit {exit_code})"
+    elif "evaluation aborted" in stderr_lower:
+        return f"evaluation aborted (exit {exit_code})"
+    elif "error:" in stderr_lower:
+        # Extract first error line
+        error_lines = [line.strip() for line in stderr.split('\n') if 'error:' in line.lower()]
+        if error_lines:
+            first_error = error_lines[0][:100]  # Limit length
+            return f"evaluation error: {first_error} (exit {exit_code})"
+    
+    return f"exit code {exit_code}"
 
 def combine_shard_results(shard_results: List[Dict[str, Any]], out_dir: Path) -> Dict[str, Any]:
     """Combine results from multiple shards into a single dataset"""
@@ -481,7 +621,10 @@ def run_sharded_extraction(cmd: List[str], output_file: Path, log_file: Path, me
     
     # Prioritize shard processing order
     prioritized_shards = prioritize_shards(shards)
-    log_info(f"Processing {len(prioritized_shards)} shards in priority order")
+    log_info(f"Processing {len(prioritized_shards)} shards in priority order:")
+    for i, shard in enumerate(prioritized_shards):
+        shard_type = "memory-intensive" if is_memory_intensive_shard(shard) else "problematic" if is_problematic_shard(shard) else "normal"
+        log_info(f"  [{i+1:2d}/{len(prioritized_shards)}] {shard} ({shard_type})")
     
     # Set up resource limits
     setup_resource_limits(verbose)
@@ -492,7 +635,7 @@ def run_sharded_extraction(cmd: List[str], output_file: Path, log_file: Path, me
     
     for i, shard_name in enumerate(prioritized_shards, 1):
         log_info(f"[{i}/{len(prioritized_shards)}] Processing shard: {shard_name}")
-        shard_result = process_shard(
+        shard_result = process_shard_with_fallback(
             shard_name=shard_name,
             nix_file=sharded_nix_file,
             nixpkgs_path=nixpkgs_path,
@@ -508,30 +651,59 @@ def run_sharded_extraction(cmd: List[str], output_file: Path, log_file: Path, me
             successful_shards.append(shard_result)
         else:
             failed_shards.append(shard_name)
-            log_error(f"Shard {shard_name} failed, continuing with others...")
-            # If too many shards are failing, something might be wrong
+            # If too many shards are failing, something might be fundamentally wrong
+            failure_rate = len(failed_shards) / (len(successful_shards) + len(failed_shards))
             if len(failed_shards) > len(prioritized_shards) // 2:
-                log_error(f"More than half of shards have failed ({len(failed_shards)}/{len(prioritized_shards)}), stopping")
+                log_error(f"High failure rate: {len(failed_shards)}/{len(prioritized_shards)} shards failed ({failure_rate:.1%})")
+                log_error("Stopping early due to excessive failures - check system resources and Nix configuration")
                 break
     
     if not successful_shards:
         log_error("All shards failed")
         return False
     
-    log_info(f"Extraction completed: {len(successful_shards)} successful, {len(failed_shards)} failed")
+    # Generate extraction summary
+    total_extracted_packages = sum(len(shard.get('packages', [])) for shard in successful_shards)
+    log_info(f"Extraction summary:")
+    log_info(f"  ✓ Successful shards: {len(successful_shards)}")
+    log_info(f"  ✗ Failed shards: {len(failed_shards)}")
+    log_info(f"  📦 Total packages extracted: {total_extracted_packages}")
+    
     if failed_shards:
-        log_info(f"Failed shards: {', '.join(failed_shards)}")
+        log_info(f"Failed shards requiring investigation ({len(failed_shards)}):")
+        for i, failed_shard in enumerate(failed_shards):
+            shard_type = "memory-intensive" if is_memory_intensive_shard(failed_shard) else "problematic" if is_problematic_shard(failed_shard) else "normal"
+            log_info(f"  [{i+1:2d}] {failed_shard} ({shard_type})")
     
     # Combine results
     log_info(f"Combining results from {len(successful_shards)} successful shards...")
     combined_data = combine_shard_results(successful_shards, out_dir)
     
-    # Save combined results
+    # Save combined results and perform validation
     try:
         with output_file.open("w") as f:
             json.dump(combined_data, f, indent=2)
+        
+        final_package_count = len(combined_data.get('packages', []))
         log_info(f"Combined results saved to: {output_file}")
-        log_info(f"Total packages extracted: {len(combined_data.get('packages', []))}")
+        log_info(f"Total packages extracted: {final_package_count}")
+        
+        # Log discovery statistics for validation
+        metadata = combined_data.get('metadata', {})
+        if metadata.get('discovery_method') == 'dynamic':
+            log_info(f"Dynamic shard discovery results:")
+            log_info(f"  📊 Total shards discovered: {metadata.get('total_shards_processed', 0)}")
+            log_info(f"  🎯 Packages per successful shard (avg): {final_package_count // len(successful_shards) if successful_shards else 0}")
+            
+            # Show breakdown by shard type if available
+            shard_details = metadata.get('shard_details', {})
+            if shard_details:
+                log_info(f"  📋 Shard breakdown:")
+                for shard_name, shard_info in sorted(shard_details.items()):
+                    pkg_count = shard_info.get('package_count', 0)
+                    duration = shard_info.get('duration_seconds', 0)
+                    log_info(f"    • {shard_name}: {pkg_count} packages ({duration:.1f}s)")
+        
         return True
     except Exception as e:
         log_error(f"Failed to save combined results: {e}")
@@ -584,7 +756,7 @@ def extract_dependencies_data(
     failed: List[str] = []
 
     for shard in prioritized:
-        shard_data = process_shard(
+        shard_data = process_shard_with_fallback(
             shard,
             sharded_nix,
             nixpkgs_arg,

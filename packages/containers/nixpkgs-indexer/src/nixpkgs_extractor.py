@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,6 +38,9 @@ class NixpkgsExtractor:
             logger.info("Processing and merging package data...")
             packages = self._process_package_data(raw_packages)
             dependencies = self._process_dependency_data(raw_deps)
+            
+            # Validate coverage between nix-env and sharded results
+            self._validate_extraction_coverage(raw_packages, raw_deps)
             
             return packages, dependencies
         finally:
@@ -104,42 +108,66 @@ class NixpkgsExtractor:
             "-f", str(self.nixpkgs_path)
         ]
 
-        attempt = 0
-        while True:
-            attempt += 1
-            try:
-                logger.info("Running: %s", " ".join(cmd))
+        # Create temporary file for output
+        with tempfile.NamedTemporaryFile(mode='w+b', suffix='.json', delete=False) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+        
+        try:
+            logger.info("Running: %s", " ".join(cmd))
+            logger.info("Writing output to temporary file: %s", tmp_path)
+            
+            with tmp_path.open('wb') as output_file:
                 proc = subprocess.run(
-                    cmd, check=True, timeout=1800, capture_output=True, text=True
+                    cmd, check=True, timeout=1800, stdout=output_file, stderr=subprocess.PIPE
                 )
-                data = json.loads(proc.stdout)
-                logger.info("Successfully extracted %d packages", len(data))
-                return data
-            except subprocess.CalledProcessError as e:
-                # Log the actual error details for debugging
-                error_details = f"Exit code: {e.returncode}"
-                if e.stdout:
-                    logger.error("nix-env stdout: %s", e.stdout.strip())
-                if e.stderr:
-                    stderr_str = e.stderr.decode() if isinstance(e.stderr, bytes) else str(e.stderr)
-                    logger.error("nix-env stderr: %s", stderr_str.strip())
-                    error_details += f", Stderr: {stderr_str.strip()}"
-                else:
-                    error_details += ", No stderr output"
-                
-                if attempt < self.max_retries:
-                    logger.warning(
-                        "nix-env failed (attempt %d/%d): %s. Retrying in %ss...",
-                        attempt, self.max_retries, error_details, self.retry_delay_sec
-                    )
-                    time.sleep(self.retry_delay_sec)
-                    continue
-                
-                # For final attempt, provide comprehensive error info
-                logger.error("Final nix-env attempt failed: %s", error_details)
-                raise RuntimeError(f"nix-env failed after {self.max_retries} attempts: {error_details}") from e
-            except json.JSONDecodeError as e:
-                raise RuntimeError(f"Failed to parse nix-env JSON output: {e}") from e
+            
+            # Parse JSON from file
+            data = self._parse_nix_env_json_from_file(tmp_path)
+            logger.info("Successfully extracted %d packages", len(data))
+            return data
+            
+        except subprocess.CalledProcessError as e:
+            # Log the actual error details for debugging
+            error_details = f"Exit code: {e.returncode}"
+            if e.stderr:
+                stderr_str = e.stderr.decode('utf-8', errors='replace')
+                logger.error("nix-env stderr: %s", stderr_str.strip())
+                error_details += f", Stderr: {stderr_str.strip()}"
+            else:
+                error_details += ", No stderr output"
+            
+            logger.error("nix-env failed: %s", error_details)
+            raise RuntimeError(f"nix-env failed: {error_details}") from e
+        finally:
+            # Clean up temporary file
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+    def _parse_nix_env_json_from_file(self, json_file: Path) -> Dict[str, Any]:
+        """Parse nix-env JSON output from file with proper encoding handling."""
+        try:
+            # Read file in binary mode first to handle encoding issues
+            with json_file.open('rb') as f:
+                raw_data = f.read()
+            
+            # Decode with error handling
+            try:
+                json_text = raw_data.decode('utf-8')
+            except UnicodeDecodeError as e:
+                logger.warning("UTF-8 decoding failed at position %d, using error replacement", e.start)
+                json_text = raw_data.decode('utf-8', errors='replace')
+            
+            # Parse JSON
+            return json.loads(json_text)
+            
+        except json.JSONDecodeError as e:
+            logger.error("JSON parsing failed at line %d, column %d: %s", 
+                        getattr(e, 'lineno', 0), getattr(e, 'colno', 0), str(e))
+            raise RuntimeError(f"Failed to parse nix-env JSON output: {e}") from e
+        except Exception as e:
+            logger.error("Error reading JSON file %s: %s", json_file, str(e))
+            raise RuntimeError(f"Failed to read nix-env output file: {e}") from e
+
 
     def _process_package_data(self, raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         processed: List[Dict[str, Any]] = []
@@ -481,6 +509,74 @@ class NixpkgsExtractor:
                         name = name_version
                     normalized.append(name)
         return normalized
+    
+    def _validate_extraction_coverage(self, nix_env_data: Dict[str, Any], deps_data: Dict[str, Any]) -> None:
+        """Validate that sharded extraction covers packages found by nix-env."""
+        nix_env_count = len(nix_env_data)
+        deps_packages = deps_data.get('packages', [])
+        deps_count = len(deps_packages)
+        
+        logger.info("=== EXTRACTION COVERAGE VALIDATION ===")
+        logger.info(f"📊 nix-env packages: {nix_env_count}")
+        logger.info(f"🔍 Sharded extraction packages: {deps_count}")
+        
+        # Calculate coverage percentage
+        if nix_env_count > 0:
+            coverage_pct = (deps_count / nix_env_count) * 100
+            logger.info(f"📈 Coverage: {coverage_pct:.1f}% ({deps_count}/{nix_env_count})")
+        else:
+            coverage_pct = 0
+            logger.warning("No packages found by nix-env - unable to calculate coverage")
+        
+        # Extract package names for comparison
+        nix_env_names = set()
+        for pkg_path, pkg_info in nix_env_data.items():
+            pname = pkg_info.get("pname") or self._extract_package_name_from_path(pkg_path)
+            if pname and pname != "unknown":
+                nix_env_names.add(pname)
+        
+        deps_names = set()
+        for pkg in deps_packages:
+            pname = pkg.get('pname')
+            if pname and pname != "unknown":
+                deps_names.add(pname)
+        
+        # Find gaps
+        missing_in_deps = nix_env_names - deps_names
+        only_in_deps = deps_names - nix_env_names
+        
+        if missing_in_deps:
+            missing_count = len(missing_in_deps)
+            logger.warning(f"⚠️  {missing_count} packages found by nix-env but missing in sharded extraction")
+            if missing_count <= 10:
+                logger.warning(f"Missing packages: {', '.join(sorted(missing_in_deps))}")
+            else:
+                sample_missing = list(sorted(missing_in_deps))[:10]
+                logger.warning(f"Sample missing packages: {', '.join(sample_missing)}... (+{missing_count-10} more)")
+        
+        if only_in_deps:
+            extra_count = len(only_in_deps)  
+            logger.info(f"ℹ️  {extra_count} packages found only in sharded extraction (likely sub-packages or dependencies)")
+            if extra_count <= 5:
+                logger.info(f"Extra packages: {', '.join(sorted(only_in_deps))}")
+        
+        # Log discovery method info from metadata
+        metadata = deps_data.get('metadata', {})
+        if metadata.get('discovery_method') == 'dynamic':
+            total_shards = metadata.get('total_shards_processed', 0)
+            logger.info(f"🎯 Dynamic discovery used {total_shards} shards")
+        
+        # Coverage assessment
+        if coverage_pct >= 95:
+            logger.info("✅ Excellent coverage - sharded extraction is comprehensive")
+        elif coverage_pct >= 85:
+            logger.info("✅ Good coverage - minor gaps acceptable")
+        elif coverage_pct >= 70:
+            logger.warning("⚠️  Moderate coverage - some packages may be missing")  
+        else:
+            logger.error(f"❌ Poor coverage ({coverage_pct:.1f}%) - significant gaps in package extraction")
+            
+        logger.info("========================================")
     
     def __del__(self):
         """Cleanup on object destruction."""
