@@ -65,7 +65,7 @@ Vector index tuning (embedding/minified phases):
 
 ### "metadata"
 1. Clones nixpkgs (shallow, `release-25.05` by default) and evaluates metadata and dependency info without building.
-2. Extracts dependency relationships using `nix-instantiate` over `src/extract-deps-sharded.nix` (captures `buildInputs` and `propagatedBuildInputs`) using a sharded evaluation strategy.
+2. Extracts package metadata and dependencies using `nix-eval-jobs` with parallel evaluation and automatic memory management.
 3. Creates the main LanceDB dataset (`fdnix-data.lancedb`) with complete metadata and a `dependencies` table.
 4. Uploads the dataset directory to S3 when `ARTIFACTS_BUCKET` and `LANCEDB_DATA_KEY` are provided; when `DEPENDENCY_S3_KEY` is set, also uploads a comprehensive dependency JSON.
 
@@ -90,14 +90,16 @@ Vector index tuning (embedding/minified phases):
 ## How It Works
 
 - Nixpkgs clone: Shallow clone of `NixOS/nixpkgs` (branch `release-25.05`) into a temp directory for evaluation only.
-- Dependencies: `nix-instantiate` evaluates `src/extract-deps-sharded.nix` to read `buildInputs` and `propagatedBuildInputs` for all derivations, without building.
-- Metadata: `nix-env -qaP --json --meta -f <cloned nixpkgs>` extracts package metadata; results are merged with dependency info.
+- Package evaluation: `nix-eval-jobs` performs parallel evaluation of all packages with automatic worker memory management and individual job failure tolerance.
+- Data extraction: Extracts comprehensive package metadata (description, license, maintainers, etc.) and dependency relationships from `inputDrvs`.
 - Storage: Writes a LanceDB dataset with a `packages` table and a `dependencies` table; optional comprehensive dependency JSON can also be uploaded to S3.
 - Indexes: Uses LanceDB-native full-text search for text fields and IVF-PQ for vectors when embeddings exist.
 
 Notes:
 - Nixpkgs branch is currently pinned to `release-25.05` in the indexer.
 - Extraction avoids builds; it evaluates attribute metadata and relationship fields only.
+- Uses `nix-eval-jobs` for reliable, parallel package evaluation with memory management and individual failure tolerance.
+- Simplified architecture compared to previous custom sharded evaluation system.
 
 ## Usage
 
@@ -188,7 +190,7 @@ Example dependency JSON (abridged):
 ## Build & Run
 
 - Build (from repo root):
-  - `docker build -t fdnix/nixpkgs-indexer packages/containers/nixpkgs-indexer`
+  - `docker build -t fdnix/nixpkgs-indexer -f packages/containers/nixpkgs-indexer/Dockerfile .`
 - Run (local output to current dir):
   - Metadata only: `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=metadata fdnix/nixpkgs-indexer`
   - Embeddings only (Bedrock batch): `docker run --rm --env-file .env -v "$PWD":/out -e AWS_REGION=us-east-1 -e PROCESSING_MODE=embedding -e ARTIFACTS_BUCKET=fdnix-artifacts -e LANCEDB_DATA_KEY=snapshots/fdnix-data.lancedb -e BEDROCK_ROLE_ARN=arn:aws:iam::123456789012:role/BedrockBatchRole fdnix/nixpkgs-indexer`
@@ -201,9 +203,10 @@ Notes:
 
 ## Image & Dependencies
 
-- Base: `nixos/nix:2.31.0`; dependencies installed via Nix (`nix-env`).
-- Installed deps: `python313`, `lancedb`, `pydantic`, `pandas`, `pyarrow`, `boto3`, `httpx`, `numpy`.
-- FTS: Uses LanceDB’s native FTS (no Tantivy‑py dependency).
+- Base: `nixos/nix:2.31.0` (includes git); dependencies installed via Nix (`nix-env`).
+- Installed deps: `nix-eval-jobs`, `python313`, `lancedb`, `pydantic`, `pandas`, `pyarrow`, `boto3`, `httpx`, `numpy`.
+- Package evaluation: `nix-eval-jobs` built from source for reliable parallel evaluation.
+- FTS: Uses LanceDB's native FTS (no Tantivy‑py dependency).
 - Entry: `python src/index.py`; runs as non-root user.
 
 Layer contents: When publishing is enabled, the packaged minified dataset artifact is placed in the layer (path depends on layer packaging).

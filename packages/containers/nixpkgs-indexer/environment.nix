@@ -2,7 +2,8 @@ let
   pkgs = import <nixpkgs> {};
 in
 [
-  # System-level dependencies
+  # System-level dependencies  
+  pkgs.nix-eval-jobs
   pkgs.gcc
   pkgs.rustc
   pkgs.cargo

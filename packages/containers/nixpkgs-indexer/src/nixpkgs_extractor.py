@@ -7,8 +7,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-import extract_dependencies
+import platform
 
 
 logger = logging.getLogger("fdnix.nixpkgs-extractor")
@@ -20,7 +19,7 @@ class NixpkgsExtractor:
         self.temp_dir = None
 
     def extract_all_packages(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Extract both package metadata and dependency information.
+        """Extract both package metadata and dependency information using nix-eval-jobs.
         
         Returns:
             Tuple of (packages, dependencies) where:
@@ -31,16 +30,14 @@ class NixpkgsExtractor:
         self._setup_nixpkgs_repo()
         
         try:
-            logger.info("Extracting package metadata and dependencies...")
-            raw_deps = self._extract_dependencies_data()
-            raw_packages = self._extract_nix_env_data()
+            logger.info("Extracting packages using nix-eval-jobs...")
+            raw_data = self._extract_with_nix_eval_jobs()
             
-            logger.info("Processing and merging package data...")
-            packages = self._process_package_data(raw_packages)
-            dependencies = self._process_dependency_data(raw_deps)
+            logger.info("Processing package data...")
+            packages = self._process_package_data(raw_data)
+            dependencies = self._process_dependency_data(raw_data)
             
-            # Validate coverage between nix-env and sharded results
-            self._validate_extraction_coverage(raw_packages, raw_deps)
+            logger.info(f"Successfully extracted {len(packages)} packages and {len(dependencies)} dependency entries")
             
             return packages, dependencies
         finally:
@@ -82,159 +79,286 @@ class NixpkgsExtractor:
             logger.info("Cleaning up temporary directory: %s", self.temp_dir)
             shutil.rmtree(self.temp_dir)
     
-    def _extract_dependencies_data(self) -> Dict[str, Any]:
-        """Extract dependency data via library API (no CLI)."""
-        try:
-            logger.info("Extracting dependency data from nixpkgs using sharded evaluation...")
-            data = extract_dependencies.extract_dependencies_data(
-                nixpkgs=str(self.nixpkgs_path),
-                system=None,
-                allow_unfree=True,
-                verbose=True,
-            )
-            logger.info("Successfully extracted dependencies data")
-            return data
-        except Exception as e:
-            logger.error("Dependency extraction failed: %s", str(e))
-            raise RuntimeError(f"Dependency extraction failed: {str(e)}") from e
-    
-    def _extract_nix_env_data(self) -> Dict[str, Any]:
-        """Extract package metadata using nix-env (for compatibility)."""
+    def _extract_with_nix_eval_jobs(self) -> List[Dict[str, Any]]:
+        """Extract package data using nix-eval-jobs tool."""
+        # Determine target system for nixpkgs
+        system = os.environ.get("NIX_SYSTEM") or self._detect_system()
+
+        # Prefer flake-style invocation which is supported by current nix-eval-jobs
+        # Use legacyPackages to get the classic pkgs set for the detected system
+        flake_ref = f"{self.nixpkgs_path}#legacyPackages.{system}"
+
         cmd = [
-            "nix-env",
-            "-qaP",
-            "--json",
+            "nix-eval-jobs",
             "--meta",
-            "-f", str(self.nixpkgs_path)
+            "--show-input-drvs",
+            "--force-recurse",
+            "--impure",
+            "--workers",
+            "1",
+            "--max-memory-size",
+            "4096",
+            "--extra-experimental-features",
+            "nix-command flakes",
+            "--flake",
+            flake_ref,
         ]
 
         # Create temporary file for output
-        with tempfile.NamedTemporaryFile(mode='w+b', suffix='.json', delete=False) as tmp_file:
+        with tempfile.NamedTemporaryFile(mode='w+b', suffix='.jsonl', delete=False) as tmp_file:
             tmp_path = Path(tmp_file.name)
         
         try:
             logger.info("Running: %s", " ".join(cmd))
             logger.info("Writing output to temporary file: %s", tmp_path)
             
+            env = os.environ.copy()
+            # Ensure unfree packages are allowed during evaluation
+            env.setdefault("NIXPKGS_ALLOW_UNFREE", "1")
+            # Allow broken packages to prevent evaluation crashes
+            env.setdefault("NIXPKGS_ALLOW_BROKEN", "1")
             with tmp_path.open('wb') as output_file:
                 proc = subprocess.run(
-                    cmd, check=True, timeout=1800, stdout=output_file, stderr=subprocess.PIPE
+                    cmd,
+                    check=True,
+                    timeout=3600,
+                    stdout=output_file,
+                    stderr=subprocess.PIPE,
+                    env=env,
                 )
             
-            # Parse JSON from file
-            data = self._parse_nix_env_json_from_file(tmp_path)
-            logger.info("Successfully extracted %d packages", len(data))
-            return data
+            # Parse JSONL from file
+            packages = self._parse_nix_eval_jobs_output(tmp_path)
+            logger.info("Successfully extracted %d packages", len(packages))
+            return packages
             
         except subprocess.CalledProcessError as e:
             # Log the actual error details for debugging
             error_details = f"Exit code: {e.returncode}"
             if e.stderr:
                 stderr_str = e.stderr.decode('utf-8', errors='replace')
-                logger.error("nix-env stderr: %s", stderr_str.strip())
-                error_details += f", Stderr: {stderr_str.strip()}"
+                
+                # Check for common recoverable errors
+                if "marked as broken" in stderr_str or "refusing to evaluate" in stderr_str:
+                    logger.warning("nix-eval-jobs encountered broken packages (this is expected): %s", 
+                                 stderr_str.strip()[:500])
+                    # Check if we have some output despite broken packages
+                    if tmp_path.exists() and tmp_path.stat().st_size > 0:
+                        logger.info("Some packages were extracted despite broken package warnings, continuing...")
+                        packages = self._parse_nix_eval_jobs_output(tmp_path)
+                        if packages:
+                            logger.info("Successfully extracted %d packages despite broken package warnings", len(packages))
+                            return packages
+                
+                if "double free or corruption" in stderr_str or "out of memory" in stderr_str:
+                    logger.error("nix-eval-jobs crashed with memory corruption: %s", stderr_str.strip())
+                    error_details += ", Memory corruption detected"
+                else:
+                    logger.error("nix-eval-jobs stderr: %s", stderr_str.strip())
+                
+                error_details += f", Stderr: {stderr_str.strip()[:1000]}"
             else:
                 error_details += ", No stderr output"
             
-            logger.error("nix-env failed: %s", error_details)
-            raise RuntimeError(f"nix-env failed: {error_details}") from e
+            logger.error("nix-eval-jobs failed: %s", error_details)
+            raise RuntimeError(f"nix-eval-jobs failed: {error_details}") from e
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("nix-eval-jobs timed out after 60 minutes")
         finally:
             # Clean up temporary file
             if tmp_path.exists():
                 tmp_path.unlink()
 
-    def _parse_nix_env_json_from_file(self, json_file: Path) -> Dict[str, Any]:
-        """Parse nix-env JSON output from file with proper encoding handling."""
+    def _detect_system(self) -> str:
+        """Detect Nix system string, defaulting to x86_64-linux."""
+        mach = platform.machine().lower()
+        if mach in ("x86_64", "amd64"):
+            return "x86_64-linux"
+        if mach in ("aarch64", "arm64"):
+            return "aarch64-linux"
+        # Fallback sensible default for most CI/container environments
+        return "x86_64-linux"
+
+    def _parse_nix_eval_jobs_output(self, jsonl_file: Path) -> List[Dict[str, Any]]:
+        """Parse nix-eval-jobs JSONL output from file with proper encoding handling."""
+        packages = []
+        
         try:
             # Read file in binary mode first to handle encoding issues
-            with json_file.open('rb') as f:
+            with jsonl_file.open('rb') as f:
                 raw_data = f.read()
             
             # Decode with error handling
             try:
-                json_text = raw_data.decode('utf-8')
+                jsonl_text = raw_data.decode('utf-8')
             except UnicodeDecodeError as e:
                 logger.warning("UTF-8 decoding failed at position %d, using error replacement", e.start)
-                json_text = raw_data.decode('utf-8', errors='replace')
+                jsonl_text = raw_data.decode('utf-8', errors='replace')
             
-            # Parse JSON
-            return json.loads(json_text)
+            # Parse JSONL (one JSON object per line)
+            for line_num, line in enumerate(jsonl_text.strip().split('\n'), 1):
+                if not line.strip():
+                    continue
+                    
+                try:
+                    package_data = json.loads(line)
+                    packages.append(package_data)
+                except json.JSONDecodeError as e:
+                    logger.warning("Failed to parse JSON at line %d: %s", line_num, str(e)[:100])
+                    continue
             
-        except json.JSONDecodeError as e:
-            logger.error("JSON parsing failed at line %d, column %d: %s", 
-                        getattr(e, 'lineno', 0), getattr(e, 'colno', 0), str(e))
-            raise RuntimeError(f"Failed to parse nix-env JSON output: {e}") from e
+            return packages
+            
         except Exception as e:
-            logger.error("Error reading JSON file %s: %s", json_file, str(e))
-            raise RuntimeError(f"Failed to read nix-env output file: {e}") from e
+            logger.error("Error reading JSONL file %s: %s", jsonl_file, str(e))
+            raise RuntimeError(f"Failed to read nix-eval-jobs output file: {e}") from e
 
-
-    def _process_package_data(self, raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _process_package_data(self, raw_packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Process package data from nix-eval-jobs output."""
         processed: List[Dict[str, Any]] = []
         current_ts = datetime.now(timezone.utc).isoformat()
 
-        for pkg_path, pkg_info in raw.items():
+        for pkg_data in raw_packages:
             try:
-                package_name = (
-                    pkg_info.get("pname") or self._extract_package_name_from_path(pkg_path)
-                )
-                version = pkg_info.get("version") or "unknown"
+                # Extract basic info from nix-eval-jobs output
+                attr_path = ".".join(pkg_data.get("attrPath", []))
+                name = pkg_data.get("name", "")
+                
+                # Extract package name and version from the name field
+                package_name, version = self._parse_name_version(name)
                 if not package_name or package_name == "unknown":
-                    logger.debug("Skipping package with unknown name: %s", pkg_path)
+                    logger.debug("Skipping package with unknown name: %s", attr_path)
                     continue
 
-                meta = pkg_info.get("meta") or {}
+                meta = pkg_data.get("meta", {})
 
-                processed.append(
-                    {
-                        "packageName": package_name,
-                        "version": version,
-                        "attributePath": pkg_path,
-                        "description": self._sanitize_string(
-                            meta.get("description") or pkg_info.get("description") or ""
-                        ),
-                        "longDescription": self._sanitize_string(
-                            meta.get("longDescription") or ""
-                        ),
-                        "homepage": self._sanitize_string(
-                            meta.get("homepage") or pkg_info.get("homepage") or ""
-                        ),
-                        "license": self._extract_license_info(
-                            meta.get("license") or pkg_info.get("license")
-                        ),
-                        "platforms": self._extract_platforms(
-                            meta.get("platforms") or pkg_info.get("platforms")
-                        ),
-                        "maintainers": self._extract_maintainers(
-                            meta.get("maintainers") or pkg_info.get("maintainers")
-                        ),
-                        "category": self._extract_category(pkg_path, meta),
-                        "broken": bool(meta.get("broken") or pkg_info.get("broken") or False),
-                        "unfree": bool(meta.get("unfree") or pkg_info.get("unfree") or False),
-                        "available": meta.get("available") if "available" in meta else True,
-                        "insecure": bool(meta.get("insecure") or False),
-                        "unsupported": bool(meta.get("unsupported") or False),
-                        "mainProgram": self._sanitize_string(meta.get("mainProgram") or ""),
-                        "position": self._sanitize_string(meta.get("position") or ""),
-                        "outputsToInstall": meta.get("outputsToInstall") if isinstance(meta.get("outputsToInstall"), list) else [],
-                        "lastUpdated": current_ts,
-                        "hasEmbedding": False,
-                    }
-                )
+                processed.append({
+                    "packageName": package_name,
+                    "version": version,
+                    "attributePath": attr_path,
+                    "description": self._sanitize_string(
+                        meta.get("description", "")
+                    ),
+                    "longDescription": self._sanitize_string(
+                        meta.get("longDescription", "")
+                    ),
+                    "homepage": self._sanitize_string(
+                        meta.get("homepage", "")
+                    ),
+                    "license": self._extract_license_info(
+                        meta.get("license")
+                    ),
+                    "platforms": self._extract_platforms(
+                        meta.get("platforms")
+                    ),
+                    "maintainers": self._extract_maintainers(
+                        meta.get("maintainers")
+                    ),
+                    "category": self._extract_category(attr_path, meta),
+                    "broken": bool(meta.get("broken", False)),
+                    "unfree": bool(meta.get("unfree", False)),
+                    "available": meta.get("available") if "available" in meta else True,
+                    "insecure": bool(meta.get("insecure", False)),
+                    "unsupported": bool(meta.get("unsupported", False)),
+                    "mainProgram": self._sanitize_string(meta.get("mainProgram", "")),
+                    "position": self._sanitize_string(meta.get("position", "")),
+                    "outputsToInstall": meta.get("outputsToInstall") if isinstance(meta.get("outputsToInstall"), list) else [],
+                    "lastUpdated": current_ts,
+                    "hasEmbedding": False,
+                })
 
                 if len(processed) % 1000 == 0:
                     logger.info("Processed %d packages...", len(processed))
 
             except Exception as e:  # keep processing
-                logger.warning("Error processing package %s: %s", pkg_path, e)
+                logger.warning("Error processing package %s: %s", attr_path, e)
                 continue
 
         logger.info("Successfully processed %d packages", len(processed))
         return processed
 
-    def _extract_package_name_from_path(self, pkg_path: str) -> str:
-        parts = pkg_path.split(".")
-        return parts[-1] if parts else ""
+    def _process_dependency_data(self, raw_packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Process dependency data from nix-eval-jobs output."""
+        dependencies = []
+        current_ts = datetime.now(timezone.utc).isoformat()
+        
+        logger.info("Processing %d packages for dependency information", len(raw_packages))
+        
+        for pkg_data in raw_packages:
+            try:
+                attr_path = ".".join(pkg_data.get("attrPath", []))
+                name = pkg_data.get("name", "")
+                package_name, version = self._parse_name_version(name)
+                
+                # Extract dependencies from inputDrvs
+                input_drvs = pkg_data.get("inputDrvs", {})
+                build_inputs = []
+                propagated_inputs = []
+                
+                # Parse store paths to extract dependency names
+                for drv_path in input_drvs.keys():
+                    dep_name = self._extract_package_name_from_store_path(drv_path)
+                    if dep_name:
+                        # For simplicity, treat all inputDrvs as buildInputs
+                        # In a more sophisticated implementation, we could distinguish
+                        # between build and propagated inputs
+                        build_inputs.append(dep_name)
+                
+                dep_entry = {
+                    "packageId": f"{package_name}-{version}",
+                    "pname": package_name,
+                    "version": version,
+                    "attributePath": attr_path,
+                    "buildInputs": build_inputs,
+                    "propagatedBuildInputs": propagated_inputs,
+                    "totalDependencies": len(build_inputs) + len(propagated_inputs),
+                    "lastUpdated": current_ts
+                }
+                
+                dependencies.append(dep_entry)
+                
+            except Exception as e:
+                logger.warning("Error processing dependency for %s: %s", 
+                             pkg_data.get("name", "unknown"), e)
+                continue
+        
+        logger.info("Successfully processed %d dependency entries", len(dependencies))
+        return dependencies
+
+    def _parse_name_version(self, name: str) -> Tuple[str, str]:
+        """Parse package name and version from nix-eval-jobs name field."""
+        if not name:
+            return "unknown", "unknown"
+        
+        # Nix package names are typically in format "name-version"
+        # We need to split carefully as names can contain dashes
+        parts = name.split('-')
+        if len(parts) < 2:
+            return name, "unknown"
+        
+        # Try to find where version starts (usually a digit or 'v')
+        for i, part in enumerate(parts):
+            if part and (part[0].isdigit() or part.startswith('v')):
+                package_name = '-'.join(parts[:i])
+                version = '-'.join(parts[i:])
+                return package_name if package_name else name, version
+        
+        # Fallback: treat last part as version
+        return '-'.join(parts[:-1]), parts[-1]
+
+    def _extract_package_name_from_store_path(self, store_path: str) -> Optional[str]:
+        """Extract package name from a Nix store path."""
+        # Store paths are like "/nix/store/hash-name-version"
+        basename = Path(store_path).name
+        if '-' in basename:
+            # Remove hash prefix and extract name
+            parts = basename.split('-', 1)
+            if len(parts) > 1:
+                name_version = parts[1]
+                # Extract just the name part
+                name, _ = self._parse_name_version(name_version)
+                return name
+        return None
 
     def _sanitize_string(self, s: Any) -> str:
         if not isinstance(s, str):
@@ -285,10 +409,10 @@ class NixpkgsExtractor:
             }
         if isinstance(license_item, dict):
             return {
-                "shortName": self._sanitize_string(license_item.get("shortName") or ""),
-                "fullName": self._sanitize_string(license_item.get("fullName") or ""),
-                "spdxId": self._sanitize_string(license_item.get("spdxId") or ""),
-                "url": self._sanitize_string(license_item.get("url") or ""),
+                "shortName": self._sanitize_string(license_item.get("shortName", "")),
+                "fullName": self._sanitize_string(license_item.get("fullName", "")),
+                "spdxId": self._sanitize_string(license_item.get("spdxId", "")),
+                "url": self._sanitize_string(license_item.get("url", "")),
                 "free": license_item.get("free") if isinstance(license_item.get("free"), bool) else None,
                 "redistributable": license_item.get("redistributable") if isinstance(license_item.get("redistributable"), bool) else None,
                 "deprecated": license_item.get("deprecated") if isinstance(license_item.get("deprecated"), bool) else None,
@@ -315,9 +439,9 @@ class NixpkgsExtractor:
         for m in maintainers:
             if isinstance(m, dict):
                 entry = {
-                    "name": self._sanitize_string(m.get("name") or ""),
-                    "email": self._sanitize_string(m.get("email") or ""),
-                    "github": self._sanitize_string(m.get("github") or ""),
+                    "name": self._sanitize_string(m.get("name", "")),
+                    "email": self._sanitize_string(m.get("email", "")),
+                    "github": self._sanitize_string(m.get("github", "")),
                     "githubId": m.get("githubId") if isinstance(m.get("githubId"), int) else None,
                 }
                 if entry["name"] or entry["email"] or entry["github"]:
@@ -456,127 +580,6 @@ class NixpkgsExtractor:
             return "development"
         
         return "misc"
-    
-    def _process_dependency_data(self, raw_deps: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Process dependency data from extract-dependencies.py output."""
-        packages = raw_deps.get('packages', [])
-        processed_deps = []
-        
-        logger.info("Processing %d dependency entries", len(packages))
-        
-        for pkg in packages:
-            try:
-                # Extract dependency information
-                build_inputs = pkg.get('buildInputs', [])
-                propagated_inputs = pkg.get('propagatedBuildInputs', [])
-                
-                dep_entry = {
-                    "packageId": pkg.get('id', ''),
-                    "pname": pkg.get('pname', ''),
-                    "version": pkg.get('version', ''),
-                    "attributePath": pkg.get('attrPath', ''),
-                    "buildInputs": self._normalize_dep_list(build_inputs),
-                    "propagatedBuildInputs": self._normalize_dep_list(propagated_inputs),
-                    "totalDependencies": len(build_inputs) + len(propagated_inputs),
-                    "lastUpdated": datetime.now(timezone.utc).isoformat()
-                }
-                
-                processed_deps.append(dep_entry)
-                
-            except Exception as e:
-                logger.warning("Error processing dependency for %s: %s", 
-                             pkg.get('id', 'unknown'), e)
-                continue
-        
-        logger.info("Successfully processed %d dependency entries", len(processed_deps))
-        return processed_deps
-    
-    def _normalize_dep_list(self, deps: List[str]) -> List[str]:
-        """Normalize dependency list to extract package names."""
-        normalized = []
-        for dep in deps:
-            if isinstance(dep, str) and dep.strip():
-                # Extract package name from store path
-                # e.g., "/nix/store/abc123-hello-1.0" -> "hello"
-                parts = dep.split('/')[-1]  # Get basename
-                if '-' in parts:
-                    # Remove hash prefix
-                    name_version = '-'.join(parts.split('-')[1:])
-                    # Try to extract just the name part
-                    if '-' in name_version:
-                        name = name_version.split('-')[0]
-                    else:
-                        name = name_version
-                    normalized.append(name)
-        return normalized
-    
-    def _validate_extraction_coverage(self, nix_env_data: Dict[str, Any], deps_data: Dict[str, Any]) -> None:
-        """Validate that sharded extraction covers packages found by nix-env."""
-        nix_env_count = len(nix_env_data)
-        deps_packages = deps_data.get('packages', [])
-        deps_count = len(deps_packages)
-        
-        logger.info("=== EXTRACTION COVERAGE VALIDATION ===")
-        logger.info(f"📊 nix-env packages: {nix_env_count}")
-        logger.info(f"🔍 Sharded extraction packages: {deps_count}")
-        
-        # Calculate coverage percentage
-        if nix_env_count > 0:
-            coverage_pct = (deps_count / nix_env_count) * 100
-            logger.info(f"📈 Coverage: {coverage_pct:.1f}% ({deps_count}/{nix_env_count})")
-        else:
-            coverage_pct = 0
-            logger.warning("No packages found by nix-env - unable to calculate coverage")
-        
-        # Extract package names for comparison
-        nix_env_names = set()
-        for pkg_path, pkg_info in nix_env_data.items():
-            pname = pkg_info.get("pname") or self._extract_package_name_from_path(pkg_path)
-            if pname and pname != "unknown":
-                nix_env_names.add(pname)
-        
-        deps_names = set()
-        for pkg in deps_packages:
-            pname = pkg.get('pname')
-            if pname and pname != "unknown":
-                deps_names.add(pname)
-        
-        # Find gaps
-        missing_in_deps = nix_env_names - deps_names
-        only_in_deps = deps_names - nix_env_names
-        
-        if missing_in_deps:
-            missing_count = len(missing_in_deps)
-            logger.warning(f"⚠️  {missing_count} packages found by nix-env but missing in sharded extraction")
-            if missing_count <= 10:
-                logger.warning(f"Missing packages: {', '.join(sorted(missing_in_deps))}")
-            else:
-                sample_missing = list(sorted(missing_in_deps))[:10]
-                logger.warning(f"Sample missing packages: {', '.join(sample_missing)}... (+{missing_count-10} more)")
-        
-        if only_in_deps:
-            extra_count = len(only_in_deps)  
-            logger.info(f"ℹ️  {extra_count} packages found only in sharded extraction (likely sub-packages or dependencies)")
-            if extra_count <= 5:
-                logger.info(f"Extra packages: {', '.join(sorted(only_in_deps))}")
-        
-        # Log discovery method info from metadata
-        metadata = deps_data.get('metadata', {})
-        if metadata.get('discovery_method') == 'dynamic':
-            total_shards = metadata.get('total_shards_processed', 0)
-            logger.info(f"🎯 Dynamic discovery used {total_shards} shards")
-        
-        # Coverage assessment
-        if coverage_pct >= 95:
-            logger.info("✅ Excellent coverage - sharded extraction is comprehensive")
-        elif coverage_pct >= 85:
-            logger.info("✅ Good coverage - minor gaps acceptable")
-        elif coverage_pct >= 70:
-            logger.warning("⚠️  Moderate coverage - some packages may be missing")  
-        else:
-            logger.error(f"❌ Poor coverage ({coverage_pct:.1f}%) - significant gaps in package extraction")
-            
-        logger.info("========================================")
     
     def __del__(self):
         """Cleanup on object destruction."""

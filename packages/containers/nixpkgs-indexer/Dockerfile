@@ -5,11 +5,12 @@ FROM nixos/nix:2.31.0
 WORKDIR /app
 
 # Copy the Nix environment definition into the container
-COPY environment.nix /tmp/environment.nix
+COPY packages/containers/nixpkgs-indexer/environment.nix /tmp/environment.nix
 
-# Install all dependencies from the Nix file.
-# We also remove the file in the same layer to keep the final image clean.
-RUN nix-env -if /tmp/environment.nix && rm /tmp/environment.nix
+# Install Nix dependencies including nix-eval-jobs
+# We also clean up temporary files in the same layer to keep the final image clean.
+RUN nix-env -if /tmp/environment.nix && \
+    rm -rf /tmp/environment.nix
 
 # LanceDB native FTS is used instead of tantivy-py
 
@@ -19,7 +20,7 @@ LABEL org.opencontainers.image.description="Indexes nixpkgs metadata and embeddi
 
 # Copy application source code.
 # We do this before creating the user to set ownership correctly in the next step.
-COPY src/ ./src/
+COPY packages/containers/nixpkgs-indexer/src/ ./src/
 
 # Configure the environment for the application
 ENV PYTHONPATH=/app

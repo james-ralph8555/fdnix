@@ -57,3 +57,6 @@ nixpkgs/
 # Python
 __pycache__/
 *.pyc
+
+# External tools
+tools/
