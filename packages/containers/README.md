@@ -92,10 +92,11 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
 ## Phase Details
 
 - Metadata phase:
-  - Extracts package metadata from the nixpkgs channel via `nix-env -qaP --json` (no git clone).
+  - Extracts package metadata from nixpkgs using `nix-eval-jobs` (clones nixpkgs release branch).
+  - Processes JSONL output to extract both package metadata and dependency information.
   - Cleans and normalizes fields (ids, names, attrs, descriptions, maintainers, etc.).
-  - Writes `packages` table to LanceDB.
-  - Optionally uploads the main dataset directory to S3 under the configured key prefix.
+  - Writes `packages` table and `dependencies` table to LanceDB.
+  - Optionally uploads the main dataset directory and dependency data to S3 under the configured key prefixes.
 - Embedding phase:
   - Opens existing LanceDB (downloads from S3 when `ARTIFACTS_BUCKET` plus the relevant key is provided if not present locally).
   - Generates text embeddings via AWS Bedrock batch inference (Amazon Titan Embeddings). Batch I/O is managed via S3; the task polls for completion.

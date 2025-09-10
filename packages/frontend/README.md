@@ -62,7 +62,7 @@ The expected response shapes are defined in `src/types/index.ts`.
 
 - The dev server runs on `http://localhost:3000` and expects the API to allow CORS from the browser.
 - Debounced search: input triggers queries after a short delay; hitting Enter triggers immediately.
-- Install commands: each result offers a quick copy for common `nix-env`/`nix-shell` flows.
+- Install commands: each result offers a quick copy for common `nix-env`/`nix-shell` user commands (with legacy warnings).
 - About and licensing details are available at `/about.html` in `public/`.
 
 ## Testing

@@ -84,9 +84,8 @@ class NixpkgsExtractor:
         # Determine target system for nixpkgs
         system = os.environ.get("NIX_SYSTEM") or self._detect_system()
 
-        # Prefer flake-style invocation which is supported by current nix-eval-jobs
-        # Use legacyPackages to get the classic pkgs set for the detected system
-        flake_ref = f"{self.nixpkgs_path}#legacyPackages.{system}"
+        # Use the Hydra-style evaluation approach as recommended in nix-eval-jobs docs
+        release_nix = self.nixpkgs_path / "pkgs" / "top-level" / "release.nix"
 
         cmd = [
             "nix-eval-jobs",
@@ -95,13 +94,10 @@ class NixpkgsExtractor:
             "--force-recurse",
             "--impure",
             "--workers",
-            "1",
+            "8",
             "--max-memory-size",
             "4096",
-            "--extra-experimental-features",
-            "nix-command flakes",
-            "--flake",
-            flake_ref,
+            str(release_nix),
         ]
 
         # Create temporary file for output

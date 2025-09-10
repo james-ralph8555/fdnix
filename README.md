@@ -84,7 +84,7 @@ Quick Wins
 - Compare view: select 2–3 packages → versions, size, deps, build inputs, platforms side-by-side.
   - Status: planned.
 - Copyable snippets: nix shell -p, nix run, flake.nix output template.
-  - Status: partial. Implemented `nix-env -iA` (install) and `nix-shell -p` (temporary shell). To add: `nix shell -p`, `nix run`, flake template.
+  - Status: partial. Implemented `nix-env -iA` (install) and `nix-shell -p` (temporary shell) commands for users. To add: `nix shell -p`, `nix run`, flake template. Note: Backend now uses `nix-eval-jobs` for data extraction.
 
 Medium
 - Semantic search over description/readme/maintainers using the LanceDB setup; rerank by attrpath exact matches.

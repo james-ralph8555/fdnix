@@ -227,8 +227,8 @@ export class FdnixPipelineStack extends Stack {
 
     // Fargate Task Definition for nixpkgs-indexer
     this.nixpkgsIndexerTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsIndexerTaskDefinition', {
-      cpu: 2048,
-      memoryLimitMiB: 16384,
+      cpu: 8192,
+      memoryLimitMiB: 49152,
       executionRole: fargateExecutionRole,
       taskRole: fargateTaskRole,
     });

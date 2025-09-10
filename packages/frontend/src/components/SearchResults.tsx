@@ -225,6 +225,17 @@ function PackageCard(props: PackageCardProps) {
               copied={copiedCommand() === 'shell'}
             />
           </div>
+          <div class="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+            <div class="flex items-start gap-2">
+              <svg class="h-4 w-4 text-amber-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.98-.833-2.75 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
+              </svg>
+              <div class="text-xs text-amber-800">
+                <p class="font-medium">Legacy commands:</p>
+                <p>Consider using modern alternatives like <code class="font-mono bg-amber-100 px-1 rounded">nix shell</code> or <code class="font-mono bg-amber-100 px-1 rounded">nix run</code> instead of <code class="font-mono">nix-env</code>.</p>
+              </div>
+            </div>
+          </div>
         </div>
       </Show>
     </div>
