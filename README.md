@@ -201,6 +201,10 @@ If you want to track progress or help prioritize features, please open an issue.
 
 See `packages/cdk/README.md` for step‑by‑step DNS and validation instructions.
 
+## Acknowledgements
+
+Special thanks to the [nix-eval-jobs](https://github.com/nix-community/nix-eval-jobs) project for providing an efficient tool for evaluating and extracting Nix package metadata at scale. This tool is essential to fdnix's data pipeline, enabling fast extraction of package information from the entire nixpkgs repository.
+
 ## Legal & Attribution
 
 - Independent project: fdnix is an independent, community-built website. It is not affiliated with, sponsored by, or endorsed by the NixOS Foundation, the Nix Team, or the Nixpkgs project.

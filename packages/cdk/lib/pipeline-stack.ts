@@ -19,10 +19,16 @@ export interface FdnixPipelineStackProps extends StackProps {
 
 export class FdnixPipelineStack extends Stack {
   public readonly cluster: ecs.Cluster;
-  public readonly nixpkgsIndexerRepository: ecr.Repository;
-  public readonly nixpkgsIndexerTaskDefinition: ecs.FargateTaskDefinition;
+  // Stage 1: Evaluator
+  public readonly nixpkgsEvaluatorRepository: ecr.Repository;
+  public readonly nixpkgsEvaluatorTaskDefinition: ecs.FargateTaskDefinition;
+  public readonly nixpkgsEvaluatorDockerBuild: DockerBuildConstruct;
+  // Stage 2: Processor
+  public readonly nixpkgsProcessorRepository: ecr.Repository;
+  public readonly nixpkgsProcessorTaskDefinition: ecs.FargateTaskDefinition;
+  public readonly nixpkgsProcessorDockerBuild: DockerBuildConstruct;
+  // Pipeline
   public readonly pipelineStateMachine: stepfunctions.StateMachine;
-  public readonly nixpkgsIndexerDockerBuild: DockerBuildConstruct;
   public readonly bedrockBatchRole: iam.Role;
 
   constructor(scope: Construct, id: string, props: FdnixPipelineStackProps) {
@@ -88,25 +94,41 @@ export class FdnixPipelineStack extends Stack {
       containerInsightsV2: ecs.ContainerInsights.ENABLED,
     });
 
-    // ECR Repository for nixpkgs-indexer
-    this.nixpkgsIndexerRepository = new ecr.Repository(this, 'NixpkgsIndexerRepository', {
+    // ECR Repositories for both stages
+    this.nixpkgsEvaluatorRepository = new ecr.Repository(this, 'NixpkgsEvaluatorRepository', {
+      repositoryName: 'fdnix-nixpkgs-evaluator',
       lifecycleRules: [{
         maxImageCount: 10,
       }],
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    // Docker build construct for nixpkgs-indexer
-    const containersPath = path.join(__dirname, '../../containers');
-    
-    this.nixpkgsIndexerDockerBuild = new DockerBuildConstruct(this, 'NixpkgsIndexerDockerBuild', {
-      repository: this.nixpkgsIndexerRepository,
-      dockerfilePath: path.join(containersPath, 'nixpkgs-indexer/Dockerfile'),
-      contextPath: path.join(containersPath, 'nixpkgs-indexer'),
-      imageName: 'nixpkgs-indexer',
+    this.nixpkgsProcessorRepository = new ecr.Repository(this, 'NixpkgsProcessorRepository', {
+      repositoryName: 'fdnix-nixpkgs-processor',
+      lifecycleRules: [{
+        maxImageCount: 10,
+      }],
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    // IAM roles for Fargate tasks
+    // Docker build constructs for both stages
+    const containersPath = path.join(__dirname, '../../containers');
+    
+    this.nixpkgsEvaluatorDockerBuild = new DockerBuildConstruct(this, 'NixpkgsEvaluatorDockerBuild', {
+      repository: this.nixpkgsEvaluatorRepository,
+      dockerfilePath: path.join(containersPath, 'nixpkgs-evaluator/Dockerfile'),
+      contextPath: path.join(containersPath, 'nixpkgs-evaluator'),
+      imageName: 'nixpkgs-evaluator',
+    });
+
+    this.nixpkgsProcessorDockerBuild = new DockerBuildConstruct(this, 'NixpkgsProcessorDockerBuild', {
+      repository: this.nixpkgsProcessorRepository,
+      dockerfilePath: path.join(containersPath, 'nixpkgs-processor/Dockerfile'),
+      contextPath: path.join(containersPath, 'nixpkgs-processor'),
+      imageName: 'nixpkgs-processor',
+    });
+
+    // IAM roles for Fargate tasks - shared execution role
     const fargateExecutionRole = new iam.Role(this, 'FargateExecutionRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies: [
@@ -114,12 +136,19 @@ export class FdnixPipelineStack extends Stack {
       ],
     });
 
-    const fargateTaskRole = new iam.Role(this, 'FargateTaskRole', {
+    // Stage 1: Evaluator task role (minimal permissions)
+    const evaluatorTaskRole = new iam.Role(this, 'EvaluatorTaskRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
     });
 
-    // Grant database access to task role
-    databaseStack.artifactsBucket.grantReadWrite(fargateTaskRole);
+    // Stage 2: Processor task role (full permissions)
+    const processorTaskRole = new iam.Role(this, 'ProcessorTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+    });
+
+    // Grant S3 access - evaluator needs read/write for JSONL, processor needs full access
+    databaseStack.artifactsBucket.grantReadWrite(evaluatorTaskRole);
+    databaseStack.artifactsBucket.grantReadWrite(processorTaskRole);
 
     // Create IAM role for Bedrock batch inference
     this.bedrockBatchRole = new iam.Role(this, 'BedrockBatchRole', {
@@ -174,8 +203,8 @@ export class FdnixPipelineStack extends Stack {
       },
     });
 
-    // Grant Bedrock permissions to the Fargate task role
-    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
+    // Grant Bedrock permissions only to the processor task role
+    processorTaskRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'bedrock:InvokeModel', // Standard API for individual embedding requests
@@ -204,7 +233,8 @@ export class FdnixPipelineStack extends Stack {
       this,
     );
 
-    fargateTaskRole.addToPolicy(new iam.PolicyStatement({
+    // Grant Lambda layer publishing permissions only to processor
+    processorTaskRole.addToPolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: [
         'lambda:PublishLayerVersion',
@@ -219,25 +249,54 @@ export class FdnixPipelineStack extends Stack {
     }));
 
 
-    // CloudWatch Log Group
-    const indexerLogGroup = new logs.LogGroup(this, 'NixpkgsIndexerLogGroup', {
+    // CloudWatch Log Groups for both stages
+    const evaluatorLogGroup = new logs.LogGroup(this, 'NixpkgsEvaluatorLogGroup', {
+      logGroupName: '/aws/ecs/fdnix-nixpkgs-evaluator',
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    // Fargate Task Definition for nixpkgs-indexer
-    this.nixpkgsIndexerTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsIndexerTaskDefinition', {
-      cpu: 8192,
-      memoryLimitMiB: 49152,
-      executionRole: fargateExecutionRole,
-      taskRole: fargateTaskRole,
+    const processorLogGroup = new logs.LogGroup(this, 'NixpkgsProcessorLogGroup', {
+      logGroupName: '/aws/ecs/fdnix-nixpkgs-processor',
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: RemovalPolicy.RETAIN,
     });
 
-    const indexerContainer = this.nixpkgsIndexerTaskDefinition.addContainer('NixpkgsIndexerContainer', {
-      image: ecs.ContainerImage.fromDockerImageAsset(this.nixpkgsIndexerDockerBuild.dockerImageAsset),
+    // Stage 1: Fargate Task Definition for nixpkgs-evaluator (8vCPU, 48GB RAM)
+    this.nixpkgsEvaluatorTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsEvaluatorTaskDefinition', {
+      cpu: 8192,      // 8 vCPU - needed for nix-eval-jobs
+      memoryLimitMiB: 49152,  // 48GB RAM - needed for nix-eval-jobs
+      executionRole: fargateExecutionRole,
+      taskRole: evaluatorTaskRole,
+    });
+
+    const evaluatorContainer = this.nixpkgsEvaluatorTaskDefinition.addContainer('NixpkgsEvaluatorContainer', {
+      image: ecs.ContainerImage.fromDockerImageAsset(this.nixpkgsEvaluatorDockerBuild.dockerImageAsset),
       logging: ecs.LogDrivers.awsLogs({
-        streamPrefix: 'nixpkgs-indexer',
-        logGroup: indexerLogGroup,
+        streamPrefix: 'nixpkgs-evaluator',
+        logGroup: evaluatorLogGroup,
+      }),
+      environment: {
+        AWS_REGION: this.region,
+        ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
+        // Output will be picked up by Step Functions and passed to Stage 2
+        JSONL_OUTPUT_KEY: 'evaluations/nixpkgs-raw.jsonl', // Will be overridden with timestamp
+      },
+    });
+
+    // Stage 2: Fargate Task Definition for nixpkgs-processor (2vCPU, 6GB RAM)
+    this.nixpkgsProcessorTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsProcessorTaskDefinition', {
+      cpu: 2048,      // 2 vCPU - optimized for data processing
+      memoryLimitMiB: 6144,   // 6GB RAM - sufficient for LanceDB operations
+      executionRole: fargateExecutionRole,
+      taskRole: processorTaskRole,
+    });
+
+    const processorContainer = this.nixpkgsProcessorTaskDefinition.addContainer('NixpkgsProcessorContainer', {
+      image: ecs.ContainerImage.fromDockerImageAsset(this.nixpkgsProcessorDockerBuild.dockerImageAsset),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'nixpkgs-processor',
+        logGroup: processorLogGroup,
       }),
       environment: {
         AWS_REGION: this.region,
@@ -252,6 +311,8 @@ export class FdnixPipelineStack extends Stack {
         PROCESSING_BATCH_SIZE: '100', // Smaller batches for better rate limiting
         // S3 configuration
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
+        // Input from Stage 1 - will be set dynamically by Step Functions
+        // JSONL_INPUT_KEY: 'evaluations/nixpkgs-raw.jsonl', // Set by Step Functions
         // Dual database configuration
         LANCEDB_DATA_KEY: 'snapshots/fdnix-data.lancedb',        // Main database with all metadata
         LANCEDB_MINIFIED_KEY: 'snapshots/fdnix.lancedb',        // Minified database for Lambda layer
@@ -263,21 +324,67 @@ export class FdnixPipelineStack extends Stack {
       },
     });
 
-    // Step Functions State Machine for pipeline orchestration
-    const indexerTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsIndexerTask', {
+    // Step Functions State Machine for two-stage pipeline orchestration
+    // Stage 1: Evaluator Task
+    const evaluatorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsEvaluatorTask', {
       integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
       cluster: this.cluster,
-      taskDefinition: this.nixpkgsIndexerTaskDefinition,
+      taskDefinition: this.nixpkgsEvaluatorTaskDefinition,
       launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
         platformVersion: ecs.FargatePlatformVersion.LATEST,
       }),
       assignPublicIp: true, // Required for public subnet access to AWS services
       securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
       subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
+      containerOverrides: [{
+        containerDefinition: evaluatorContainer,
+        environment: [
+          {
+            name: 'JSONL_OUTPUT_KEY',
+            value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          }
+        ]
+      }],
+      resultPath: '$.EvaluatorResult',
     });
 
-    // Define the simplified state machine (single indexer task; layer publish moved into container)
-    const definition = indexerTask;
+    // Stage 2: Processor Task (depends on evaluator output)
+    const processorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsProcessorTask', {
+      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
+      cluster: this.cluster,
+      taskDefinition: this.nixpkgsProcessorTaskDefinition,
+      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
+        platformVersion: ecs.FargatePlatformVersion.LATEST,
+      }),
+      assignPublicIp: true, // Required for public subnet access to AWS services
+      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
+      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
+      containerOverrides: [{
+        containerDefinition: processorContainer,
+        environment: [
+          {
+            name: 'JSONL_INPUT_KEY',
+            value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          },
+          {
+            name: 'LANCEDB_DATA_KEY',
+            value: stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          },
+          {
+            name: 'LANCEDB_MINIFIED_KEY',
+            value: stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          },
+          {
+            name: 'DEPENDENCY_S3_KEY',
+            value: stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          }
+        ]
+      }],
+      resultPath: '$.ProcessorResult',
+    });
+
+    // Define the two-stage pipeline: Evaluator -> Processor
+    const definition = evaluatorTask.next(processorTask);
 
     this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
       definition,
@@ -305,7 +412,8 @@ export class FdnixPipelineStack extends Stack {
         'ecs:DescribeTasks',
       ],
       resources: [
-        this.nixpkgsIndexerTaskDefinition.taskDefinitionArn,
+        this.nixpkgsEvaluatorTaskDefinition.taskDefinitionArn,
+        this.nixpkgsProcessorTaskDefinition.taskDefinitionArn,
         `arn:aws:ecs:${this.region}:${this.account}:task/${this.cluster.clusterName}/*`,
       ],
     }));
@@ -317,7 +425,8 @@ export class FdnixPipelineStack extends Stack {
       ],
       resources: [
         fargateExecutionRole.roleArn,
-        fargateTaskRole.roleArn,
+        evaluatorTaskRole.roleArn,
+        processorTaskRole.roleArn,
       ],
     }));
   }

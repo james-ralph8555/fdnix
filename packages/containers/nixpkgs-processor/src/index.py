@@ -6,7 +6,8 @@ import logging
 import asyncio
 from typing import List, Dict, Any
 
-from nixpkgs_extractor import NixpkgsExtractor
+from s3_jsonl_reader import S3JsonlReader
+from data_processor import DataProcessor
 from lancedb_writer import LanceDBWriter, DependencyS3Writer
 from embedding_generator import EmbeddingGenerator
 from layer_publisher import LayerPublisher
@@ -15,8 +16,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-# Keep bedrock_client at INFO by default; no forced DEBUG noise
-logger = logging.getLogger("fdnix.nixpkgs-indexer")
+logger = logging.getLogger("fdnix.nixpkgs-processor")
 
 
 def _truthy(val: str | None) -> bool:
@@ -26,34 +26,31 @@ def _truthy(val: str | None) -> bool:
 
 
 def validate_env() -> None:
-    """Validate environment variables"""
-    # Optional S3 upload: requires bucket and region, plus at least one key
-    has_bucket = bool(os.environ.get("ARTIFACTS_BUCKET"))
+    """Validate environment variables for Stage 2 (processor)."""
+    # Required for reading Stage 1 output
+    required_basic = ["ARTIFACTS_BUCKET", "AWS_REGION", "JSONL_INPUT_KEY"]
+    missing_basic = [k for k in required_basic if not os.environ.get(k)]
+    
+    if missing_basic:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing_basic)}")
+    
+    # Set default keys for outputs if not provided
     has_data_key = bool(os.environ.get("LANCEDB_DATA_KEY"))
     has_minified_key = bool(os.environ.get("LANCEDB_MINIFIED_KEY"))
-    has_region = bool(os.environ.get("AWS_REGION"))
     
-    if has_bucket or has_data_key or has_minified_key or has_region:
-        required_basic = [k for k in ("ARTIFACTS_BUCKET", "AWS_REGION") if not os.environ.get(k)]
-        if required_basic:
-            raise RuntimeError(
-                "S3 upload requested but missing envs: " + ", ".join(required_basic)
-            )
-        
-        # Set default keys if not provided but S3 upload is configured
-        if not has_data_key or not has_minified_key:
-            import time
-            timestamp = int(time.time())
-            if not has_data_key:
-                os.environ["LANCEDB_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.lancedb"
-            if not has_minified_key:
-                os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.lancedb"
-        
-        # Set default dependency key if S3 is configured but dependency key is not set
-        if has_bucket and not os.environ.get("DEPENDENCY_S3_KEY"):
-            import time
-            timestamp = int(time.time())
-            os.environ["DEPENDENCY_S3_KEY"] = f"dependencies/fdnix-deps-{timestamp}.json"
+    if not has_data_key or not has_minified_key:
+        import time
+        timestamp = int(time.time())
+        if not has_data_key:
+            os.environ["LANCEDB_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.lancedb"
+        if not has_minified_key:
+            os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.lancedb"
+    
+    # Set default dependency key if not set
+    if not os.environ.get("DEPENDENCY_S3_KEY"):
+        import time
+        timestamp = int(time.time())
+        os.environ["DEPENDENCY_S3_KEY"] = f"dependencies/fdnix-deps-{timestamp}.json"
 
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):
@@ -67,9 +64,20 @@ def validate_env() -> None:
 
 
 async def main() -> int:
-    logger.info("Starting fdnix nixpkgs-indexer...")
+    """Main entry point for Stage 2: nixpkgs data processing."""
+    logger.info("Starting fdnix nixpkgs-processor (Stage 2)...")
+    
     try:
         validate_env()
+        
+        bucket = os.environ["ARTIFACTS_BUCKET"]
+        region = os.environ["AWS_REGION"]
+        jsonl_input_key = os.environ["JSONL_INPUT_KEY"]
+        
+        logger.info("Configuration:")
+        logger.info("  S3 Bucket: %s", bucket)
+        logger.info("  S3 Region: %s", region)
+        logger.info("  JSONL Input Key: %s", jsonl_input_key)
         
         processing_mode = os.environ.get("PROCESSING_MODE", "both").lower()
         # Map aliases
@@ -80,24 +88,31 @@ async def main() -> int:
         main_db_path = os.environ.get("OUTPUT_PATH", "/out/fdnix-data.lancedb")
         minified_db_path = os.environ.get("OUTPUT_MINIFIED_PATH", "/out/fdnix.lancedb")
         
-        # Phase 1: Metadata Generation (if requested)
-        if processing_mode in ("metadata", "both"):
-            logger.info("=== METADATA GENERATION PHASE ===")
+        # Phase 1: Read raw JSONL from Stage 1
+        logger.info("=== JSONL READING PHASE ===")
+        reader = S3JsonlReader(bucket=bucket, key=jsonl_input_key, region=region)
+        raw_packages, metadata = reader.read_raw_jsonl()
+        
+        if not raw_packages:
+            logger.warning("No packages found in JSONL! This may indicate an issue.")
+            return 1
             
-            extractor = NixpkgsExtractor()
+        logger.info("Successfully read %d packages from Stage 1", len(raw_packages))
+        
+        # Phase 2: Data Processing (if requested)
+        if processing_mode in ("metadata", "both"):
+            logger.info("=== DATA PROCESSING PHASE ===")
+            
+            processor = DataProcessor()
+            packages, dependencies = processor.process_raw_packages(raw_packages)
             
             # Create main database with all metadata (upload to data key)
             main_writer = LanceDBWriter(
                 output_path=main_db_path,
-                s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
+                s3_bucket=bucket,
                 s3_key=os.environ.get("LANCEDB_DATA_KEY"),
-                region=os.environ.get("AWS_REGION"),
+                region=region,
             )
-
-            logger.info("Extracting nixpkgs metadata and dependencies...")
-            packages, dependencies = extractor.extract_all_packages()
-            logger.info("Extracted %d packages and %d dependency entries from nixpkgs", 
-                       len(packages), len(dependencies))
 
             logger.info("Writing metadata to main LanceDB artifact...")
             main_writer.write_artifact(packages)
@@ -112,13 +127,13 @@ async def main() -> int:
             if dependencies and os.environ.get("DEPENDENCY_S3_KEY"):
                 logger.info("Writing comprehensive dependency data to S3...")
                 dep_s3_writer = DependencyS3Writer(
-                    s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
+                    s3_bucket=bucket,
                     s3_key=os.environ.get("DEPENDENCY_S3_KEY"), 
-                    region=os.environ.get("AWS_REGION")
+                    region=region
                 )
                 dep_metadata = {
-                    "extraction_timestamp": main_writer._db.open_table("packages").to_pandas()["last_updated"].iloc[0] if packages else None,
-                    "nixpkgs_branch": "release-25.05",
+                    "extraction_timestamp": metadata.get("extraction_timestamp", "unknown"),
+                    "nixpkgs_branch": metadata.get("nixpkgs_branch", "unknown"),
                     "total_packages": len(packages)
                 }
                 dep_s3_writer.write_dependency_json(dependencies, dep_metadata)
@@ -126,7 +141,7 @@ async def main() -> int:
             
             logger.info("Main database generation completed successfully!")
         
-        # Phase 2: Embedding Generation (if needed and enabled)
+        # Phase 3: Embedding Generation (if needed and enabled)
         enable_embeddings = _truthy(os.environ.get("ENABLE_EMBEDDINGS", "true"))  # Default to enabled
         if processing_mode in ("embedding", "both") and enable_embeddings:
             logger.info("=== EMBEDDING GENERATION PHASE ===")
@@ -147,7 +162,7 @@ async def main() -> int:
                 logger.info("Force rebuild enabled - will regenerate all embeddings")
             
             # Ensure S3 key is set for main DB during embedding stage
-            if os.environ.get("ARTIFACTS_BUCKET") and not os.environ.get("LANCEDB_DATA_KEY"):
+            if not os.environ.get("LANCEDB_DATA_KEY"):
                 os.environ["LANCEDB_DATA_KEY"] = "fdnix-data.lancedb"
 
             generator = EmbeddingGenerator()
@@ -157,39 +172,39 @@ async def main() -> int:
             logger.info("=== EMBEDDING GENERATION SKIPPED (EMBEDDINGS DISABLED) ===")
             logger.info("ENABLE_EMBEDDINGS is set to false, skipping embedding generation")
 
-        # Phase 3: Minified Database Generation (if requested)
+        # Phase 4: Minified Database Generation (if requested)
         if processing_mode in ("minified", "both"):
             logger.info("=== MINIFIED DATABASE GENERATION PHASE ===")
             minified_writer = LanceDBWriter(
                 output_path=minified_db_path,
-                s3_bucket=os.environ.get("ARTIFACTS_BUCKET"),
+                s3_bucket=bucket,
                 s3_key=os.environ.get("LANCEDB_MINIFIED_KEY"),
-                region=os.environ.get("AWS_REGION"),
+                region=region,
             )
             logger.info("Creating minified database from main database (with embeddings if present)...")
             minified_writer.create_minified_db_from_main(main_db_path)
             logger.info("Minified database generation completed successfully!")
         
-        # Phase 3: Publish LanceDB layer (if requested)
+        # Phase 5: Publish LanceDB layer (if requested)
         if _truthy(os.environ.get("PUBLISH_LAYER")):
             logger.info("=== LAYER PUBLISH PHASE ===")
             layer_arn = os.environ.get("LAYER_ARN", "").strip()
-            bucket = os.environ.get("ARTIFACTS_BUCKET", "").strip()
             
             # Use minified key for layer publishing
             key = os.environ.get("LANCEDB_MINIFIED_KEY", "")
             if not key:
                 raise RuntimeError("LANCEDB_MINIFIED_KEY required for layer publishing")
 
-            publisher = LayerPublisher(region=os.environ.get("AWS_REGION"))
+            publisher = LayerPublisher(region=region)
             publisher.publish_from_s3(bucket=bucket, key=key, layer_arn=layer_arn)
             logger.info("Layer published using minified database from key: %s", key)
 
-        logger.info("Indexing completed successfully!")
+        logger.info("=== STAGE 2 COMPLETED SUCCESSFULLY ===")
+        logger.info("Processing completed successfully!")
         return 0
 
     except Exception as exc:
-        logger.exception("Error during nixpkgs indexing: %s", exc)
+        logger.exception("Error during nixpkgs processing: %s", exc)
         return 1
 
 

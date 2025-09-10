@@ -1,27 +1,37 @@
 # fdnix Data Processing Containers
 
-Status: Three-phase pipeline with S3 artifacts (metadata → embeddings → minified), now backed by LanceDB datasets.
+Status: **Two-stage pipeline architecture** for optimal resource utilization - nixpkgs evaluation (Stage 1) followed by data processing (Stage 2).
 
-## What’s Included
+## What's Included
 
-- Nixpkgs Indexer (`packages/containers/nixpkgs-indexer/`)
-  - Phases: Metadata, Embeddings, Minified (run individually or all)
-  - Outputs: Main dataset `fdnix-data.lancedb` (metadata + embeddings) → Minified dataset `fdnix.lancedb` (FTS, essential columns)
-  - Modes: `metadata`, `embedding`, `minified`, or `both`/`full` (all phases; default)
-  - S3 integration for upload/download of LanceDB directory trees under key prefixes
-  - Runs as non-root; dependencies installed via Nix on `nixos/nix` (Python, LanceDB, pydantic, pandas, pyarrow, boto3, httpx, etc.)
+### Current Architecture (Two-Stage Pipeline)
 
-Deprecated: the separate `metadata-generator` and `embedding-generator` containers have been replaced by the unified processor.
+- **Stage 1: Nixpkgs Evaluator** (`packages/containers/nixpkgs-evaluator/`)
+  - Purpose: Extract raw package metadata using nix-eval-jobs
+  - Resources: 8 vCPU, 48GB RAM (optimized for nix-eval-jobs)  
+  - Output: Raw JSONL file uploaded to S3
+  
+- **Stage 2: Nixpkgs Processor** (`packages/containers/nixpkgs-processor/`)
+  - Purpose: Process JSONL into LanceDB, generate embeddings, publish layers
+  - Resources: 2 vCPU, 6GB RAM (optimized for data processing)
+  - Input: Raw JSONL from Stage 1
+  - Phases: Metadata processing, Embeddings, Minified (run individually or all)
+  - Outputs: Main dataset `fdnix-data.lancedb` + Minified dataset `fdnix.lancedb`
 
 ## How It Runs in AWS
 
-- Orchestration: Step Functions `fdnix-daily-pipeline` runs nightly (02:00 UTC) via EventBridge.
-- Sequence: ECS Fargate runs a single indexer task (`PROCESSING_MODE=both/full`) which performs metadata → embedding → minified, then (optionally) publishes the minified dataset as a Lambda layer.
-- Resources (from CDK):
-  - Artifacts bucket: `fdnix-artifacts` (stores LanceDB datasets under key prefixes).
-  - Lambda Layer: `fdnix-db-layer` (packages the minified dataset artifact; path depends on packaging).
-  - Logs: single log group for the indexer task (e.g., `/fdnix/nixpkgs-indexer`).
-  - ECR: single repository (e.g., `fdnix-nixpkgs-indexer`).
+### Two-Stage Pipeline Architecture
+
+- **Orchestration**: Step Functions `fdnix-daily-pipeline` runs nightly (02:00 UTC) via EventBridge
+- **Sequence**: 
+  1. **Stage 1** (Evaluator): ECS Fargate runs nixpkgs-evaluator (8vCPU/48GB) to extract raw JSONL
+  2. **Stage 2** (Processor): ECS Fargate runs nixpkgs-processor (2vCPU/6GB) to process JSONL into final datasets
+- **Communication**: Stage 1 writes JSONL to S3, Stage 2 reads from the same location (timestamp-coordinated)
+- **Resources (from CDK)**:
+  - Artifacts bucket: `fdnix-artifacts` (stores JSONL + LanceDB datasets)
+  - Lambda Layer: `fdnix-db-layer` (packages the minified dataset)
+  - Logs: separate log groups for evaluator and processor
+  - ECR: two repositories (`fdnix-nixpkgs-evaluator`, `fdnix-nixpkgs-processor`)
 
 ## Container Environment Variables
 
@@ -107,10 +117,6 @@ See `packages/containers/nixpkgs-indexer/README.md` for detailed usage and troub
   - Creates `fdnix.lancedb` by copying essential data and embeddings from the main dataset.
   - Builds the FTS index in the minified dataset.
   - Uploads the minified dataset to S3 for use by the Lambda layer.
-
-## Legacy Support Removal
-
-- Backward compatibility for `DUCKDB_KEY` has been removed across the indexer and docs. Use `LANCEDB_DATA_KEY` (main dataset) and `LANCEDB_MINIFIED_KEY` (minified dataset, used for layer publishing). `LANCEDB_MINIFIED_KEY` is explicitly required for publishing the layer.
 
 ## Benefits of Minified Layer
 
