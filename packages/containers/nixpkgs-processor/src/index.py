@@ -11,6 +11,7 @@ from data_processor import DataProcessor
 from lancedb_writer import LanceDBWriter, DependencyS3Writer
 from embedding_generator import EmbeddingGenerator
 from layer_publisher import LayerPublisher
+from node_s3_writer import NodeS3Writer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +52,10 @@ def validate_env() -> None:
         import time
         timestamp = int(time.time())
         os.environ["DEPENDENCY_S3_KEY"] = f"dependencies/fdnix-deps-{timestamp}.json"
+    
+    # Set default node S3 prefix if not set
+    if not os.environ.get("NODE_S3_PREFIX"):
+        os.environ["NODE_S3_PREFIX"] = "nodes/"
 
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):
@@ -100,11 +105,24 @@ async def main() -> int:
         logger.info("Successfully read %d packages from Stage 1", len(raw_packages))
         
         # Phase 2: Data Processing (if requested)
+        packages = None
+        dependencies = None
+        graph_data = None
+        
         if processing_mode in ("metadata", "both"):
             logger.info("=== DATA PROCESSING PHASE ===")
             
             processor = DataProcessor()
-            packages, dependencies = processor.process_raw_packages(raw_packages)
+            
+            # Check if we need dependency graph processing for node S3 files
+            enable_node_s3 = _truthy(os.environ.get("ENABLE_NODE_S3", "true"))  # Default enabled
+            
+            if enable_node_s3:
+                # Use enhanced processing with dependency graph
+                packages, dependencies, graph_data = processor.process_with_dependency_graph(raw_packages)
+            else:
+                # Use standard processing (original behavior)
+                packages, dependencies = processor.process_raw_packages(raw_packages)
             
             # Create main database with all metadata (upload to data key)
             main_writer = LanceDBWriter(
@@ -185,7 +203,44 @@ async def main() -> int:
             minified_writer.create_minified_db_from_main(main_db_path)
             logger.info("Minified database generation completed successfully!")
         
-        # Phase 5: Publish LanceDB layer (if requested)
+        # Phase 5: Individual Node S3 Writing (if requested and graph data available)
+        enable_node_s3 = _truthy(os.environ.get("ENABLE_NODE_S3", "true"))
+        if enable_node_s3 and packages and graph_data:
+            logger.info("=== INDIVIDUAL NODE S3 WRITING PHASE ===")
+            
+            node_s3_prefix = os.environ.get("NODE_S3_PREFIX", "nodes/")
+            node_writer = NodeS3Writer(
+                s3_bucket=bucket,
+                s3_prefix=node_s3_prefix,
+                region=region,
+                clear_existing=_truthy(os.environ.get("CLEAR_EXISTING_NODES", "true")),
+                max_workers=int(os.environ.get("NODE_S3_MAX_WORKERS", "10"))
+            )
+            
+            # Prepare metadata for node files
+            node_metadata = {
+                "extraction_timestamp": metadata.get("extraction_timestamp", "unknown"),
+                "nixpkgs_branch": metadata.get("nixpkgs_branch", "unknown"),
+                "total_packages": len(packages)
+            }
+            
+            # Write individual node files with dependency information
+            dependency_data = graph_data.get("dependency_data", {})
+            node_writer.write_nodes(packages, dependency_data, node_metadata)
+            
+            # Create index file for the frontend
+            graph_stats = graph_data.get("graph_stats", {})
+            node_writer.create_index_file(packages, graph_stats, node_metadata)
+            
+            # Log final statistics
+            upload_stats = node_writer.get_upload_stats()
+            logger.info("Node S3 writing completed: %d successful, %d errors", 
+                       upload_stats.get('success', 0), upload_stats.get('errors', 0))
+        elif enable_node_s3:
+            logger.info("=== INDIVIDUAL NODE S3 WRITING SKIPPED ===")
+            logger.info("Node S3 writing requested but no graph data available (check ENABLE_NODE_S3 and data processing)")
+        
+        # Phase 6: Publish LanceDB layer (if requested)
         if _truthy(os.environ.get("PUBLISH_LAYER")):
             logger.info("=== LAYER PUBLISH PHASE ===")
             layer_arn = os.environ.get("LAYER_ARN", "").strip()

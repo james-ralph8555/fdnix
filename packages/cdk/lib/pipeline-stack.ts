@@ -1,4 +1,4 @@
-import { Stack, StackProps, Duration, RemovalPolicy, Arn, ArnFormat, Fn } from 'aws-cdk-lib';
+import { Stack, StackProps, Duration, RemovalPolicy, Arn, ArnFormat, Fn, Names } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
@@ -96,19 +96,19 @@ export class FdnixPipelineStack extends Stack {
 
     // ECR Repositories for both stages
     this.nixpkgsEvaluatorRepository = new ecr.Repository(this, 'NixpkgsEvaluatorRepository', {
-      repositoryName: 'fdnix-nixpkgs-evaluator',
+      repositoryName: `fdnixpipelinestack-nixpkgs-evaluator-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       lifecycleRules: [{
         maxImageCount: 10,
       }],
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     this.nixpkgsProcessorRepository = new ecr.Repository(this, 'NixpkgsProcessorRepository', {
-      repositoryName: 'fdnix-nixpkgs-processor',
+      repositoryName: `fdnixpipelinestack-nixpkgs-processor-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       lifecycleRules: [{
         maxImageCount: 10,
       }],
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
     // Docker build constructs for both stages
@@ -149,6 +149,7 @@ export class FdnixPipelineStack extends Stack {
     // Grant S3 access - evaluator needs read/write for JSONL, processor needs full access
     databaseStack.artifactsBucket.grantReadWrite(evaluatorTaskRole);
     databaseStack.artifactsBucket.grantReadWrite(processorTaskRole);
+
 
     // Create IAM role for Bedrock batch inference
     this.bedrockBatchRole = new iam.Role(this, 'BedrockBatchRole', {
@@ -249,23 +250,25 @@ export class FdnixPipelineStack extends Stack {
     }));
 
 
-    // CloudWatch Log Groups for both stages
+    // CloudWatch Log Groups for both stages with unique names
     const evaluatorLogGroup = new logs.LogGroup(this, 'NixpkgsEvaluatorLogGroup', {
-      logGroupName: '/aws/ecs/fdnix-nixpkgs-evaluator',
+      logGroupName: `/aws/ecs/fdnixpipelinestack-nixpkgs-evaluator-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
+
 
     const processorLogGroup = new logs.LogGroup(this, 'NixpkgsProcessorLogGroup', {
-      logGroupName: '/aws/ecs/fdnix-nixpkgs-processor',
+      logGroupName: `/aws/ecs/fdnixpipelinestack-nixpkgs-processor-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.RETAIN,
+      removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Stage 1: Fargate Task Definition for nixpkgs-evaluator (8vCPU, 48GB RAM)
+    // Stage 1: Fargate Task Definition for nixpkgs-evaluator (8vCPU, 48GB RAM, 40GB storage)
     this.nixpkgsEvaluatorTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsEvaluatorTaskDefinition', {
       cpu: 8192,      // 8 vCPU - needed for nix-eval-jobs
       memoryLimitMiB: 49152,  // 48GB RAM - needed for nix-eval-jobs
+      ephemeralStorageGiB: 40, // 40GB ephemeral storage for large nix evaluations
       executionRole: fargateExecutionRole,
       taskRole: evaluatorTaskRole,
     });
@@ -284,10 +287,12 @@ export class FdnixPipelineStack extends Stack {
       },
     });
 
-    // Stage 2: Fargate Task Definition for nixpkgs-processor (2vCPU, 6GB RAM)
+
+    // Stage 2: Fargate Task Definition for nixpkgs-processor (2vCPU, 6GB RAM, 40GB storage)
     this.nixpkgsProcessorTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsProcessorTaskDefinition', {
       cpu: 2048,      // 2 vCPU - optimized for data processing
       memoryLimitMiB: 6144,   // 6GB RAM - sufficient for LanceDB operations
+      ephemeralStorageGiB: 40, // 40GB ephemeral storage for large dataset processing
       executionRole: fargateExecutionRole,
       taskRole: processorTaskRole,
     });
@@ -348,8 +353,54 @@ export class FdnixPipelineStack extends Stack {
       resultPath: '$.EvaluatorResult',
     });
 
-    // Stage 2: Processor Task (depends on evaluator output)
+    // Pass state to set default values for missing keys when using existing outputs
+    // This ensures we have S3 keys for all outputs even if not provided in input
+    const setDefaultKeys = new stepfunctions.Pass(this, 'SetDefaultKeys', {
+      parameters: {
+        'jsonlInputKey.$': '$.jsonlInputKey',
+        'lancedbDataKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
+        'lancedbMinifiedKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
+        'dependencyS3Key.$': stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+      }
+    });
+
+    // Stage 2a: Processor Task (when using existing JSONL outputs, skipping evaluation)
     const processorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsProcessorTask', {
+      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
+      cluster: this.cluster,
+      taskDefinition: this.nixpkgsProcessorTaskDefinition,
+      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
+        platformVersion: ecs.FargatePlatformVersion.LATEST,
+      }),
+      assignPublicIp: true, // Required for public subnet access to AWS services
+      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
+      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
+      containerOverrides: [{
+        containerDefinition: processorContainer,
+        environment: [
+          {
+            name: 'JSONL_INPUT_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.jsonlInputKey')
+          },
+          {
+            name: 'LANCEDB_DATA_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.lancedbDataKey')
+          },
+          {
+            name: 'LANCEDB_MINIFIED_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.lancedbMinifiedKey')
+          },
+          {
+            name: 'DEPENDENCY_S3_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.dependencyS3Key')
+          }
+        ]
+      }],
+      resultPath: '$.ProcessorResult',
+    });
+
+    // Stage 2b: Processor Task (when following evaluation stage with fresh outputs)
+    const processorTaskWithEvaluatorOutput = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsProcessorTaskWithEvaluatorOutput', {
       integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
       cluster: this.cluster,
       taskDefinition: this.nixpkgsProcessorTaskDefinition,
@@ -383,8 +434,22 @@ export class FdnixPipelineStack extends Stack {
       resultPath: '$.ProcessorResult',
     });
 
-    // Define the two-stage pipeline: Evaluator -> Processor
-    const definition = evaluatorTask.next(processorTask);
+    // Check if JSONL outputs are provided in the input to skip evaluation
+    // If jsonlInputKey is present, we skip evaluation and go straight to processing
+    // Otherwise, we run the full pipeline: evaluation then processing
+    const checkForExistingOutputs = new stepfunctions.Choice(this, 'CheckForExistingOutputs')
+      .when(
+        stepfunctions.Condition.isPresent('$.jsonlInputKey'),
+        setDefaultKeys.next(processorTask)
+      )
+      .otherwise(
+        evaluatorTask.next(processorTaskWithEvaluatorOutput)
+      );
+
+    // Define the conditional pipeline:
+    // Path 1: JSONL provided -> SetDefaultKeys -> ProcessorTask (skip evaluation)
+    // Path 2: No JSONL -> EvaluatorTask -> ProcessorTaskWithEvaluatorOutput (full pipeline)
+    const definition = checkForExistingOutputs;
 
     this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
       definition,

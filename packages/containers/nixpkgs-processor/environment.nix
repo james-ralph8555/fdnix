@@ -19,6 +19,7 @@ in
     pyarrow
     lancedb
     pylance
+    networkx
     pip
   ]))
 ]

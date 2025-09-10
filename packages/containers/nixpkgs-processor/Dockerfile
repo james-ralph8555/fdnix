@@ -28,6 +28,11 @@ ENV AWS_REGION=us-east-1
 ENV PROCESSING_MODE=both
 # Disable embedding generation in the pipeline by default
 ENV ENABLE_EMBEDDINGS=false
+# Enable individual node S3 writing by default
+ENV ENABLE_NODE_S3=true
+ENV NODE_S3_PREFIX=nodes/
+ENV CLEAR_EXISTING_NODES=true
+ENV NODE_S3_MAX_WORKERS=10
 # Bedrock configuration
 ENV BEDROCK_MODEL_ID=amazon.titan-embed-text-v2:0
 ENV BEDROCK_OUTPUT_DIMENSIONS=256

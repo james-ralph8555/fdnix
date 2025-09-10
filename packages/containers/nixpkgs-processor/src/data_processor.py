@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from dependency_graph import DependencyGraphProcessor
+
 logger = logging.getLogger("fdnix.data-processor")
 
 
@@ -10,7 +12,7 @@ class DataProcessor:
     """Processes raw JSONL data from Stage 1 into structured package and dependency data."""
     
     def __init__(self) -> None:
-        pass
+        self.graph_processor = DependencyGraphProcessor()
 
     def process_raw_packages(self, raw_packages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Process raw package data from nix-eval-jobs JSONL into structured format.
@@ -32,6 +34,31 @@ class DataProcessor:
                    len(packages), len(dependencies))
         
         return packages, dependencies
+    
+    def process_with_dependency_graph(self, raw_packages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+        """Process raw packages and generate comprehensive dependency graph information.
+        
+        Args:
+            raw_packages: List of raw package dictionaries from nix-eval-jobs
+            
+        Returns:
+            Tuple of (packages, dependencies, graph_data) where:
+            - packages: List of package metadata (for LanceDB)
+            - dependencies: List of dependency information (for LanceDB dependencies table)  
+            - graph_data: Comprehensive dependency graph information (for individual node S3 files)
+        """
+        logger.info("Processing %d raw packages with dependency graph...", len(raw_packages))
+        
+        # Process standard package and dependency data
+        packages, dependencies = self.process_raw_packages(raw_packages)
+        
+        # Generate comprehensive dependency graph information
+        logger.info("Building dependency graph for node S3 files...")
+        graph_data = self.graph_processor.process_packages(raw_packages)
+        
+        logger.info("Successfully processed packages with dependency graph")
+        
+        return packages, dependencies, graph_data
 
     def _process_package_data(self, raw_packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process package data from nix-eval-jobs output."""
