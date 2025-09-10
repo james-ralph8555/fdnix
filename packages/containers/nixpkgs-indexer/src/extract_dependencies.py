@@ -284,30 +284,35 @@ def discover_shards(nix_file: Path, nixpkgs_path: Optional[str], system: str, al
                     log_verbose(f"stdout preview: {preview}", verbose)
             except Exception:
                 pass
-        # Return a minimal set of known-safe shards
-        return ['stdenv', 'coreutils', 'bash', 'gcc']
+        # Fail hard if discovery fails - no fallback shards
+        return []
     except json.JSONDecodeError as e:
         log_error(f"Failed to parse shard discovery JSON: {e}")
-        return ['stdenv', 'coreutils', 'bash', 'gcc']
+        return []
 
 def is_problematic_shard(shard_name: str) -> bool:
     """Check if a shard is known to be problematic and should be processed with extra care"""
-    problematic_shards = {
-        'pythonPackages', 'python311Packages', 'python310Packages', 'python39Packages',
-        'haskellPackages', 'haskellPackages_a_d', 'haskellPackages_e_h', 'haskellPackages_i_l',
-        'haskellPackages_m_p', 'haskellPackages_q_t', 'haskellPackages_u_z', 'haskell', 
-        'nodePackages', 'nodePackages_latest', 'rPackages', 'juliaPackages'
+    # With by-name sharding, large individual prefixes are the main problematic shards
+    large_prefix_shards = {
+        'byname_large_li',  # 948 packages - largest shard
+        'byname_large_co',  # 284 packages
+        'byname_large_ca',  # 284 packages
     }
-    return shard_name in problematic_shards
+    return shard_name in large_prefix_shards
 
 def is_memory_intensive_shard(shard_name: str) -> bool:
     """Check if a shard requires extra memory and processing time"""
-    memory_intensive_shards = {
-        'haskellPackages_a_d', 'haskellPackages_e_h', 'haskellPackages_i_l',
-        'haskellPackages_m_p', 'haskellPackages_q_t', 'haskellPackages_u_z',
-        'pythonPackages', 'nodePackages', 'perlPackages', 'rPackages'
+    # All large prefix shards are memory intensive by definition
+    large_prefix_shards = {
+        'byname_large_li',  # 948 packages
+        'byname_large_co',  # 284 packages  
+        'byname_large_ca',  # 284 packages
+        'byname_large_go',  # 263 packages
+        'byname_large_ma',  # 221 packages
+        'byname_large_op',  # 216 packages
+        'byname_large_re',  # 214 packages
     }
-    return shard_name in memory_intensive_shards
+    return shard_name in large_prefix_shards
 
 def process_shard_with_fallback(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str], 
                                system: str, allow_unfree: bool, verbose: bool, 
@@ -349,14 +354,18 @@ def process_shard(shard_name: str, nix_file: Path, nixpkgs_path: Optional[str],
         max_depth = min(max_depth, 5)  # Reduce depth for problematic shards
         allow_aliases = False  # Never allow aliases for problematic shards
         
-    # Set timeout based on shard type
-    if is_memory_intensive:
-        timeout = 1800  # 30 minute timeout for memory intensive shards
-        log_verbose(f"Shard {shard_name} is memory intensive, using extended timeout", verbose)
-    elif is_problematic:
-        timeout = 900   # 15 minute timeout for problematic shards
+    # Set timeout based on shard type - by-name shards should be much faster
+    if shard_name.startswith('byname_large_li'):
+        timeout = 900   # 15 minutes for the largest shard only
+        log_verbose(f"Shard {shard_name} is the largest prefix, using extended timeout", verbose)
+    elif is_memory_intensive:
+        timeout = 600   # 10 minutes for other large prefix shards
+        log_verbose(f"Shard {shard_name} is a large prefix, using moderate timeout", verbose)
+    elif shard_name.startswith('byname_group_'):
+        timeout = 180   # 3 minutes for grouped shards (should be fast)
+        log_verbose(f"Shard {shard_name} is a grouped shard, using short timeout", verbose)
     else:
-        timeout = 300   # 5 minute timeout for normal shards
+        timeout = 300   # 5 minute default timeout
     
     cmd = build_nix_cmd(
         nix_file=nix_file,
@@ -578,21 +587,31 @@ def create_summary(out_dir: Path, nixpkgs_path: str, system: str, allow_unfree: 
 
 
 def prioritize_shards(shards: List[str]) -> List[str]:
-    """Prioritize shards to process safe ones first, problematic ones last"""
-    safe_shards = []
-    normal_shards = []
+    """Prioritize shards to process grouped shards first, then large shards last"""
+    grouped_shards = []
+    large_shards = []
     problematic_shards = []
     
     for shard in shards:
-        if shard in {'stdenv', 'coreutils', 'bash', 'gcc'}:
-            safe_shards.append(shard)
-        elif is_problematic_shard(shard):
-            problematic_shards.append(shard)
+        if shard.startswith('byname_group_'):
+            # Grouped shards are smaller and faster, process first
+            grouped_shards.append(shard)
+        elif shard.startswith('byname_large_'):
+            if is_problematic_shard(shard):
+                # Very large shards that need special handling
+                problematic_shards.append(shard)
+            else:
+                # Regular large shards
+                large_shards.append(shard)
         else:
-            normal_shards.append(shard)
+            # Any remaining shards (shouldn't exist with by-name sharding)
+            grouped_shards.append(shard)
     
-    # Process in order: safe -> normal -> problematic
-    return safe_shards + normal_shards + problematic_shards
+    # Process in order: grouped (fast) -> large (medium) -> problematic (slow)
+    # Sort within each category for consistent ordering
+    return (sorted(grouped_shards) + 
+            sorted(large_shards) + 
+            sorted(problematic_shards))
 
 def run_sharded_extraction(cmd: List[str], output_file: Path, log_file: Path, meta: dict, verbose: bool,
                           nix_file: Path, nixpkgs_path: Optional[str], system: str, 
@@ -621,9 +640,17 @@ def run_sharded_extraction(cmd: List[str], output_file: Path, log_file: Path, me
     
     # Prioritize shard processing order
     prioritized_shards = prioritize_shards(shards)
-    log_info(f"Processing {len(prioritized_shards)} shards in priority order:")
+    log_info(f"Processing {len(prioritized_shards)} by-name shards in priority order:")
     for i, shard in enumerate(prioritized_shards):
-        shard_type = "memory-intensive" if is_memory_intensive_shard(shard) else "problematic" if is_problematic_shard(shard) else "normal"
+        if shard.startswith('byname_group_'):
+            shard_type = "grouped"
+        elif shard.startswith('byname_large_'):
+            if is_problematic_shard(shard):
+                shard_type = "large-problematic"
+            else:
+                shard_type = "large"
+        else:
+            shard_type = "unknown"
         log_info(f"  [{i+1:2d}/{len(prioritized_shards)}] {shard} ({shard_type})")
     
     # Set up resource limits
@@ -672,7 +699,15 @@ def run_sharded_extraction(cmd: List[str], output_file: Path, log_file: Path, me
     if failed_shards:
         log_info(f"Failed shards requiring investigation ({len(failed_shards)}):")
         for i, failed_shard in enumerate(failed_shards):
-            shard_type = "memory-intensive" if is_memory_intensive_shard(failed_shard) else "problematic" if is_problematic_shard(failed_shard) else "normal"
+            if failed_shard.startswith('byname_group_'):
+                shard_type = "grouped"
+            elif failed_shard.startswith('byname_large_'):
+                if is_problematic_shard(failed_shard):
+                    shard_type = "large-problematic"
+                else:
+                    shard_type = "large"
+            else:
+                shard_type = "unknown"
             log_info(f"  [{i+1:2d}] {failed_shard} ({shard_type})")
     
     # Combine results
