@@ -2,6 +2,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
 try:
@@ -25,41 +26,53 @@ class S3JsonlWriter:
         self.region = region
         self.s3_client = boto3.client('s3', region_name=region)
         
-    def write_raw_jsonl(self, raw_packages: List[Dict[str, Any]]) -> str:
-        """Write raw package data as JSONL to S3.
+    def write_jsonl_file(self, jsonl_file_path: str) -> str:
+        """Upload JSONL file directly to S3.
         
         Args:
-            raw_packages: List of raw package dictionaries from nix-eval-jobs
+            jsonl_file_path: Path to the JSONL file to upload
             
         Returns:
             S3 key where the data was written
         """
-        if not raw_packages:
-            logger.warning("No packages provided to write")
-            return self.key
+        jsonl_path = Path(jsonl_file_path)
+        if not jsonl_path.exists():
+            raise FileNotFoundError(f"JSONL file not found: {jsonl_file_path}")
         
-        # Create JSONL content
-        jsonl_lines = []
-        for package in raw_packages:
-            jsonl_lines.append(json.dumps(package, separators=(',', ':')))
+        # Get file size for logging
+        file_size = jsonl_path.stat().st_size
         
-        jsonl_content = '\n'.join(jsonl_lines)
+        # Count lines to estimate package count (excluding metadata line if present)
+        package_count = 0
+        try:
+            with jsonl_path.open('r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip() and not line.strip().startswith('{"_metadata"'):
+                        package_count += 1
+        except Exception as e:
+            logger.warning("Could not count packages in JSONL file: %s", str(e))
+            package_count = 0
         
-        # Add metadata as first line (comment-style)
+        # Add metadata as first line
         metadata = {
             "_metadata": {
                 "extraction_timestamp": datetime.now(timezone.utc).isoformat(),
                 "nixpkgs_branch": "release-25.05", 
-                "total_packages": len(raw_packages),
-                "extractor_version": "fdnix-evaluator-v1"
+                "total_packages": package_count,
+                "extractor_version": "fdnix-evaluator-v1",
+                "original_file": str(jsonl_path.name)
             }
         }
         
-        final_content = json.dumps(metadata) + '\n' + jsonl_content
-        
         try:
-            logger.info("Uploading raw JSONL to s3://%s/%s (%d packages, %.2f MB)", 
-                       self.bucket, self.key, len(raw_packages), len(final_content) / 1024 / 1024)
+            logger.info("Uploading JSONL file to s3://%s/%s (~%d packages, %.2f MB)", 
+                       self.bucket, self.key, package_count, file_size / 1024 / 1024)
+            
+            # Read original file and prepend metadata
+            with jsonl_path.open('r', encoding='utf-8') as f:
+                original_content = f.read()
+            
+            final_content = json.dumps(metadata) + '\n' + original_content
             
             # Upload to S3
             self.s3_client.put_object(
@@ -69,12 +82,13 @@ class S3JsonlWriter:
                 ContentType='application/jsonl',
                 Metadata={
                     'extraction-timestamp': metadata["_metadata"]["extraction_timestamp"],
-                    'package-count': str(len(raw_packages)),
-                    'nixpkgs-branch': metadata["_metadata"]["nixpkgs_branch"]
+                    'package-count': str(package_count),
+                    'nixpkgs-branch': metadata["_metadata"]["nixpkgs_branch"],
+                    'original-file': metadata["_metadata"]["original_file"]
                 }
             )
             
-            logger.info("Successfully uploaded raw JSONL to S3: s3://%s/%s", self.bucket, self.key)
+            logger.info("Successfully uploaded JSONL file to S3: s3://%s/%s", self.bucket, self.key)
             return self.key
             
         except (ClientError, NoCredentialsError) as e:

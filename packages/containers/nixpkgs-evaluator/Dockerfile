@@ -8,10 +8,10 @@ WORKDIR /app
 # Copy the Nix environment definition
 COPY environment.nix /tmp/environment.nix
 
-# Install minimal dependencies for S3 upload from your environment.nix
-# AND install the latest nix-eval-jobs from its source repository.
+# Install minimal dependencies from environment.nix
+# AND install the latest nix-eval-jobs by correctly calling its package function.
+RUN nix-channel --update
 RUN nix-env -if /tmp/environment.nix && \
-    nix-env -iA nix-eval-jobs -f https://github.com/nix-community/nix-eval-jobs/archive/master.tar.gz && \
     rm -rf /tmp/environment.nix
 
 # OCI labels

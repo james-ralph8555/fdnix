@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import shutil
@@ -6,7 +5,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional
 import platform
 
 
@@ -18,25 +17,25 @@ class NixpkgsExtractor:
         self.nixpkgs_path = None
         self.temp_dir = None
 
-    def extract_all_packages(self) -> List[Dict[str, Any]]:
-        """Extract package metadata using nix-eval-jobs and return raw JSONL data.
+    def extract_all_packages(self) -> str:
+        """Extract package metadata using nix-eval-jobs and return JSONL file path.
         
-        This is a simplified version that only extracts and returns the raw data
-        without any processing. The processing will be done in Stage 2.
+        This version runs nix-eval-jobs and returns the path to the generated JSONL file
+        without parsing it. The file can then be uploaded directly to S3.
         
         Returns:
-            List of raw package data from nix-eval-jobs
+            Path to the generated JSONL file
         """
         # Setup nixpkgs repository
         self._setup_nixpkgs_repo()
         
         try:
             logger.info("Extracting packages using nix-eval-jobs...")
-            raw_data = self._extract_with_nix_eval_jobs()
+            jsonl_file_path = self._extract_with_nix_eval_jobs()
             
-            logger.info(f"Successfully extracted {len(raw_data)} raw package entries")
+            logger.info(f"Successfully created JSONL file: {jsonl_file_path}")
             
-            return raw_data
+            return jsonl_file_path
         finally:
             self._cleanup_temp_dirs()
 
@@ -76,8 +75,8 @@ class NixpkgsExtractor:
             logger.info("Cleaning up temporary directory: %s", self.temp_dir)
             shutil.rmtree(self.temp_dir)
     
-    def _extract_with_nix_eval_jobs(self) -> List[Dict[str, Any]]:
-        """Extract package data using nix-eval-jobs tool."""
+    def _extract_with_nix_eval_jobs(self) -> str:
+        """Extract package data using nix-eval-jobs tool and return JSONL file path."""
         # Determine target system for nixpkgs
         system = os.environ.get("NIX_SYSTEM") or self._detect_system()
 
@@ -90,7 +89,7 @@ class NixpkgsExtractor:
             "--show-input-drvs",
             "--force-recurse",
             "--impure",
-            "--no-instantiate",
+            # "--no-instantiate",  # need to wait till nix-eval-jobs ets another release; this is only in main branch
             "--workers",
             "4",
             "--max-memory-size",
@@ -98,32 +97,34 @@ class NixpkgsExtractor:
             str(release_nix),
         ]
 
-        # Create temporary file for output
-        with tempfile.NamedTemporaryFile(mode='w+b', suffix='.jsonl', delete=False) as tmp_file:
-            tmp_path = Path(tmp_file.name)
+        # Create persistent output file
+        output_dir = Path("/tmp")  # Or use current working directory: Path(".")
+        tmp_path = output_dir / f"nixpkgs_packages_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.jsonl"
         
         try:
             logger.info("Running: %s", " ".join(cmd))
-            logger.info("Writing output to temporary file: %s", tmp_path)
+            logger.info("Writing output to persistent file: %s", tmp_path)
             
             env = os.environ.copy()
             # Ensure unfree packages are allowed during evaluation
             env.setdefault("NIXPKGS_ALLOW_UNFREE", "1")
             # Allow broken packages to prevent evaluation crashes
             env.setdefault("NIXPKGS_ALLOW_BROKEN", "1")
-            with tmp_path.open('wb') as output_file:
+            
+            # Create stderr log file for nix-eval-jobs
+            stderr_log = Path("/tmp/nix_eval_jobs_stderr.log")
+            with tmp_path.open('wb') as output_file, stderr_log.open('ab') as stderr_file:
                 proc = subprocess.run(
                     cmd,
                     check=True,
                     stdout=output_file,
-                    stderr=subprocess.PIPE,
+                    stderr=stderr_file,
                     env=env,
                 )
             
-            # Parse JSONL from file
-            packages = self._parse_nix_eval_jobs_output(tmp_path)
-            logger.info("Successfully extracted %d packages", len(packages))
-            return packages
+            # Return the JSONL file path instead of parsing it
+            logger.info("Successfully generated JSONL file: %s", tmp_path)
+            return str(tmp_path)
             
         except subprocess.CalledProcessError as e:
             # Log the actual error details for debugging
@@ -138,10 +139,8 @@ class NixpkgsExtractor:
                     # Check if we have some output despite broken packages
                     if tmp_path.exists() and tmp_path.stat().st_size > 0:
                         logger.info("Some packages were extracted despite broken package warnings, continuing...")
-                        packages = self._parse_nix_eval_jobs_output(tmp_path)
-                        if packages:
-                            logger.info("Successfully extracted %d packages despite broken package warnings", len(packages))
-                            return packages
+                        logger.info("Successfully generated JSONL file despite broken package warnings: %s", tmp_path)
+                        return str(tmp_path)
                 
                 if "double free or corruption" in stderr_str or "out of memory" in stderr_str:
                     logger.error("nix-eval-jobs crashed with memory corruption: %s", stderr_str.strip())
@@ -157,10 +156,6 @@ class NixpkgsExtractor:
             raise RuntimeError(f"nix-eval-jobs failed: {error_details}") from e
         except subprocess.TimeoutExpired:
             raise RuntimeError("nix-eval-jobs timed out after 60 minutes")
-        finally:
-            # Clean up temporary file
-            if tmp_path.exists():
-                tmp_path.unlink()
 
     def _detect_system(self) -> str:
         """Detect Nix system string, defaulting to x86_64-linux."""
@@ -172,39 +167,6 @@ class NixpkgsExtractor:
         # Fallback sensible default for most CI/container environments
         return "x86_64-linux"
 
-    def _parse_nix_eval_jobs_output(self, jsonl_file: Path) -> List[Dict[str, Any]]:
-        """Parse nix-eval-jobs JSONL output from file with proper encoding handling."""
-        packages = []
-        
-        try:
-            # Read file in binary mode first to handle encoding issues
-            with jsonl_file.open('rb') as f:
-                raw_data = f.read()
-            
-            # Decode with error handling
-            try:
-                jsonl_text = raw_data.decode('utf-8')
-            except UnicodeDecodeError as e:
-                logger.warning("UTF-8 decoding failed at position %d, using error replacement", e.start)
-                jsonl_text = raw_data.decode('utf-8', errors='replace')
-            
-            # Parse JSONL (one JSON object per line)
-            for line_num, line in enumerate(jsonl_text.strip().split('\n'), 1):
-                if not line.strip():
-                    continue
-                    
-                try:
-                    package_data = json.loads(line)
-                    packages.append(package_data)
-                except json.JSONDecodeError as e:
-                    logger.warning("Failed to parse JSON at line %d: %s", line_num, str(e)[:100])
-                    continue
-            
-            return packages
-            
-        except Exception as e:
-            logger.error("Error reading JSONL file %s: %s", jsonl_file, str(e))
-            raise RuntimeError(f"Failed to read nix-eval-jobs output file: {e}") from e
     
     def __del__(self):
         """Cleanup on object destruction."""
