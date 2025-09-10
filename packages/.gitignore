@@ -1,2 +1,8 @@
 nixpkgs/
 output/
+nixpkgs/
+cdk.out/
+__pycache__/
+*.pyc
+node_modules/
+dist/
