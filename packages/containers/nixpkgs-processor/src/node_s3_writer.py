@@ -24,7 +24,7 @@ class NodeS3Writer:
         region: str = "us-east-1",
         clear_existing: bool = True,
         batch_size: int = 50,
-        max_workers: int = 10
+        max_workers: int = 30
     ) -> None:
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix.rstrip('/') + '/'  # Ensure trailing slash

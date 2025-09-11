@@ -21,6 +21,11 @@ class DependencyGraph:
         self.version_prop = self.graph.new_vertex_property("string")
         self.attr_path_prop = self.graph.new_vertex_property("string")
         self.drv_path_prop = self.graph.new_vertex_property("string")
+
+        # Lightweight adjacency caches (built after edges are added)
+        # These dramatically speed up repeated traversals while keeping memory overhead reasonable.
+        self._out_adj: Optional[List[List[int]]] = None
+        self._in_adj: Optional[List[List[int]]] = None
         
     def build_from_raw_packages(self, raw_packages: List[Dict[str, Any]]) -> None:
         """Build dependency graph from raw JSONL package data."""
@@ -86,6 +91,9 @@ class DependencyGraph:
                 logger.warning("Error adding edges for package: %s", e)
                 continue
         
+        # Build adjacency caches for fast, low-overhead traversals
+        self._build_adjacency()
+
         logger.info("Built dependency graph with %d nodes and %d edges", 
                    self.graph.num_vertices(), self.graph.num_edges())
     
@@ -94,30 +102,32 @@ class DependencyGraph:
         vertex_idx = self.node_id_to_vertex.get(node_id)
         if vertex_idx is None:
             return []
-        
-        vertex = self.graph.vertex(vertex_idx)
-        dependencies = []
-        for neighbor in vertex.out_neighbors():
-            neighbor_idx = int(neighbor)
+
+        if self._out_adj is None:
+            self._build_adjacency()
+
+        deps: List[str] = []
+        for neighbor_idx in self._out_adj[vertex_idx]:
             neighbor_node_id = self.vertex_to_node_id.get(neighbor_idx)
             if neighbor_node_id:
-                dependencies.append(neighbor_node_id)
-        return dependencies
+                deps.append(neighbor_node_id)
+        return deps
     
     def get_dependents(self, node_id: str) -> List[str]:
         """Get direct dependents of a package (what depends on it)."""
         vertex_idx = self.node_id_to_vertex.get(node_id)
         if vertex_idx is None:
             return []
-        
-        vertex = self.graph.vertex(vertex_idx)
-        dependents = []
-        for neighbor in vertex.in_neighbors():
-            neighbor_idx = int(neighbor)
+
+        if self._in_adj is None:
+            self._build_adjacency()
+
+        deps: List[str] = []
+        for neighbor_idx in self._in_adj[vertex_idx]:
             neighbor_node_id = self.vertex_to_node_id.get(neighbor_idx)
             if neighbor_node_id:
-                dependents.append(neighbor_node_id)
-        return dependents
+                deps.append(neighbor_node_id)
+        return deps
     
     def get_all_dependencies(self, node_id: str) -> List[str]:
         """Get all transitive dependencies of a package."""
@@ -144,63 +154,59 @@ class DependencyGraph:
             return []
     
     def _get_descendants(self, vertex_idx: int) -> List[str]:
-        """Get all descendants (transitive dependencies) using BFS."""
-        visited = set()
-        queue = deque()
-        descendants = []
-        
-        # Start BFS from the given vertex
-        start_vertex = self.graph.vertex(vertex_idx)
-        for neighbor in start_vertex.out_neighbors():
-            neighbor_idx = int(neighbor)
+        """Get all descendants (transitive dependencies) using BFS over cached adjacency."""
+        if self._out_adj is None:
+            self._build_adjacency()
+
+        visited: Set[int] = set()
+        queue: deque[int] = deque()
+        descendants: List[str] = []
+
+        # Seed with direct neighbors
+        for neighbor_idx in self._out_adj[vertex_idx]:
             if neighbor_idx not in visited:
                 visited.add(neighbor_idx)
                 queue.append(neighbor_idx)
-                
+
         while queue:
             current_idx = queue.popleft()
-            current_node_id = self.vertex_to_node_id.get(current_idx)
-            if current_node_id:
-                descendants.append(current_node_id)
-                
-            # Add unvisited neighbors to queue
-            current_vertex = self.graph.vertex(current_idx)
-            for neighbor in current_vertex.out_neighbors():
-                neighbor_idx = int(neighbor)
-                if neighbor_idx not in visited:
-                    visited.add(neighbor_idx)
-                    queue.append(neighbor_idx)
-                    
+            node_id = self.vertex_to_node_id.get(current_idx)
+            if node_id:
+                descendants.append(node_id)
+            # Add unvisited neighbors
+            for nbr in self._out_adj[current_idx]:
+                if nbr not in visited:
+                    visited.add(nbr)
+                    queue.append(nbr)
+
         return descendants
     
     def _get_ancestors(self, vertex_idx: int) -> List[str]:
-        """Get all ancestors (transitive dependents) using BFS."""
-        visited = set()
-        queue = deque()
-        ancestors = []
-        
-        # Start BFS from the given vertex
-        start_vertex = self.graph.vertex(vertex_idx)
-        for neighbor in start_vertex.in_neighbors():
-            neighbor_idx = int(neighbor)
+        """Get all ancestors (transitive dependents) using BFS over cached adjacency."""
+        if self._in_adj is None:
+            self._build_adjacency()
+
+        visited: Set[int] = set()
+        queue: deque[int] = deque()
+        ancestors: List[str] = []
+
+        # Seed with direct predecessors
+        for neighbor_idx in self._in_adj[vertex_idx]:
             if neighbor_idx not in visited:
                 visited.add(neighbor_idx)
                 queue.append(neighbor_idx)
-                
+
         while queue:
             current_idx = queue.popleft()
-            current_node_id = self.vertex_to_node_id.get(current_idx)
-            if current_node_id:
-                ancestors.append(current_node_id)
-                
-            # Add unvisited neighbors to queue
-            current_vertex = self.graph.vertex(current_idx)
-            for neighbor in current_vertex.in_neighbors():
-                neighbor_idx = int(neighbor)
-                if neighbor_idx not in visited:
-                    visited.add(neighbor_idx)
-                    queue.append(neighbor_idx)
-                    
+            node_id = self.vertex_to_node_id.get(current_idx)
+            if node_id:
+                ancestors.append(node_id)
+            # Add unvisited predecessors
+            for nbr in self._in_adj[current_idx]:
+                if nbr not in visited:
+                    visited.add(nbr)
+                    queue.append(nbr)
+
         return ancestors
     
     def get_dependency_info(self, node_id: str) -> Dict[str, Any]:
@@ -264,27 +270,23 @@ class DependencyGraph:
             return []
     
     def _bfs_shortest_path(self, source_idx: int, target_idx: int) -> List[str]:
-        """Find shortest path using BFS."""
+        """Find shortest path using BFS over cached adjacency."""
         if source_idx == target_idx:
             source_node_id = self.vertex_to_node_id.get(source_idx)
             return [source_node_id] if source_node_id else []
-        
+
+        if self._out_adj is None:
+            self._build_adjacency()
+
         visited = {source_idx}
-        queue = deque([(source_idx, [source_idx])])
-        
+        queue: deque[Tuple[int, List[int]]] = deque([(source_idx, [source_idx])])
+
         while queue:
             current_idx, path = queue.popleft()
-            current_vertex = self.graph.vertex(current_idx)
-            
-            for neighbor in current_vertex.out_neighbors():
-                neighbor_idx = int(neighbor)
-                
+            for neighbor_idx in self._out_adj[current_idx]:
                 if neighbor_idx == target_idx:
-                    # Found target, return path
                     final_path = path + [neighbor_idx]
-                    return [self.vertex_to_node_id[idx] for idx in final_path 
-                           if idx in self.vertex_to_node_id]
-                
+                    return [self.vertex_to_node_id[idx] for idx in final_path if idx in self.vertex_to_node_id]
                 if neighbor_idx not in visited:
                     visited.add(neighbor_idx)
                     queue.append((neighbor_idx, path + [neighbor_idx]))
@@ -347,37 +349,60 @@ class DependencyGraph:
         # Calculate connectivity stats
         try:
             # Use graph-tool's built-in functions for strongly/weakly connected components
-            strongly_connected_comp, _ = gt.label_components(self.graph, directed=True)
-            strongly_connected = len(set(strongly_connected_comp.a))
-            
-            weakly_connected_comp, _ = gt.label_components(self.graph, directed=False)
-            weakly_connected = len(set(weakly_connected_comp.a))
+            _, scc_hist = gt.label_components(self.graph, directed=True)
+            strongly_connected = len(scc_hist)
+
+            _, wcc_hist = gt.label_components(self.graph, directed=False)
+            weakly_connected = len(wcc_hist)
         except Exception as e:
             logger.warning("Error calculating connectivity: %s", e)
             strongly_connected = 0
             weakly_connected = 0
         
-        # Calculate degree statistics
-        in_degrees = []
-        out_degrees = []
+        # Calculate degree statistics without materializing full degree lists
+        max_in = 0
+        max_out = 0
+        zero_in = 0
+        zero_out = 0
         
-        for vertex in self.graph.vertices():
-            in_deg = vertex.in_degree()
-            out_deg = vertex.out_degree()
-            in_degrees.append(in_deg)
-            out_degrees.append(out_deg)
-        
+        if self._out_adj is None or self._in_adj is None:
+            # Fallback to graph-tool iteration if adjacency not yet built
+            for v in self.graph.vertices():
+                in_deg = v.in_degree()
+                out_deg = v.out_degree()
+                if in_deg == 0:
+                    zero_in += 1
+                if out_deg == 0:
+                    zero_out += 1
+                if in_deg > max_in:
+                    max_in = in_deg
+                if out_deg > max_out:
+                    max_out = out_deg
+        else:
+            # Use cached adjacency for faster degree inspection
+            for idx in range(num_nodes):
+                out_deg = len(self._out_adj[idx])
+                in_deg = len(self._in_adj[idx])
+                if in_deg == 0:
+                    zero_in += 1
+                if out_deg == 0:
+                    zero_out += 1
+                if in_deg > max_in:
+                    max_in = in_deg
+                if out_deg > max_out:
+                    max_out = out_deg
+
         return {
             "total_packages": num_nodes,
             "total_dependencies": num_edges,
             "strongly_connected_components": strongly_connected,
             "weakly_connected_components": weakly_connected,
-            "average_dependencies_per_package": sum(out_degrees) / num_nodes if num_nodes > 0 else 0,
-            "average_dependents_per_package": sum(in_degrees) / num_nodes if num_nodes > 0 else 0,
-            "max_dependencies": max(out_degrees) if out_degrees else 0,
-            "max_dependents": max(in_degrees) if in_degrees else 0,
-            "packages_with_no_dependencies": sum(1 for d in out_degrees if d == 0),
-            "packages_with_no_dependents": sum(1 for d in in_degrees if d == 0)
+            "average_dependencies_per_package": (num_edges / num_nodes) if num_nodes > 0 else 0,
+            "average_dependents_per_package": (num_edges / num_nodes) if num_nodes > 0 else 0,
+            "max_dependencies": max_out,
+            "max_dependents": max_in,
+            "packages_with_no_dependencies": zero_out,
+            "packages_with_no_dependents": zero_in,
         }
     
     def export_graph(self, output_path: str, format: str = "gexf") -> None:
@@ -436,6 +461,20 @@ class DependencyGraph:
         
         # Fallback: treat last part as version
         return '-'.join(parts[:-1]), parts[-1]
+
+    def _build_adjacency(self) -> None:
+        """Build cached adjacency lists for faster traversals and stats."""
+        num_nodes = int(self.graph.num_vertices())
+        out_adj: List[List[int]] = [[] for _ in range(num_nodes)]
+        in_adj: List[List[int]] = [[] for _ in range(num_nodes)]
+
+        # Use index-based iteration to avoid descriptor overhead
+        for s, t in self.graph.iter_edges():
+            out_adj[s].append(t)
+            in_adj[t].append(s)
+
+        self._out_adj = out_adj
+        self._in_adj = in_adj
 
 
 class DependencyGraphProcessor:

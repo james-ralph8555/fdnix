@@ -25,6 +25,7 @@ class Package(LanceModel):
     attribute_path: str
     description: str
     long_description: str
+    search_text: str  # Combined text field for BM25-friendly FTS indexing
     homepage: str
     license: str
     platforms: str
@@ -49,6 +50,7 @@ class Dependency(LanceModel):
     pname: str 
     version: str
     attribute_path: str
+    search_text: str  # Combined text field for BM25-friendly FTS indexing
     build_inputs: str  # JSON string of dependencies
     propagated_build_inputs: str  # JSON string of dependencies
     total_dependencies: int
@@ -162,13 +164,31 @@ class LanceDBWriter:
             pkg_id = self._package_id(p)
             
             # Create package record with proper field mapping
+            package_name = p.get("packageName") or ""
+            description = p.get("description") or ""
+            long_description = p.get("longDescription") or ""
+            attribute_path = p.get("attributePath") or ""
+            main_program = p.get("mainProgram") or ""
+            
+            # Create combined search text for BM25-friendly FTS indexing
+            search_parts = [
+                package_name,
+                description,
+                long_description,
+                attribute_path,
+                main_program,
+                pkg_id
+            ]
+            search_text = " | ".join(filter(None, search_parts))
+            
             lance_pkg = {
                 "package_id": pkg_id,
-                "package_name": p.get("packageName") or "",
+                "package_name": package_name,
                 "version": p.get("version") or "",
-                "attribute_path": p.get("attributePath") or "",
-                "description": p.get("description") or "",
-                "long_description": p.get("longDescription") or "",
+                "attribute_path": attribute_path,
+                "description": description,
+                "long_description": long_description,
+                "search_text": search_text,
                 "homepage": p.get("homepage") or "",
                 "license": json.dumps(p.get("license")) if p.get("license") is not None else "",
                 "platforms": json.dumps(p.get("platforms")) if p.get("platforms") is not None else "",
@@ -179,7 +199,7 @@ class LanceDBWriter:
                 "available": bool(p.get("available", True)),
                 "insecure": bool(p.get("insecure", False)),
                 "unsupported": bool(p.get("unsupported", False)),
-                "main_program": p.get("mainProgram") or "",
+                "main_program": main_program,
                 "position": p.get("position") or "",
                 "outputs_to_install": json.dumps(p.get("outputsToInstall")) if p.get("outputsToInstall") is not None else "",
                 "last_updated": p.get("lastUpdated") or "",
@@ -198,11 +218,24 @@ class LanceDBWriter:
         lance_dependencies = []
         
         for dep in dependencies:
+            package_id = dep.get("packageId") or ""
+            pname = dep.get("pname") or ""
+            attribute_path = dep.get("attributePath") or ""
+            
+            # Create combined search text for BM25-friendly FTS indexing
+            search_parts = [
+                package_id,
+                pname,
+                attribute_path
+            ]
+            search_text = " | ".join(filter(None, search_parts))
+            
             lance_dep = {
-                "package_id": dep.get("packageId") or "",
-                "pname": dep.get("pname") or "",
+                "package_id": package_id,
+                "pname": pname,
                 "version": dep.get("version") or "",
-                "attribute_path": dep.get("attributePath") or "",
+                "attribute_path": attribute_path,
+                "search_text": search_text,
                 "build_inputs": json.dumps(dep.get("buildInputs", [])),
                 "propagated_build_inputs": json.dumps(dep.get("propagatedBuildInputs", [])),
                 "total_dependencies": int(dep.get("totalDependencies", 0)),
@@ -228,29 +261,18 @@ class LanceDBWriter:
             available_fields = [field.name for field in schema]
             logger.debug("Available fields in table: %s", available_fields)
             
-            # Create FTS index on text fields that actually exist - prioritized for search relevance
-            potential_fts_fields = [
-                "package_name",      # Most important for name searches
-                "description",       # Key for content searches
-                "long_description",  # Extended content
-                "attribute_path",    # Important for Nix attribute searches
-                "main_program",      # Executable names
-                "package_id"         # Full identifiers
-            ]
-            fts_fields = [field for field in potential_fts_fields if field in available_fields]
-            
-            if not fts_fields:
-                logger.warning("No suitable text fields found for FTS index")
+            # Use the combined search_text field for FTS indexing
+            if "search_text" not in available_fields:
+                logger.warning("search_text field not found for FTS index")
                 logger.warning("Available fields: %s", available_fields)
-                logger.warning("Attempted fields: %s", potential_fts_fields)
                 return
             
-            logger.info("Creating FTS index on fields: %s (stopwords=%s, stemmer=%s)", 
-                       fts_fields, stopwords, stemmer or "<none>")
+            logger.info("Creating FTS index on search_text field (stopwords=%s, stemmer=%s)", 
+                       stopwords, stemmer or "<none>")
             
             # LanceDB's native FTS index creation (Lance-based, not tantivy)
-            # Index all relevant fields for comprehensive hybrid search
-            self._table.create_fts_index(fts_fields, use_tantivy=False)
+            # Use single combined search_text field for BM25-friendly indexing
+            self._table.create_fts_index("search_text", use_tantivy=False)
             
             logger.info("FTS index created successfully")
         except Exception as e:
@@ -269,22 +291,16 @@ class LanceDBWriter:
             available_fields = [field.name for field in schema]
             logger.debug("Available fields in dependency table: %s", available_fields)
             
-            # Create FTS index on text fields for dependency searching
-            potential_fts_fields = [
-                "package_id",        # Package identifiers
-                "pname",            # Package names
-                "attribute_path"    # Attribute paths
-            ]
-            fts_fields = [field for field in potential_fts_fields if field in available_fields]
-            
-            if not fts_fields:
-                logger.warning("No suitable text fields found for dependency FTS index")
+            # Use the combined search_text field for FTS indexing
+            if "search_text" not in available_fields:
+                logger.warning("search_text field not found for dependency FTS index")
+                logger.warning("Available fields: %s", available_fields)
                 return
             
-            logger.info("Creating dependency FTS index on fields: %s", fts_fields)
+            logger.info("Creating dependency FTS index on search_text field")
             
             # LanceDB's native FTS index creation
-            deps_table.create_fts_index(fts_fields, use_tantivy=False)
+            deps_table.create_fts_index("search_text", use_tantivy=False)
             
             logger.info("Dependency FTS index created successfully")
         except Exception as e:
@@ -424,7 +440,7 @@ class LanceDBWriter:
         # Select essential columns for minified version
         essential_columns = [
             "package_id", "package_name", "version", "attribute_path", "description", 
-            "homepage", "license", "maintainers", "broken", "unfree", "available", 
+            "search_text", "homepage", "license", "maintainers", "broken", "unfree", "available", 
             "insecure", "unsupported", "main_program", "has_embedding", "content_hash", "vector"
         ]
         
