@@ -78,8 +78,8 @@ class S3JsonlWriter:
                        len(compressed_data) / 1024 / 1024,
                        compression_ratio * 100)
             
-            # Add .br extension for compressed file
-            compressed_key = self.key + '.br'
+            # Add .br extension for compressed file if not already present
+            compressed_key = self.key if self.key.endswith('.br') else self.key + '.br'
             
             # Upload to S3
             self.s3_client.put_object(

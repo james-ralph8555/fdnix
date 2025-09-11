@@ -195,15 +195,17 @@ Publishes LanceDB as AWS Lambda layer:
 ## Environment Configuration
 
 ### Required Variables
-- `ARTIFACTS_BUCKET`: S3 bucket for input/output artifacts
 - `AWS_REGION`: AWS region for services
-- `JSONL_INPUT_KEY`: S3 key for input JSONL file
+- `ARTIFACTS_BUCKET`: S3 bucket for input JSONL and LanceDB artifacts
+- `PROCESSED_FILES_BUCKET`: S3 bucket for stats JSON and per-package node JSON files
+- `JSONL_INPUT_KEY`: S3 key for input JSONL file (must point to the evaluator's brotli-compressed `.jsonl.br`)
 
 ### Processing Control
-- `PROCESSING_MODE`: `metadata`|`embedding`|`minified`|`both` (default: `both`)
-- `ENABLE_EMBEDDINGS`: Enable/disable embedding generation (default: `false`)
-- `ENABLE_NODE_S3`: Enable/disable individual node S3 writing (default: `true`)
+- `PROCESSING_MODE`: `metadata` | `embedding` | `minified` | `both` (aliases `all`/`full` → `both`; default: `both`)
+- `ENABLE_EMBEDDINGS`: Enable/disable embedding generation (default: `true` in code)
 - `FORCE_REBUILD_EMBEDDINGS`: Regenerate all embeddings (default: `false`)
+- `ENABLE_NODE_S3`: Enable/disable individual node S3 writing (default: `true`)
+- `ENABLE_STATS`: Enable/disable writing aggregate stats JSON (default: `true`)
 
 ### Bedrock Configuration
 - `BEDROCK_MODEL_ID`: Embedding model (default: `amazon.titan-embed-text-v2:0`)
@@ -212,13 +214,16 @@ Publishes LanceDB as AWS Lambda layer:
 - `PROCESSING_BATCH_SIZE`: Embedding batch size (default: `100`)
 
 ### Output Configuration
-- `LANCEDB_DATA_KEY`: S3 key for main database
-- `LANCEDB_MINIFIED_KEY`: S3 key for minified database  
-- `DEPENDENCY_S3_KEY`: S3 key for dependency JSON
+- `LANCEDB_DATA_KEY`: S3 key for main database (defaulted if unset)
+- `LANCEDB_MINIFIED_KEY`: S3 key for minified database (defaulted if unset)
+- `STATS_S3_KEY`: S3 key for stats JSON (defaulted if unset)
 - `NODE_S3_PREFIX`: S3 prefix for individual node files (default: `nodes/`)
 - `CLEAR_EXISTING_NODES`: Clear existing node files before upload (default: `true`)
 - `NODE_S3_MAX_WORKERS`: Max parallel threads for node uploads (default: `10`)
-- `LAYER_ARN`: Lambda layer ARN for publishing
+
+### Layer Publishing (optional)
+- `PUBLISH_LAYER`: When `true`, publishes the minified database to the Lambda layer
+- `LAYER_ARN`: Target Lambda layer ARN
 
 ## Container Deployment
 
@@ -229,6 +234,21 @@ Built on `nixos/nix` with Python dependencies via Nix:
 - AWS Bedrock SDK for embeddings
 
 Entry point: `python src/index.py`
+
+## Build & Run (examples)
+
+Build:
+- `docker build -t fdnix/nixpkgs-processor packages/containers/nixpkgs-processor`
+
+Run (reads evaluator output and generates artifacts without embeddings):
+- `docker run --rm \
+    -e AWS_REGION=us-east-1 \
+    -e ARTIFACTS_BUCKET=fdnix-artifacts \
+    -e PROCESSED_FILES_BUCKET=fdnix-processed \
+    -e JSONL_INPUT_KEY=evaluations/<ts>/nixpkgs-raw.jsonl.br \
+    -e PROCESSING_MODE=both \
+    -e ENABLE_EMBEDDINGS=false \
+    fdnix/nixpkgs-processor`
 
 ## Error Handling
 
