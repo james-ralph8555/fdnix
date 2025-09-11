@@ -75,6 +75,18 @@ export class PipelineStateMachine extends Construct {
       resultPath: '$.AutoScalingResult',
     });
 
+    // Check if EC2 instances are registered as ECS container instances
+    const checkEcsContainerInstancesTask = new stepfunctionsTasks.CallAwsService(this, 'CheckEcsContainerInstancesTask', {
+      service: 'ecs',
+      action: 'listContainerInstances',
+      parameters: {
+        Cluster: cluster.clusterName,
+      },
+      // ListContainerInstances does not support resource-level permissions; use '*'
+      iamResources: ['*'],
+      resultPath: '$.EcsContainerInstancesResult',
+    });
+
     // 60-second wait between polling attempts
     const waitBetweenPolls = new stepfunctions.Wait(this, 'WaitBetweenPolls', {
       time: stepfunctions.WaitTime.duration(Duration.seconds(60)),
@@ -83,26 +95,32 @@ export class PipelineStateMachine extends Construct {
     // Pass state to indicate instances are ready
     const instancesReady = new stepfunctions.Pass(this, 'InstancesReady');
 
-    // Choice state to check if instances are ready
+    // Choice state to check if instances are ready (both ASG and ECS)
     const checkInstancesReady = new stepfunctions.Choice(this, 'CheckInstancesReady')
       .when(
         stepfunctions.Condition.and(
+          // Auto Scaling Group checks
           stepfunctions.Condition.numberGreaterThanEquals('$.AutoScalingResult.AutoScalingGroups[0].DesiredCapacity', 1),
           stepfunctions.Condition.isPresent('$.AutoScalingResult.AutoScalingGroups[0].Instances[0]'),
-          stepfunctions.Condition.stringEquals('$.AutoScalingResult.AutoScalingGroups[0].Instances[0].LifecycleState', 'InService')
+          stepfunctions.Condition.stringEquals('$.AutoScalingResult.AutoScalingGroups[0].Instances[0].LifecycleState', 'InService'),
+          // ECS Container Instance checks
+          // At least one container instance ARN must be present (array index 0 exists)
+          stepfunctions.Condition.isPresent('$.EcsContainerInstancesResult.ContainerInstanceArns[0]')
         ),
         instancesReady
       )
       .otherwise(waitBetweenPolls);
 
-    // Create the polling loop
-    checkInstancesTask.next(checkInstancesReady);
+    // Create the polling loop - check both ASG and ECS
+    checkInstancesTask.next(checkEcsContainerInstancesTask).next(checkInstancesReady);
     waitBetweenPolls.next(checkInstancesTask);
 
     // The polling loop starts with checking instances
     const instancePollingLoop = checkInstancesTask;
 
     // Stage 1: Evaluator Task (EC2)
+    // The capacity provider is configured at the cluster level via cluster.addAsgCapacityProvider()
+    // ECS will automatically use the capacity provider for EC2 tasks
     const evaluatorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsEvaluatorTask', {
       integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
       cluster,
@@ -225,12 +243,14 @@ export class PipelineStateMachine extends Construct {
       timeout: Duration.hours(6),
     });
 
-    // Add permission to describe Auto Scaling Groups
+    // Add permission to describe Auto Scaling Groups and ECS Container Instances
     this.stateMachine.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: ['autoscaling:DescribeAutoScalingGroups'],
-      resources: ['*'], // DescribeAutoScalingGroups doesn't support resource-level permissions
+      actions: [
+        'autoscaling:DescribeAutoScalingGroups',
+        'ecs:ListContainerInstances',
+      ],
+      resources: ['*'], // DescribeAutoScalingGroups and ListContainerInstances don't support resource-level permissions
     }));
   }
 }
-

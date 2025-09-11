@@ -164,7 +164,13 @@ export class FdnixPipelineStack extends Stack {
     const userData = ec2.UserData.forLinux();
     userData.addCommands(
       `echo ECS_CLUSTER=${this.cluster.clusterName} >> /etc/ecs/ecs.config`,
-      'echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config'
+      'echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config',
+      'echo ECS_BACKEND_HOST= >> /etc/ecs/ecs.config', // Clear any backend host override
+      'echo ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","awslogs"] >> /etc/ecs/ecs.config',
+      // Restart ECS agent to pick up configuration
+      'systemctl restart ecs',
+      // Wait for ECS agent to start
+      'sleep 30'
     );
 
     const launchTemplate = new ec2.LaunchTemplate(this, 'EvaluatorLaunchTemplate', {
@@ -191,12 +197,15 @@ export class FdnixPipelineStack extends Stack {
     // Apply removal policy for proper cleanup
     this.evaluatorAutoScalingGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
 
-    // Add capacity provider to link ASG with ECS cluster
+    // Create capacity provider and add it to cluster
     const capacityProvider = new ecs.AsgCapacityProvider(this, 'EvaluatorCapacityProvider', {
       autoScalingGroup: this.evaluatorAutoScalingGroup,
       enableManagedScaling: true,
+      enableManagedTerminationProtection: false,
+      targetCapacityPercent: 100,
     });
 
+    // Add capacity provider to cluster
     this.cluster.addAsgCapacityProvider(capacityProvider);
 
 
