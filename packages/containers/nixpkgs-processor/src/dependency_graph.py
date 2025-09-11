@@ -1,23 +1,32 @@
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-import networkx as nx
+from collections import deque
+import graph_tool.all as gt
 
 logger = logging.getLogger("fdnix.dependency-graph")
 
 
 class DependencyGraph:
-    """Build and analyze package dependency graphs using NetworkX."""
+    """Build and analyze package dependency graphs using graph-tool."""
     
     def __init__(self) -> None:
-        self.graph = nx.DiGraph()  # Directed graph for dependencies
-        self.package_mapping = {}  # Map store paths to package identifiers
+        self.graph = gt.Graph(directed=True)  # Directed graph for dependencies
+        self.package_mapping = {}  # Map store paths to vertex indices
+        self.node_id_to_vertex = {}  # Map node IDs to vertex indices
+        self.vertex_to_node_id = {}  # Map vertex indices to node IDs
+        
+        # Vertex properties for metadata
+        self.package_name_prop = self.graph.new_vertex_property("string")
+        self.version_prop = self.graph.new_vertex_property("string")
+        self.attr_path_prop = self.graph.new_vertex_property("string")
+        self.drv_path_prop = self.graph.new_vertex_property("string")
         
     def build_from_raw_packages(self, raw_packages: List[Dict[str, Any]]) -> None:
         """Build dependency graph from raw JSONL package data."""
         logger.info("Building dependency graph from %d packages...", len(raw_packages))
         
-        # First pass: create nodes and build package mapping
+        # First pass: create vertices and build package mapping
         for pkg_data in raw_packages:
             try:
                 attr_path = ".".join(pkg_data.get("attrPath", []))
@@ -29,17 +38,24 @@ class DependencyGraph:
                     
                 node_id = f"{package_name}-{version}"
                 
-                # Add node with metadata
-                self.graph.add_node(node_id, 
-                                  package_name=package_name,
-                                  version=version,
-                                  attr_path=attr_path,
-                                  drv_path=pkg_data.get("drvPath", ""))
+                # Add vertex with metadata
+                vertex = self.graph.add_vertex()
+                vertex_idx = int(vertex)
                 
-                # Map store path to node ID for dependency resolution
+                # Store metadata in vertex properties
+                self.package_name_prop[vertex] = package_name
+                self.version_prop[vertex] = version
+                self.attr_path_prop[vertex] = attr_path
+                self.drv_path_prop[vertex] = pkg_data.get("drvPath", "")
+                
+                # Build mappings
+                self.node_id_to_vertex[node_id] = vertex_idx
+                self.vertex_to_node_id[vertex_idx] = node_id
+                
+                # Map store path to vertex index for dependency resolution
                 drv_path = pkg_data.get("drvPath", "")
                 if drv_path:
-                    self.package_mapping[drv_path] = node_id
+                    self.package_mapping[drv_path] = vertex_idx
                     
             except Exception as e:
                 logger.warning("Error processing package for graph: %s", e)
@@ -54,59 +70,143 @@ class DependencyGraph:
                 if not package_name or package_name == "unknown":
                     continue
                     
-                source_node = f"{package_name}-{version}"
-                if source_node not in self.graph:
+                node_id = f"{package_name}-{version}"
+                source_vertex_idx = self.node_id_to_vertex.get(node_id)
+                if source_vertex_idx is None:
                     continue
                     
                 # Process input dependencies
                 input_drvs = pkg_data.get("inputDrvs", {})
                 for dep_drv_path in input_drvs.keys():
-                    target_node = self.package_mapping.get(dep_drv_path)
-                    if target_node and target_node != source_node:
-                        self.graph.add_edge(source_node, target_node)
+                    target_vertex_idx = self.package_mapping.get(dep_drv_path)
+                    if target_vertex_idx is not None and target_vertex_idx != source_vertex_idx:
+                        self.graph.add_edge(source_vertex_idx, target_vertex_idx)
                         
             except Exception as e:
                 logger.warning("Error adding edges for package: %s", e)
                 continue
         
         logger.info("Built dependency graph with %d nodes and %d edges", 
-                   self.graph.number_of_nodes(), self.graph.number_of_edges())
+                   self.graph.num_vertices(), self.graph.num_edges())
     
     def get_dependencies(self, node_id: str) -> List[str]:
         """Get direct dependencies of a package (what it depends on)."""
-        if node_id not in self.graph:
+        vertex_idx = self.node_id_to_vertex.get(node_id)
+        if vertex_idx is None:
             return []
-        return list(self.graph.successors(node_id))
+        
+        vertex = self.graph.vertex(vertex_idx)
+        dependencies = []
+        for neighbor in vertex.out_neighbors():
+            neighbor_idx = int(neighbor)
+            neighbor_node_id = self.vertex_to_node_id.get(neighbor_idx)
+            if neighbor_node_id:
+                dependencies.append(neighbor_node_id)
+        return dependencies
     
     def get_dependents(self, node_id: str) -> List[str]:
         """Get direct dependents of a package (what depends on it)."""
-        if node_id not in self.graph:
+        vertex_idx = self.node_id_to_vertex.get(node_id)
+        if vertex_idx is None:
             return []
-        return list(self.graph.predecessors(node_id))
+        
+        vertex = self.graph.vertex(vertex_idx)
+        dependents = []
+        for neighbor in vertex.in_neighbors():
+            neighbor_idx = int(neighbor)
+            neighbor_node_id = self.vertex_to_node_id.get(neighbor_idx)
+            if neighbor_node_id:
+                dependents.append(neighbor_node_id)
+        return dependents
     
     def get_all_dependencies(self, node_id: str) -> List[str]:
         """Get all transitive dependencies of a package."""
-        if node_id not in self.graph:
+        vertex_idx = self.node_id_to_vertex.get(node_id)
+        if vertex_idx is None:
             return []
+        
         try:
-            return list(nx.descendants(self.graph, node_id))
-        except nx.NetworkXError:
-            logger.warning("Error calculating descendants for %s", node_id)
+            return self._get_descendants(vertex_idx)
+        except Exception as e:
+            logger.warning("Error calculating descendants for %s: %s", node_id, e)
             return []
     
     def get_all_dependents(self, node_id: str) -> List[str]:
         """Get all transitive dependents of a package."""
-        if node_id not in self.graph:
+        vertex_idx = self.node_id_to_vertex.get(node_id)
+        if vertex_idx is None:
             return []
+        
         try:
-            return list(nx.ancestors(self.graph, node_id))
-        except nx.NetworkXError:
-            logger.warning("Error calculating ancestors for %s", node_id)
+            return self._get_ancestors(vertex_idx)
+        except Exception as e:
+            logger.warning("Error calculating ancestors for %s: %s", node_id, e)
             return []
+    
+    def _get_descendants(self, vertex_idx: int) -> List[str]:
+        """Get all descendants (transitive dependencies) using BFS."""
+        visited = set()
+        queue = deque()
+        descendants = []
+        
+        # Start BFS from the given vertex
+        start_vertex = self.graph.vertex(vertex_idx)
+        for neighbor in start_vertex.out_neighbors():
+            neighbor_idx = int(neighbor)
+            if neighbor_idx not in visited:
+                visited.add(neighbor_idx)
+                queue.append(neighbor_idx)
+                
+        while queue:
+            current_idx = queue.popleft()
+            current_node_id = self.vertex_to_node_id.get(current_idx)
+            if current_node_id:
+                descendants.append(current_node_id)
+                
+            # Add unvisited neighbors to queue
+            current_vertex = self.graph.vertex(current_idx)
+            for neighbor in current_vertex.out_neighbors():
+                neighbor_idx = int(neighbor)
+                if neighbor_idx not in visited:
+                    visited.add(neighbor_idx)
+                    queue.append(neighbor_idx)
+                    
+        return descendants
+    
+    def _get_ancestors(self, vertex_idx: int) -> List[str]:
+        """Get all ancestors (transitive dependents) using BFS."""
+        visited = set()
+        queue = deque()
+        ancestors = []
+        
+        # Start BFS from the given vertex
+        start_vertex = self.graph.vertex(vertex_idx)
+        for neighbor in start_vertex.in_neighbors():
+            neighbor_idx = int(neighbor)
+            if neighbor_idx not in visited:
+                visited.add(neighbor_idx)
+                queue.append(neighbor_idx)
+                
+        while queue:
+            current_idx = queue.popleft()
+            current_node_id = self.vertex_to_node_id.get(current_idx)
+            if current_node_id:
+                ancestors.append(current_node_id)
+                
+            # Add unvisited neighbors to queue
+            current_vertex = self.graph.vertex(current_idx)
+            for neighbor in current_vertex.in_neighbors():
+                neighbor_idx = int(neighbor)
+                if neighbor_idx not in visited:
+                    visited.add(neighbor_idx)
+                    queue.append(neighbor_idx)
+                    
+        return ancestors
     
     def get_dependency_info(self, node_id: str) -> Dict[str, Any]:
         """Get comprehensive dependency information for a package."""
-        if node_id not in self.graph:
+        vertex_idx = self.node_id_to_vertex.get(node_id)
+        if vertex_idx is None:
             return {
                 "direct_dependencies": [],
                 "direct_dependents": [],
@@ -136,26 +236,76 @@ class DependencyGraph:
     
     def get_node_metadata(self, node_id: str) -> Dict[str, Any]:
         """Get metadata for a graph node."""
-        if node_id not in self.graph:
+        vertex_idx = self.node_id_to_vertex.get(node_id)
+        if vertex_idx is None:
             return {}
-        return dict(self.graph.nodes[node_id])
+        
+        vertex = self.graph.vertex(vertex_idx)
+        return {
+            "package_name": self.package_name_prop[vertex],
+            "version": self.version_prop[vertex],
+            "attr_path": self.attr_path_prop[vertex],
+            "drv_path": self.drv_path_prop[vertex]
+        }
     
     def get_shortest_path(self, source: str, target: str) -> List[str]:
         """Get shortest dependency path between two packages."""
-        if source not in self.graph or target not in self.graph:
+        source_idx = self.node_id_to_vertex.get(source)
+        target_idx = self.node_id_to_vertex.get(target)
+        
+        if source_idx is None or target_idx is None:
             return []
+        
         try:
-            return nx.shortest_path(self.graph, source, target)
-        except nx.NetworkXNoPath:
+            # Use BFS to find shortest path
+            return self._bfs_shortest_path(source_idx, target_idx)
+        except Exception as e:
+            logger.warning("Error calculating path from %s to %s: %s", source, target, e)
             return []
-        except nx.NetworkXError:
-            logger.warning("Error calculating path from %s to %s", source, target)
-            return []
+    
+    def _bfs_shortest_path(self, source_idx: int, target_idx: int) -> List[str]:
+        """Find shortest path using BFS."""
+        if source_idx == target_idx:
+            source_node_id = self.vertex_to_node_id.get(source_idx)
+            return [source_node_id] if source_node_id else []
+        
+        visited = {source_idx}
+        queue = deque([(source_idx, [source_idx])])
+        
+        while queue:
+            current_idx, path = queue.popleft()
+            current_vertex = self.graph.vertex(current_idx)
+            
+            for neighbor in current_vertex.out_neighbors():
+                neighbor_idx = int(neighbor)
+                
+                if neighbor_idx == target_idx:
+                    # Found target, return path
+                    final_path = path + [neighbor_idx]
+                    return [self.vertex_to_node_id[idx] for idx in final_path 
+                           if idx in self.vertex_to_node_id]
+                
+                if neighbor_idx not in visited:
+                    visited.add(neighbor_idx)
+                    queue.append((neighbor_idx, path + [neighbor_idx]))
+        
+        return []  # No path found
     
     def find_circular_dependencies(self) -> List[List[str]]:
         """Find circular dependency cycles in the graph."""
         try:
-            cycles = list(nx.simple_cycles(self.graph))
+            cycles = []
+            visited = set()
+            rec_stack = set()
+            
+            # DFS to find cycles
+            for vertex in self.graph.vertices():
+                vertex_idx = int(vertex)
+                if vertex_idx not in visited:
+                    cycle = self._dfs_find_cycles(vertex_idx, visited, rec_stack, [])
+                    if cycle:
+                        cycles.extend(cycle)
+            
             if cycles:
                 logger.warning("Found %d circular dependency cycles", len(cycles))
             return cycles
@@ -163,23 +313,59 @@ class DependencyGraph:
             logger.error("Error finding circular dependencies: %s", e)
             return []
     
+    def _dfs_find_cycles(self, vertex_idx: int, visited: set, rec_stack: set, path: List[int]) -> List[List[str]]:
+        """DFS helper to find cycles."""
+        visited.add(vertex_idx)
+        rec_stack.add(vertex_idx)
+        path.append(vertex_idx)
+        cycles = []
+        
+        vertex = self.graph.vertex(vertex_idx)
+        for neighbor in vertex.out_neighbors():
+            neighbor_idx = int(neighbor)
+            
+            if neighbor_idx in rec_stack:
+                # Found a cycle
+                cycle_start = path.index(neighbor_idx)
+                cycle_vertices = path[cycle_start:] + [neighbor_idx]
+                cycle_node_ids = [self.vertex_to_node_id.get(idx) for idx in cycle_vertices]
+                cycle_node_ids = [nid for nid in cycle_node_ids if nid is not None]
+                if cycle_node_ids:
+                    cycles.append(cycle_node_ids)
+            elif neighbor_idx not in visited:
+                cycles.extend(self._dfs_find_cycles(neighbor_idx, visited, rec_stack, path))
+        
+        path.pop()
+        rec_stack.remove(vertex_idx)
+        return cycles
+    
     def get_graph_stats(self) -> Dict[str, Any]:
         """Get comprehensive statistics about the dependency graph."""
-        num_nodes = self.graph.number_of_nodes()
-        num_edges = self.graph.number_of_edges()
+        num_nodes = self.graph.num_vertices()
+        num_edges = self.graph.num_edges()
         
         # Calculate connectivity stats
         try:
-            strongly_connected = len(list(nx.strongly_connected_components(self.graph)))
-            weakly_connected = len(list(nx.weakly_connected_components(self.graph)))
+            # Use graph-tool's built-in functions for strongly/weakly connected components
+            strongly_connected_comp, _ = gt.label_components(self.graph, directed=True)
+            strongly_connected = len(set(strongly_connected_comp.a))
+            
+            weakly_connected_comp, _ = gt.label_components(self.graph, directed=False)
+            weakly_connected = len(set(weakly_connected_comp.a))
         except Exception as e:
             logger.warning("Error calculating connectivity: %s", e)
             strongly_connected = 0
             weakly_connected = 0
         
         # Calculate degree statistics
-        in_degrees = [d for n, d in self.graph.in_degree()]
-        out_degrees = [d for n, d in self.graph.out_degree()]
+        in_degrees = []
+        out_degrees = []
+        
+        for vertex in self.graph.vertices():
+            in_deg = vertex.in_degree()
+            out_deg = vertex.out_degree()
+            in_degrees.append(in_deg)
+            out_degrees.append(out_deg)
         
         return {
             "total_packages": num_nodes,
@@ -197,18 +383,39 @@ class DependencyGraph:
     def export_graph(self, output_path: str, format: str = "gexf") -> None:
         """Export the dependency graph to various formats for external analysis."""
         try:
-            if format.lower() == "gexf":
-                nx.write_gexf(self.graph, output_path)
-            elif format.lower() == "graphml":
-                nx.write_graphml(self.graph, output_path)
+            if format.lower() == "graphml":
+                # Use graph-tool's native GraphML export
+                self.graph.save(output_path, fmt="graphml")
+            elif format.lower() == "gt":
+                # Native graph-tool format (most efficient)
+                self.graph.save(output_path)
             elif format.lower() == "edgelist":
-                nx.write_edgelist(self.graph, output_path)
+                # Custom edgelist export
+                self._export_edgelist(output_path)
             else:
-                raise ValueError(f"Unsupported format: {format}")
+                # Default to GraphML for compatibility
+                logger.warning("Format %s not directly supported, using GraphML", format)
+                self.graph.save(output_path, fmt="graphml")
             
             logger.info("Exported dependency graph to %s (format: %s)", output_path, format)
         except Exception as e:
             logger.error("Error exporting graph: %s", e)
+    
+    def _export_edgelist(self, output_path: str) -> None:
+        """Export graph as edge list with node ID mappings."""
+        with open(output_path, 'w') as f:
+            # Write header
+            f.write("# source target\n")
+            
+            # Write edges
+            for edge in self.graph.edges():
+                source_idx = int(edge.source())
+                target_idx = int(edge.target())
+                
+                source_id = self.vertex_to_node_id.get(source_idx, f"vertex_{source_idx}")
+                target_id = self.vertex_to_node_id.get(target_idx, f"vertex_{target_idx}")
+                
+                f.write(f"{source_id} {target_id}\n")
     
     def _parse_name_version(self, name: str) -> Tuple[str, str]:
         """Parse package name and version from nix-eval-jobs name field."""
@@ -248,7 +455,7 @@ class DependencyGraphProcessor:
         dependency_data = {}
         node_count = 0
         
-        for node_id in self.graph.graph.nodes():
+        for node_id in self.graph.vertex_to_node_id.values():
             try:
                 # Get comprehensive dependency info
                 dep_info = self.graph.get_dependency_info(node_id)

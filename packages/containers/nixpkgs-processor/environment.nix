@@ -19,7 +19,7 @@ in
     pyarrow
     lancedb
     pylance
-    networkx
+    graph-tool
     pip
   ]))
 ]
