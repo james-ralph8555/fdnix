@@ -9,11 +9,9 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctionsTasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
-import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as path from 'path';
 import { FdnixDatabaseStack } from './database-stack';
 import { DockerBuildConstruct } from './docker-build-construct';
-import { PipelineStateMachine } from './constructs/pipeline-state-machine';
 
 export interface FdnixPipelineStackProps extends StackProps {
   databaseStack: FdnixDatabaseStack;
@@ -21,12 +19,11 @@ export interface FdnixPipelineStackProps extends StackProps {
 
 export class FdnixPipelineStack extends Stack {
   public readonly cluster: ecs.Cluster;
-  // Stage 1: Evaluator (EC2)
+  // Stage 1: Evaluator
   public readonly nixpkgsEvaluatorRepository: ecr.Repository;
-  public readonly nixpkgsEvaluatorTaskDefinition: ecs.Ec2TaskDefinition;
+  public readonly nixpkgsEvaluatorTaskDefinition: ecs.FargateTaskDefinition;
   public readonly nixpkgsEvaluatorDockerBuild: DockerBuildConstruct;
-  public readonly evaluatorAutoScalingGroup: autoscaling.AutoScalingGroup;
-  // Stage 2: Processor (Fargate)
+  // Stage 2: Processor
   public readonly nixpkgsProcessorRepository: ecr.Repository;
   public readonly nixpkgsProcessorTaskDefinition: ecs.FargateTaskDefinition;
   public readonly nixpkgsProcessorDockerBuild: DockerBuildConstruct;
@@ -42,52 +39,21 @@ export class FdnixPipelineStack extends Stack {
     // Create VPC for Fargate tasks with $0/hr configuration
     // 
     // This configuration eliminates hourly charges by:
-    // - Using public subnets with IPv6 egress-only (no NAT Gateway: saves ~$45/month)  
+    // - Using public subnets only (no NAT Gateway: saves ~$45/month)  
     // - Gateway VPC endpoints for S3/DynamoDB (no hourly fees, no data transfer costs)
-    // - IPv6 egress-only internet access (no public IPv4 addresses)
+    // - Public IP assignment for internet access to other AWS services
     // - Security group restricting egress to HTTPS only for security
     const vpc = new ec2.Vpc(this, 'PipelineVpc', {
       maxAzs: 2,
       natGateways: 0, // $0/hr: No NAT Gateway
-      enableDnsHostnames: true,
-      enableDnsSupport: true,
       subnetConfiguration: [
         {
           name: 'Public',
           subnetType: ec2.SubnetType.PUBLIC,
           cidrMask: 24,
-          mapPublicIpOnLaunch: false, // Disable IPv4 public IP assignment
         },
         // No private subnets to avoid NAT Gateway requirement
       ],
-    });
-
-    // Enable IPv6 for the VPC with Amazon-provided IPv6 CIDR block
-    const ipv6CidrBlock = new ec2.CfnVPCCidrBlock(this, 'Ipv6CidrBlock', {
-      vpcId: vpc.vpcId,
-      amazonProvidedIpv6CidrBlock: true,
-    });
-
-    // Configure IPv6 CIDR blocks for subnets
-    vpc.publicSubnets.forEach((subnet, index) => {
-      const cfnSubnet = subnet.node.defaultChild as ec2.CfnSubnet;
-      cfnSubnet.ipv6CidrBlock = Fn.select(index, Fn.cidr(Fn.select(0, vpc.vpcIpv6CidrBlocks), 2, '64'));
-      cfnSubnet.assignIpv6AddressOnCreation = true;
-      cfnSubnet.addDependency(ipv6CidrBlock);
-    });
-
-    // Create egress-only internet gateway for IPv6
-    const eigw = new ec2.CfnEgressOnlyInternetGateway(this, 'EgressOnlyIGW', {
-      vpcId: vpc.vpcId,
-    });
-
-    // Add IPv6 routes to route tables for egress-only access
-    vpc.publicSubnets.forEach((subnet) => {
-      new ec2.CfnRoute(this, `IPv6Route-${subnet.node.id}`, {
-        routeTableId: subnet.routeTable.routeTableId,
-        destinationIpv6CidrBlock: '::/0',
-        egressOnlyInternetGatewayId: eigw.ref,
-      });
     });
 
     // Add Gateway VPC Endpoints for $0/hr AWS service access
@@ -110,37 +76,16 @@ export class FdnixPipelineStack extends Stack {
 
     // Allow HTTPS (443) outbound traffic only - for AWS APIs, Bedrock, etc.
     fargateSecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv6(),
+      ec2.Peer.anyIpv4(),
       ec2.Port.tcp(443),
-      'HTTPS outbound for AWS services (IPv6)'
+      'HTTPS outbound for AWS services'
     );
 
     // Allow HTTP (80) for package downloads (Nix, pip, etc.) - can be removed if not needed
     fargateSecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv6(),
+      ec2.Peer.anyIpv4(),
       ec2.Port.tcp(80),
-      'HTTP outbound for package downloads (IPv6)'
-    );
-
-    // Security Group for EC2 instances (evaluator) - HTTPS egress only
-    const ec2SecurityGroup = new ec2.SecurityGroup(this, 'EC2SecurityGroup', {
-      vpc,
-      description: 'Security group for EC2 instances running evaluator with HTTPS egress only',
-      allowAllOutbound: false, // Explicitly deny all outbound by default
-    });
-
-    // Allow HTTPS (443) outbound traffic only - for AWS APIs, ECR, etc.
-    ec2SecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv6(),
-      ec2.Port.tcp(443),
-      'HTTPS outbound for AWS services (IPv6)'
-    );
-
-    // Allow HTTP (80) for package downloads (Nix, nix-eval-jobs, etc.)
-    ec2SecurityGroup.addEgressRule(
-      ec2.Peer.anyIpv6(),
-      ec2.Port.tcp(80),
-      'HTTP outbound for package downloads (IPv6)'
+      'HTTP outbound for package downloads'
     );
 
     // ECS Cluster
@@ -149,71 +94,9 @@ export class FdnixPipelineStack extends Stack {
       containerInsightsV2: ecs.ContainerInsights.ENHANCED,
     });
 
-    // Apply removal policy for proper cleanup
-    this.cluster.applyRemovalPolicy(RemovalPolicy.DESTROY);
-
-    // IAM role for EC2 instances (moved before LaunchTemplate)
-    const ec2InstanceRole = new iam.Role(this, 'EC2InstanceRole', {
-      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonEC2ContainerServiceforEC2Role'),
-      ],
-    });
-
-    // Launch Template for EC2 instances (evaluator)
-    const userData = ec2.UserData.forLinux();
-    userData.addCommands(
-      `echo ECS_CLUSTER=${this.cluster.clusterName} >> /etc/ecs/ecs.config`,
-      'echo ECS_ENABLE_CONTAINER_METADATA=true >> /etc/ecs/ecs.config',
-      'echo ECS_BACKEND_HOST= >> /etc/ecs/ecs.config', // Clear any backend host override
-      'echo ECS_AVAILABLE_LOGGING_DRIVERS=["json-file","awslogs"] >> /etc/ecs/ecs.config',
-      // Restart ECS agent to pick up configuration
-      'systemctl restart ecs',
-      // Wait for ECS agent to start
-      'sleep 30'
-    );
-
-    const launchTemplate = new ec2.LaunchTemplate(this, 'EvaluatorLaunchTemplate', {
-      instanceType: ec2.InstanceType.of(ec2.InstanceClass.I4I, ec2.InstanceSize.XLARGE),
-      machineImage: ecs.EcsOptimizedImage.amazonLinux2(),
-      securityGroup: ec2SecurityGroup,
-      associatePublicIpAddress: false, // Use IPv6 egress-only networking
-      userData,
-      role: ec2InstanceRole, // Associate IAM role with EC2 instances
-    });
-
-    // Apply removal policy for proper cleanup
-    launchTemplate.applyRemovalPolicy(RemovalPolicy.DESTROY);
-
-    // Auto Scaling Group for evaluator ($0/hr when idle)
-    this.evaluatorAutoScalingGroup = new autoscaling.AutoScalingGroup(this, 'EvaluatorAutoScalingGroup', {
-      vpc,
-      launchTemplate,
-      minCapacity: 0, // $0/hr: No instances when idle
-      maxCapacity: 1, // Single instance for evaluator tasks
-      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC }, // Use public subnets for internet access
-    });
-
-    // Apply removal policy for proper cleanup
-    this.evaluatorAutoScalingGroup.applyRemovalPolicy(RemovalPolicy.DESTROY);
-
-    // Create capacity provider and add it to cluster
-    const capacityProvider = new ecs.AsgCapacityProvider(this, 'EvaluatorCapacityProvider', {
-      autoScalingGroup: this.evaluatorAutoScalingGroup,
-      enableManagedScaling: true,
-      enableManagedTerminationProtection: false,
-      targetCapacityPercent: 100,
-    });
-
-    // Add capacity provider to cluster
-    this.cluster.addAsgCapacityProvider(capacityProvider);
-
-
-
-
     // ECR Repositories for both stages
     this.nixpkgsEvaluatorRepository = new ecr.Repository(this, 'NixpkgsEvaluatorRepository', {
-      repositoryName: `fdnix-pipeline-nixpkgs-evaluator-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
+      repositoryName: `fdnixpipelinestack-nixpkgs-evaluator-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       lifecycleRules: [{
         maxImageCount: 10,
       }],
@@ -221,7 +104,7 @@ export class FdnixPipelineStack extends Stack {
     });
 
     this.nixpkgsProcessorRepository = new ecr.Repository(this, 'NixpkgsProcessorRepository', {
-      repositoryName: `fdnix-pipeline-nixpkgs-processor-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
+      repositoryName: `fdnixpipelinestack-nixpkgs-processor-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       lifecycleRules: [{
         maxImageCount: 10,
       }],
@@ -369,22 +252,23 @@ export class FdnixPipelineStack extends Stack {
 
     // CloudWatch Log Groups for both stages with unique names
     const evaluatorLogGroup = new logs.LogGroup(this, 'NixpkgsEvaluatorLogGroup', {
-      logGroupName: `/aws/ecs/fdnix-pipeline-nixpkgs-evaluator-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
+      logGroupName: `/aws/ecs/fdnixpipelinestack-nixpkgs-evaluator-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
 
     const processorLogGroup = new logs.LogGroup(this, 'NixpkgsProcessorLogGroup', {
-      logGroupName: `/aws/ecs/fdnix-pipeline-nixpkgs-processor-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
+      logGroupName: `/aws/ecs/fdnixpipelinestack-nixpkgs-processor-${Names.uniqueId(this).toLowerCase().slice(-8)}`,
       retention: logs.RetentionDays.ONE_MONTH,
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Stage 1: EC2 Task Definition for nixpkgs-evaluator (uses full i4i.xlarge: 4vCPU, 32GB RAM, local NVMe)
-    this.nixpkgsEvaluatorTaskDefinition = new ecs.Ec2TaskDefinition(this, 'NixpkgsEvaluatorTaskDefinition', {
-      // No CPU/memory limits - uses full i4i.xlarge instance resources
-      // No ephemeral storage - uses local NVMe storage for maximum I/O performance
+    // Stage 1: Fargate Task Definition for nixpkgs-evaluator (4vCPU, 28GB RAM, 40GB storage)
+    this.nixpkgsEvaluatorTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsEvaluatorTaskDefinition', {
+      cpu: 4096,      // 4 vCPU - for nix-eval-jobs
+      memoryLimitMiB: 28672,  // 28GB RAM - for nix-eval-jobs
+      ephemeralStorageGiB: 40, // 40GB ephemeral storage for large nix evaluations
       executionRole: fargateExecutionRole,
       taskRole: evaluatorTaskRole,
     });
@@ -395,8 +279,6 @@ export class FdnixPipelineStack extends Stack {
         streamPrefix: 'nixpkgs-evaluator',
         logGroup: evaluatorLogGroup,
       }),
-      // Memory configuration for EC2 task (i4i.xlarge has 32GB RAM)
-      memoryReservationMiB: 30720, // Reserve 30GB of the 32GB available
       environment: {
         AWS_REGION: this.region,
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
@@ -447,21 +329,132 @@ export class FdnixPipelineStack extends Stack {
       },
     });
 
-    // Extracted Step Functions into a reusable construct
-    const pipelineSm = new PipelineStateMachine(this, 'PipelineStateMachineConstruct', {
+    // Step Functions State Machine for two-stage pipeline orchestration
+    // Stage 1: Evaluator Task
+    const evaluatorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsEvaluatorTask', {
+      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
       cluster: this.cluster,
-      evaluatorTaskDefinition: this.nixpkgsEvaluatorTaskDefinition,
-      processorTaskDefinition: this.nixpkgsProcessorTaskDefinition,
-      evaluatorContainer,
-      processorContainer,
-      evaluatorAutoScalingGroup: this.evaluatorAutoScalingGroup,
-      fargateSecurityGroup,
+      taskDefinition: this.nixpkgsEvaluatorTaskDefinition,
+      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
+        platformVersion: ecs.FargatePlatformVersion.LATEST,
+      }),
+      assignPublicIp: true, // Required for public subnet access to AWS services
+      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
+      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
+      containerOverrides: [{
+        containerDefinition: evaluatorContainer,
+        environment: [
+          {
+            name: 'JSONL_OUTPUT_KEY',
+            value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          }
+        ]
+      }],
+      resultPath: '$.EvaluatorResult',
     });
 
-    this.pipelineStateMachine = pipelineSm.stateMachine;
+    // Pass state to set default values for missing keys when using existing outputs
+    // This ensures we have S3 keys for all outputs even if not provided in input
+    const setDefaultKeys = new stepfunctions.Pass(this, 'SetDefaultKeys', {
+      parameters: {
+        'jsonlInputKey.$': '$.jsonlInputKey',
+        'lancedbDataKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
+        'lancedbMinifiedKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
+        'dependencyS3Key.$': stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+      }
+    });
 
-    // Apply removal policy for proper cleanup
-    this.pipelineStateMachine.applyRemovalPolicy(RemovalPolicy.DESTROY);
+    // Stage 2a: Processor Task (when using existing JSONL outputs, skipping evaluation)
+    const processorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsProcessorTask', {
+      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
+      cluster: this.cluster,
+      taskDefinition: this.nixpkgsProcessorTaskDefinition,
+      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
+        platformVersion: ecs.FargatePlatformVersion.LATEST,
+      }),
+      assignPublicIp: true, // Required for public subnet access to AWS services
+      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
+      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
+      containerOverrides: [{
+        containerDefinition: processorContainer,
+        environment: [
+          {
+            name: 'JSONL_INPUT_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.jsonlInputKey')
+          },
+          {
+            name: 'LANCEDB_DATA_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.lancedbDataKey')
+          },
+          {
+            name: 'LANCEDB_MINIFIED_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.lancedbMinifiedKey')
+          },
+          {
+            name: 'DEPENDENCY_S3_KEY',
+            value: stepfunctions.JsonPath.stringAt('$.dependencyS3Key')
+          }
+        ]
+      }],
+      resultPath: '$.ProcessorResult',
+    });
+
+    // Stage 2b: Processor Task (when following evaluation stage with fresh outputs)
+    const processorTaskWithEvaluatorOutput = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsProcessorTaskWithEvaluatorOutput', {
+      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
+      cluster: this.cluster,
+      taskDefinition: this.nixpkgsProcessorTaskDefinition,
+      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
+        platformVersion: ecs.FargatePlatformVersion.LATEST,
+      }),
+      assignPublicIp: true, // Required for public subnet access to AWS services
+      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
+      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
+      containerOverrides: [{
+        containerDefinition: processorContainer,
+        environment: [
+          {
+            name: 'JSONL_INPUT_KEY',
+            value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          },
+          {
+            name: 'LANCEDB_DATA_KEY',
+            value: stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          },
+          {
+            name: 'LANCEDB_MINIFIED_KEY',
+            value: stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          },
+          {
+            name: 'DEPENDENCY_S3_KEY',
+            value: stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          }
+        ]
+      }],
+      resultPath: '$.ProcessorResult',
+    });
+
+    // Check if JSONL outputs are provided in the input to skip evaluation
+    // If jsonlInputKey is present, we skip evaluation and go straight to processing
+    // Otherwise, we run the full pipeline: evaluation then processing
+    const checkForExistingOutputs = new stepfunctions.Choice(this, 'CheckForExistingOutputs')
+      .when(
+        stepfunctions.Condition.isPresent('$.jsonlInputKey'),
+        setDefaultKeys.next(processorTask)
+      )
+      .otherwise(
+        evaluatorTask.next(processorTaskWithEvaluatorOutput)
+      );
+
+    // Define the conditional pipeline:
+    // Path 1: JSONL provided -> SetDefaultKeys -> ProcessorTask (skip evaluation)
+    // Path 2: No JSONL -> EvaluatorTask -> ProcessorTaskWithEvaluatorOutput (full pipeline)
+    const definition = checkForExistingOutputs;
+
+    this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
+      definition,
+      timeout: Duration.hours(6),
+    });
 
     // EventBridge rule for daily execution
     const dailyRule = new events.Rule(this, 'DailyPipelineRule', {
@@ -499,18 +492,6 @@ export class FdnixPipelineStack extends Stack {
         fargateExecutionRole.roleArn,
         evaluatorTaskRole.roleArn,
         processorTaskRole.roleArn,
-      ],
-    }));
-
-    // Grant Step Functions permissions to scale Auto Scaling Groups
-    this.pipelineStateMachine.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'autoscaling:SetDesiredCapacity',
-        'autoscaling:DescribeAutoScalingGroups',
-      ],
-      resources: [
-        `arn:aws:autoscaling:${this.region}:${this.account}:autoScalingGroup:*:autoScalingGroupName/${this.evaluatorAutoScalingGroup.autoScalingGroupName}`,
       ],
     }));
   }

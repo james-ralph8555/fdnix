@@ -1,466 +1,521 @@
 # fdnix CDK Infrastructure
 
-This package contains the AWS CDK infrastructure definitions for the fdnix hybrid search engine. All AWS resources are prefixed with "fdnix-" for clear identification.
+This directory contains the AWS CDK (Cloud Development Kit) infrastructure for the **fdnix** hybrid search engine. The infrastructure is designed as a serverless, cost-optimized system that processes nixpkgs data and provides hybrid vector + keyword search capabilities.
 
 ## Architecture Overview
 
-The infrastructure consists of four main stacks, a certificate stack, and a set of constructs for building Docker images and Lambda layers.
-
-1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
-2.  **Database Stack** - S3 artifact storage + Lambda Layer for the LanceDB dataset (minified).
-3.  **Pipeline Stack** - Two-stage pipeline (EC2 evaluator + Fargate processor) orchestrated by Step Functions that builds the LanceDB dataset and publishes the Lambda layer.
-4.  **Search API Stack** - A Rust Lambda-based search API with self-contained LanceDB runtime/dependencies and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
-5.  **Frontend Stack** - Static site hosting with CloudFront (no CDK-managed custom domain).
-
-## Architecture Diagram
+The fdnix infrastructure consists of five main stacks that work together to provide a complete search solution:
 
 ```mermaid
-graph TD
-    %% Top-level stacks
-    subgraph FdnixCertificateStack
-        cert["ACM Certificate"]
+graph TB
+    subgraph "Users"
+        U[Web Users]
+        A[API Clients]
     end
-
-    subgraph FdnixDatabaseStack
-        s3_artifacts["S3 Artifacts"]
-        db_layer["Lambda Layer - LanceDB dataset (minified)"]
+    
+    subgraph "AWS Infrastructure"
+        subgraph "Frontend (CloudFront + S3)"
+            CF[CloudFront Distribution]
+            S3F[S3 Static Hosting]
+            ACM[ACM Certificate]
+        end
+        
+        subgraph "API Layer"
+            API[API Gateway]
+            LF[Search Lambda<br/>Rust Runtime]
+            CW1[CloudWatch Logs]
+        end
+        
+        subgraph "Data Processing Pipeline"
+            EB[EventBridge<br/>Daily Schedule]
+            SF[Step Functions<br/>State Machine]
+            
+            subgraph "ECS Fargate Tasks"
+                E1[nixpkgs-evaluator<br/>4vCPU, 28GB]
+                E2[nixpkgs-processor<br/>2vCPU, 6GB]
+            end
+            
+            ECR1[ECR Repository<br/>Evaluator]
+            ECR2[ECR Repository<br/>Processor]
+            CW2[CloudWatch Logs]
+        end
+        
+        subgraph "Data Storage"
+            S3[S3 Artifacts Bucket<br/>LanceDB + JSONL]
+            LL[Lambda Layer<br/>Minified DB]
+        end
+        
+        subgraph "External Services"
+            BR[Amazon Bedrock<br/>Titan Embeddings]
+            CF_DNS[Cloudflare DNS]
+        end
+        
+        subgraph "Networking"
+            VPC[VPC<br/>Public Subnets Only]
+            SG[Security Groups<br/>HTTPS Only]
+            VPCE1[VPC Endpoint<br/>S3 Gateway]
+            VPCE2[VPC Endpoint<br/>DynamoDB Gateway]
+        end
     end
-
-    subgraph FdnixPipelineStack
-        sfn["Step Functions"]
-        ec2_eval["ECS EC2: Evaluator"]
-        fg_proc["ECS Fargate: Processor"]
-        ecr_eval["ECR: nixpkgs-evaluator"]
-        ecr_proc["ECR: nixpkgs-processor"]
-    end
-
-    subgraph FdnixSearchApiStack
-        api["API Gateway"]
-        lambda["Rust Lambda"]
-        bedrock["AWS Bedrock Runtime"]
-    end
-
-    subgraph FdnixFrontendStack
-        cf["CloudFront"]
-        s3_hosting["S3 Hosting"]
-    end
-
-    user["Users"] --> cf
-    cf --> s3_hosting
-    cf --> api
-    api --> lambda
-    lambda --> db_layer
-    lambda --> bedrock
-
-    sfn --> ec2_eval
-    ec2_eval --> s3_artifacts
-    sfn --> fg_proc
-    fg_proc --> s3_artifacts
-    ecr_eval -. images .- ec2_eval
-    ecr_proc -. images .- fg_proc
-    sfn --> db_layer
-
-    %% No CDK-managed custom domain: certificate provisioned separately
-    %% (no direct connection from cert to CloudFront in CDK)
+    
+    %% User interactions
+    U --> CF
+    A --> API
+    
+    %% Frontend flow
+    CF --> S3F
+    CF --> API
+    ACM --> CF
+    CF_DNS --> CF
+    
+    %% API flow
+    API --> LF
+    LF --> CW1
+    LF --> LL
+    LF --> BR
+    
+    %% Pipeline flow
+    EB --> SF
+    SF --> E1
+    SF --> E2
+    E1 --> ECR1
+    E2 --> ECR2
+    E1 --> CW2
+    E2 --> CW2
+    E1 --> S3
+    E2 --> S3
+    E2 --> LL
+    E2 --> BR
+    
+    %% Networking
+    E1 -.-> VPC
+    E2 -.-> VPC
+    VPC --> VPCE1
+    VPC --> VPCE2
+    VPC --> SG
+    
+    %% Storage connections
+    S3 --> VPCE1
+    LL --> LF
+    
+    style CF fill:#e1f5fe
+    style S3 fill:#fff3e0
+    style SF fill:#f3e5f5
+    style BR fill:#e8f5e8
+    style VPC fill:#fce4ec
 ```
 
-## Data Pipeline Diagram
+## Key Features
 
-The data pipeline is now a two-stage workflow orchestrated by Step Functions. Stage 1 runs an EC2-based ECS task to evaluate nixpkgs. Stage 2 runs a Fargate-based ECS task to process metadata, (optionally) generate embeddings, build LanceDB databases, and publish the Lambda layer. You can also skip Stage 1 and run Stage 2 directly by providing an existing `jsonlInputKey`.
-
-```mermaid
-graph TD
-    subgraph "FdnixPipelineStack"
-        direction LR
-        start((Start)) --> choice{jsonlInputKey?}
-        choice -- no --> scale_up[Scale up EC2 ASG]\n(poll until InService)
-        scale_up --> evaluator[Evaluator (ECS EC2)]
-        evaluator --> scale_down[Scale down EC2 ASG]
-        scale_down --> processor[Processor (ECS Fargate)]
-        choice -- yes --> set_defaults[Set defaults]\n(lancedb/deps keys)
-        set_defaults --> processor
-        processor --> done((End))
-    end
-
-    subgraph "FdnixDatabaseStack"
-        direction LR
-        s3_artifacts[(S3 Artifacts)]
-        db_layer[[Lambda Layer: LanceDB Dataset]]
-    end
-
-    evaluator -- writes JSONL --> s3_artifacts
-    processor -- reads/writes (full + minified) --> s3_artifacts
-    processor -- publishes minified to --> db_layer
-```
-
-## Search API Diagram
-
-The search API is a Rust Lambda function fronted by an API Gateway. It uses a single Lambda layer to access the LanceDB minified dataset.
-
-```mermaid
-graph TD
-    subgraph "FdnixSearchApiStack"
-        direction LR
-        api[API Gateway] --> lambda[Rust Lambda]
-        lambda --> bedrock[AWS Bedrock Embeddings]
-    end
-
-    subgraph "FdnixDatabaseStack"
-        direction LR
-    db_layer[[DB Layer]]
-    end
-
-    lambda -- uses --> db_layer
-```
-
-## Prerequisites
-
--   Node.js 18+ and npm
--   Rust toolchain (`rustup`, `cargo`) with musl target: `rustup target add x86_64-unknown-linux-musl` (if building without Nix)
--   Nix (recommended) for reproducible builds of the Lambda and native dependencies
--   Docker (optional) for containerized builds
--   AWS CLI configured with appropriate credentials
--   AWS CDK CLI installed (`npm install -g aws-cdk`)
-
-## Idempotent Deployments
-
-CloudFormation and CDK are designed for idempotent deployments. Re-running the same template should converge to the same state. Follow these practices to keep deploys predictable:
-
--   **Stable construct IDs**: Do not rename construct IDs of deployed resources; CDK maps them to CloudFormation Logical IDs.
--   **Avoid hardcoded physical names**: Let CDK generate names (S3 buckets, DynamoDB tables). If a fixed name is required, ensure it is unique and constant per environment.
--   **No dynamic name drift**: Avoid timestamps/random suffixes in names inside code. Use stack name or context for determinism.
--   **Review changes**: Run `npm run diff` (or `npx cdk diff`) to inspect change sets before deploy.
--   **Detect/resolve drift**: Use CloudFormation drift detection to find resources changed outside CDK; resolve by reverting manual edits or updating code.
-    -   Example:
-        -   `aws cloudformation detect-stack-drift --stack-name FdnixDatabaseStack`
-        -   `aws cloudformation describe-stack-drift-detection-status --stack-drift-detection-id <id>`
--   **Idempotent custom resources**: If you add Lambda-backed custom resources, implement Create/Update/Delete to be safe on retries and re-runs.
--   **Deterministic IAM**: Keep policy documents stable; avoid non-deterministic statements that cause rewrites each deploy.
-
-Tip: Use `npm run diff` regularly during development to validate idempotency and avoid unintended replacements.
-
-## Installation
-
-From this folder (`packages/cdk`):
-
-```bash
-npm install
-```
-
-## Configuration
-
-### Environment Variables
-
--   `CDK_DEFAULT_ACCOUNT` - AWS account ID
--   `CDK_DEFAULT_REGION` - AWS region (defaults to us-east-1)
--   `FDNIX_DOMAIN_NAME` - Custom domain name (defaults to fdnix.com)
-
-Embeddings configuration:
-
--   Runtime (API, AWS Bedrock real-time):
-    -   `AWS_REGION` - Region for Bedrock Runtime (Lambda default region is used if not set).
-    -   `BEDROCK_MODEL_ID` - Embedding model id (default: `amazon.titan-embed-text-v2:0`).
-    -   `BEDROCK_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
-
--   Pipeline processor (real-time; disabled by default):
-    -   `ENABLE_EMBEDDINGS` - Set to `true` to generate embeddings during processing (default: `false`).
-    -   `BEDROCK_MODEL_ID` - Embedding model id for processor (default: `amazon.titan-embed-text-v2:0`).
-    -   `BEDROCK_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
-    -   `BEDROCK_MAX_RPM` - Requests per minute limit (e.g., `600`).
-    -   `BEDROCK_MAX_TOKENS_PER_MINUTE` - Token throughput cap.
-    -   `PROCESSING_BATCH_SIZE` - Batch size for processing/embedding (default tuned for rate limiting).
-
-### AWS Prerequisites
-
-Before deploying, ensure you have:
-
-1.  AWS CDK bootstrapped in your account/region:
-    ```bash
-    npx cdk bootstrap
-    ```
-
-2.  Appropriate IAM permissions for creating:
-    -   S3 buckets
-    -   Lambda functions and layers
-    -   API Gateway
-    -   CloudFront distributions
-    -   ECS clusters and task definitions
-    -   Step Functions state machines
-    -   EventBridge rules
-    -   IAM roles and policies
-    -   ECR repositories
-
-## Deployment
-
-### Deploy All Stacks
-
-From this folder (`packages/cdk`):
-
-```bash
-# Build the Rust Lambda bootstrap first (required for API)
-# Recommended: Nix build places bootstrap at ../search-lambda/result/bin/bootstrap
-(cd ../search-lambda && nix build)
-
-# Then deploy all stacks
-npm run deploy
-```
-
-### Deploy Individual Stacks
-
-```bash
-# Ensure the Rust Lambda is built before deploying the API stack
-(cd ../search-lambda && nix build)
-
-npx cdk deploy FdnixCertificateStack
-npx cdk deploy FdnixDatabaseStack
-npx cdk deploy FdnixPipelineStack
-npx cdk deploy FdnixSearchApiStack
-npx cdk deploy FdnixFrontendStack
-```
-
-### View Planned Changes
-
-```bash
-npm run diff
-```
-
-### Synthesize CloudFormation Templates
-
-```bash
-# Building the Lambda is not strictly required for synth, but recommended
-(cd ../search-lambda && nix build)
-
-npm run synth
-```
+- **Cost-Optimized**: $0/hour infrastructure using public subnets and Gateway VPC endpoints
+- **Serverless**: Lambda-based search API with automatic scaling
+- **Hybrid Search**: Vector embeddings + traditional keyword search
+- **Daily Updates**: Automated processing of latest nixpkgs data
+- **Production Ready**: SSL certificates, CDN, proper security groups
 
 ## Stack Details
 
-### Certificate Stack (`FdnixCertificateStack`)
+### 1. Database Stack (`FdnixDatabaseStack`)
 
-**Resources:**
+**Purpose**: Core data storage and Lambda layer management
 
--   `fdnix-certificate` - ACM certificate for the custom domain.
+**Components**:
+- **S3 Artifacts Bucket**: Stores LanceDB files, JSONL evaluations, and dependency graphs
+  - Versioned with 30-day retention for old versions
+  - SSL enforcement and block public access
+- **Lambda Layer**: Contains minified LanceDB dataset for fast Lambda access
+  - Optimized for search performance with essential data only
+  - Updated automatically by the data processing pipeline
+- **IAM Roles**: Database access permissions for Lambda and ECS tasks
 
-**Key Features:**
+**Cost**: ~$5-20/month (S3 storage only, no compute charges)
 
--   Provisions a certificate in `us-east-1` for use with CloudFront.
--   DNS validation records must be created in your DNS provider.
+### 2. Pipeline Stack (`FdnixPipelineStack`) 
 
-### Database Stack (`FdnixDatabaseStack`)
+**Purpose**: Data processing orchestration and container execution
 
-**Resources:**
+**Components**:
+- **VPC with Cost Optimization**:
+  - Public subnets only (no NAT Gateway = $45/month savings)
+  - Gateway VPC endpoints for S3/DynamoDB (no hourly fees)
+  - Security groups allowing only HTTPS egress
+  
+- **ECS Cluster with Fargate Tasks**:
+  - **nixpkgs-evaluator**: 4vCPU, 28GB RAM for nix-eval-jobs
+  - **nixpkgs-processor**: 2vCPU, 6GB RAM for data processing
+  - ECR repositories with lifecycle policies (max 10 images)
+  
+- **Step Functions State Machine**: Orchestrates conditional pipeline execution
+  - Full pipeline: evaluation → processing
+  - Processing-only: skip evaluation, process existing data
+  
+- **EventBridge**: Daily scheduled execution at 2 AM UTC
 
--   `fdnix-artifacts` - S3 bucket for pipeline artifacts (stores the full and minified LanceDB dataset files).
--   `fdnix-db-layer` - Lambda Layer that packages the minified LanceDB dataset under `/opt/fdnix/lancedb`.
--   `fdnix-database-access-role` - IAM role for artifact access and layer publishing.
+**Cost**: ~$20-40/month (runs ~2 hours daily, ECS Fargate pricing)
 
-**Key Features:**
+### 3. Search API Stack (`FdnixSearchApiStack`)
 
--   S3 versioning with lifecycle management (30-day retention).
--   Encryption at rest with S3-managed keys.
--   The `databaseLayer` is populated by the pipeline with the minified LanceDB dataset.
+**Purpose**: High-performance search API with hybrid capabilities
 
-### Pipeline Stack (`FdnixPipelineStack`)
+**Components**:
+- **Lambda Function**: 
+  - Rust-based custom runtime (PROVIDED_AL2023)
+  - 1GB memory, 30-second timeout
+  - Includes minified LanceDB via Lambda layer
+  
+- **API Gateway**:
+  - REST API with CORS support
+  - Rate limiting: 100 req/s, 10K req/day
+  - Health check endpoint for monitoring
+  
+- **Bedrock Integration**: Real-time embedding generation for hybrid search
+- **CloudWatch Logs**: Function logging with 1-month retention
 
-**Resources:**
+**Cost**: ~$5-15/month (Lambda execution + API Gateway requests)
 
--   `fdnix-pipeline-vpc` - Cost-optimized VPC (no NAT), IPv6 egress-only internet.
--   `fdnix-processing-cluster` - ECS cluster (EC2 capacity provider + Fargate).
--   `fdnix-evaluator-asg` - Auto Scaling Group + launch template (EC2 i4i.xlarge) for Stage 1.
--   `fdnix-nixpkgs-evaluator` - ECR repository for the evaluator image.
--   `fdnix-nixpkgs-processor` - ECR repository for the processor image.
--   CloudWatch Log Groups per stage.
--   `fdnix-daily-pipeline` - Step Functions state machine.
--   `fdnix-daily-pipeline-trigger` - EventBridge rule (daily at 2:00 AM UTC).
+### 4. Frontend Stack (`FdnixFrontendStack`)
 
-**Key Features:**
+**Purpose**: Static site hosting with global CDN distribution
 
--   Two-stage pipeline: Stage 1 (Evaluator on ECS EC2) → Stage 2 (Processor on ECS Fargate).
--   Conditional skip: Provide `jsonlInputKey` to bypass evaluation and run processing only.
--   VPC with $0/hr baseline: no NAT Gateway; IPv6 egress-only with S3/DynamoDB Gateway Endpoints.
--   EC2 evaluator uses local NVMe on `i4i.xlarge` and auto-scales 0 → 1 → 0 around runs.
--   Fargate processor sized at 2 vCPU / 6 GB RAM with 40 GB ephemeral storage.
--   Two separate container images built via `DockerBuildConstruct` and pushed to ECR.
--   Layer publishing performed inside the processor container using the unversioned layer ARN from the Database stack.
--   CloudWatch logging, enhanced container insights, and restricted egress (80/443 over IPv6).
+**Components**:
+- **S3 Static Hosting**: Private bucket with versioning enabled
+- **CloudFront Distribution**:
+  - Global CDN with HTTP/2 and HTTP/3 support
+  - Origin Access Control (OAC) for secure S3 access
+  - API proxy behavior for `/api/*` paths
+  - SPA routing with 404 → index.html fallback
+- **Deployment Automation**: S3 deployment with cache invalidation
 
-See `STEP_FUNCTION_USAGE.md` for input examples and execution modes.
+**Cost**: ~$1-5/month (CloudFront + S3 hosting)
 
-### Search API Stack (`FdnixSearchApiStack`)
+### 5. Certificate Stack (`FdnixCertificateStack`)
 
-**Resources:**
+**Purpose**: SSL/TLS certificate management for custom domains
 
--   `fdnix-search-api` - Rust Lambda function for hybrid search.
--   `fdnix-search-api-gateway` - API Gateway REST API.
--   Lambda Layer attached from Database Stack (contains LanceDB dataset only).
+**Components**:
+- **ACM Certificate**: DNS-validated certificate for `fdnix.com` and `www.fdnix.com`
+- **DNS Integration**: Works with Cloudflare DNS management
 
-**Key Features:**
+**Cost**: $0 (ACM certificates are free)
 
--   Hybrid search using LanceDB vector index (semantic) + keyword index from a local dataset.
--   Direct LanceDB access (no external databases required for vectors).
--   Real-time query embeddings via AWS Bedrock Runtime (Amazon Titan Embeddings).
--   CORS enabled for frontend integration.
--   Rate limiting and usage plans (100 req/sec, 10K/day).
--   Health check endpoint.
--   Implemented in Rust using AWS Lambda custom runtime (`PROVIDED_AL2023`).
--   LanceDB dataset accessed read-only at `/opt/fdnix/lancedb`.
--   All LanceDB dependencies are packaged with the function (no separate LanceDB library layer).
+## Networking Architecture
 
-**API Endpoints:**
+The networking design prioritizes cost optimization while maintaining security:
 
--   `GET /v1/search?q=<query>` - Main search endpoint.
-    -   `q` (required): The search query.
-    -   `limit` (optional): The number of results to return.
-    -   `offset` (optional): The offset for pagination.
--   `GET /v1/health` - Health check.
+```mermaid
+graph TB
+    subgraph "VPC (10.0.0.0/16)"
+        subgraph "Public Subnet 1 (10.0.1.0/24)"
+            E1[nixpkgs-evaluator<br/>Public IP]
+            E2[nixpkgs-processor<br/>Public IP]
+        end
+        
+        subgraph "Public Subnet 2 (10.0.2.0/24)"
+            E3[Backup Tasks<br/>Multi-AZ]
+        end
+        
+        subgraph "Security Groups"
+            SG1[Fargate SG<br/>HTTPS Egress Only]
+        end
+        
+        subgraph "VPC Endpoints ($0/hr)"
+            VPCE1[S3 Gateway<br/>No data charges]
+            VPCE2[DynamoDB Gateway<br/>No data charges]
+        end
+    end
+    
+    subgraph "Internet Gateway"
+        IGW[Internet Gateway<br/>Free for AWS traffic]
+    end
+    
+    subgraph "External Services"
+        BEDROCK[Amazon Bedrock<br/>via HTTPS]
+        ECR[ECR Registry<br/>via HTTPS]
+        LOGS[CloudWatch Logs<br/>via HTTPS]
+    end
+    
+    E1 --> SG1
+    E2 --> SG1
+    E1 --> VPCE1
+    E2 --> VPCE1
+    E1 --> VPCE2
+    E2 --> VPCE2
+    
+    E1 --> IGW
+    E2 --> IGW
+    IGW --> BEDROCK
+    IGW --> ECR
+    IGW --> LOGS
+    
+    style SG1 fill:#ffebee
+    style VPCE1 fill:#e8f5e8
+    style VPCE2 fill:#e8f5e8
+    style IGW fill:#e3f2fd
+```
 
-### Frontend Stack (`FdnixFrontendStack`)
+### Cost-Optimized Design Decisions
 
-**Resources:**
+1. **No NAT Gateway**: Public subnets with public IPs save $45/month per NAT Gateway
+2. **Gateway VPC Endpoints**: S3 and DynamoDB access with no hourly charges or data transfer fees
+3. **Security Groups**: Restrict egress to HTTPS only (ports 443/80) for security
+4. **Multi-AZ**: 2 availability zones for high availability without extra NAT costs
 
--   S3 bucket for static assets (private, OAC-protected).
--   CloudFront distribution.
--   Origin Access Control (OAC).
+## Step Functions Workflow
 
-**Key Features:**
-
--   Global CDN with edge caching.
--   No custom domain configured by CDK. Attach your domain and ACM cert manually after deploy (see “Custom Domain Setup”).
--   SPA routing support (404 -> index.html).
--   API proxying to the search API at path `/api/*`.
--   Frontend assets are deployed from the `frontend/dist` directory.
-
-## Stack Dependencies
-
-The stacks have the following dependencies:
+The pipeline uses a conditional Step Functions state machine that supports two execution modes:
 
 ```mermaid
 graph TD
-    FdnixCertificateStack --> FdnixFrontendStack
-    FdnixDatabaseStack --> FdnixPipelineStack
-    FdnixDatabaseStack --> FdnixSearchApiStack
-    FdnixSearchApiStack --> FdnixFrontendStack
+    START[Pipeline Execution Start] --> CHECK{Check Input Parameters}
+    
+    CHECK -->|jsonlInputKey provided| DEFAULTS[Set Default Keys<br/>Pass State]
+    CHECK -->|No jsonlInputKey| EVAL[nixpkgs-evaluator Task<br/>ECS Fargate]
+    
+    DEFAULTS --> PROC1[nixpkgs-processor Task<br/>Processing Only Mode]
+    
+    EVAL --> PROC2[nixpkgs-processor Task<br/>Full Pipeline Mode]
+    
+    PROC1 --> SUCCESS1[Success<br/>Processing Complete]
+    PROC2 --> SUCCESS2[Success<br/>Full Pipeline Complete]
+    
+    subgraph "Evaluator Task (4vCPU, 28GB)"
+        EVAL_DETAILS["• nix-eval-jobs evaluation
+        • Extract package metadata  
+        • Generate JSONL output
+        • Output: evaluations/{timestamp}/nixpkgs-raw.jsonl"]
+    end
+    
+    subgraph "Processor Task (2vCPU, 6GB)"
+        PROC_DETAILS["• Read JSONL input
+        • Generate embeddings (Bedrock)
+        • Build LanceDB database
+        • Create minified version
+        • Publish Lambda layer
+        • Output: snapshots/{timestamp}/"]
+    end
+    
+    EVAL -.-> EVAL_DETAILS
+    PROC1 -.-> PROC_DETAILS  
+    PROC2 -.-> PROC_DETAILS
+    
+    style CHECK fill:#fff3e0
+    style EVAL fill:#e8f5e8
+    style PROC1 fill:#e1f5fe
+    style PROC2 fill:#e1f5fe
+    style DEFAULTS fill:#f3e5f5
 ```
 
-Note: The frontend stack does not reference the certificate in code; the dependency exists only to provision the ACM certificate you will attach manually.
+### Execution Modes
 
-## Outputs
+#### 1. Full Pipeline (Evaluation + Processing)
+**Input**: `{}` or any input without `jsonlInputKey`
+**Flow**: `EvaluatorTask` → `ProcessorTaskWithEvaluatorOutput`
+**Duration**: ~2 hours
+**Use Case**: Daily scheduled runs, complete data refresh
 
-Each stack exports key resource identifiers:
+#### 2. Processing Only (Skip Evaluation)
+**Input**: `{"jsonlInputKey": "evaluations/2025-09-10/nixpkgs-raw.jsonl"}`
+**Flow**: `SetDefaultKeys` → `ProcessorTask`
+**Duration**: ~1 hour  
+**Use Case**: Reprocessing existing evaluations, testing processor changes
 
--   **Certificate**: Certificate ARN.
--   **Database**: Artifacts bucket, layer ARNs/versions.
--   **Pipeline**: Repository URIs, state machine ARN.
--   **API**: API URL, function name.
--   **Frontend**: Distribution ID, domain names.
+### Input Parameters
+
+- `jsonlInputKey` (conditional): S3 key to existing JSONL evaluation output
+- `lancedbDataKey` (optional): S3 key for main LanceDB output (auto-generated if not provided)
+- `lancedbMinifiedKey` (optional): S3 key for minified LanceDB output 
+- `dependencyS3Key` (optional): S3 key for dependency graph output
+
+## Deployment and Usage
+
+### Prerequisites
+
+1. **AWS CLI configured** with appropriate permissions
+2. **Node.js 18+** and npm installed  
+3. **AWS CDK v2** installed globally: `npm install -g aws-cdk`
+4. **Build artifacts** prepared:
+   ```bash
+   # Build search lambda
+   cd packages/search-lambda && nix build .#lambda-package
+   
+   # Build frontend
+   cd packages/frontend && npm run build
+   ```
+
+### Stack Deployment Order
+
+The stacks have dependencies and must be deployed in order:
+
+```bash
+# 1. Database stack (foundation)
+cdk deploy FdnixDatabaseStack
+
+# 2. Certificate stack (independent)  
+cdk deploy FdnixCertificateStack
+
+# 3. Pipeline stack (depends on database)
+cdk deploy FdnixPipelineStack
+
+# 4. Search API stack (depends on database)
+cdk deploy FdnixSearchApiStack
+
+# 5. Frontend stack (depends on search API and certificate)
+cdk deploy FdnixFrontendStack
+```
+
+Or deploy all at once:
+```bash
+cdk deploy --all
+```
+
+### Environment Variables
+
+Configure these environment variables before deployment:
+
+```bash
+export CDK_DEFAULT_ACCOUNT=123456789012
+export CDK_DEFAULT_REGION=us-east-1
+export FDNIX_DOMAIN_NAME=fdnix.com        # Optional: custom domain
+export FDNIX_STAGE=prod                   # Optional: environment stage  
+export FDNIX_STACK_PREFIX=Fdnix           # Optional: stack naming prefix
+```
+
+### DNS Configuration (Cloudflare)
+
+After frontend stack deployment:
+
+1. Get the CloudFront distribution domain from stack outputs
+2. In Cloudflare DNS, create:
+   - **A record**: `fdnix.com` → CloudFront domain (flattened/CNAME flattening)
+   - **CNAME record**: `www.fdnix.com` → CloudFront domain
+3. Set SSL/TLS mode to **Full (strict)**
+4. Validate ACM certificate via DNS (add CNAME records from ACM)
+
+### Manual Pipeline Execution
+
+Execute the Step Functions state machine manually:
+
+```bash
+# Full pipeline
+aws stepfunctions start-execution \
+    --state-machine-arn arn:aws:states:us-east-1:ACCOUNT:stateMachine:PipelineStateMachine \
+    --input '{}'
+
+# Processing only (skip evaluation)
+aws stepfunctions start-execution \
+    --state-machine-arn arn:aws:states:us-east-1:ACCOUNT:stateMachine:PipelineStateMachine \
+    --input '{"jsonlInputKey": "evaluations/2025-09-10/nixpkgs-raw.jsonl"}'
+```
+
+## CDK Structure and Patterns
+
+### File Organization
+
+```
+packages/cdk/
+├── bin/
+│   └── fdnix.ts                 # CDK app entry point
+├── lib/
+│   ├── certificate-stack.ts     # ACM certificate
+│   ├── database-stack.ts        # S3, Lambda layer, IAM
+│   ├── docker-build-construct.ts # Reusable Docker build
+│   ├── frontend-stack.ts        # S3, CloudFront, deployment
+│   ├── pipeline-stack.ts        # Step Functions, ECS, VPC
+│   ├── search-api-stack.ts      # Lambda, API Gateway
+│   └── empty-layer/            # Placeholder Lambda layer
+├── cdk.json                    # CDK configuration
+├── package.json               # Dependencies
+└── tsconfig.json             # TypeScript config
+```
+
+### Key Patterns Used
+
+1. **Stack Dependencies**: Explicit dependencies between stacks using `addDependency()`
+2. **Cross-Stack References**: Public readonly properties for sharing resources
+3. **Environment Abstraction**: Environment variables with sensible defaults
+4. **Resource Tagging**: Consistent tagging strategy across all resources
+5. **Construct Reuse**: `DockerBuildConstruct` for reusable container builds
+6. **Validation**: Runtime checks for build artifacts before deployment
+
+### Inter-Stack Communication
+
+```mermaid
+graph LR
+    DB[Database Stack] --> PIPE[Pipeline Stack]
+    DB --> API[Search API Stack]
+    API --> FE[Frontend Stack]
+    CERT[Certificate Stack] --> FE
+    
+    subgraph "Shared Resources"
+        S3[Artifacts Bucket]
+        LAYER[Lambda Layer]
+        ROLE[Database Access Role]
+    end
+    
+    DB --> S3
+    DB --> LAYER  
+    DB --> ROLE
+    
+    style DB fill:#fff3e0
+    style S3 fill:#e8f5e8
+    style LAYER fill:#e1f5fe
+    style ROLE fill:#ffebee
+```
+
+### Naming and Tagging Strategy
+
+**Stack Naming**: `{Prefix}{Stage}{StackName}` (e.g., `FdnixProdDatabaseStack`)
+
+**Resource Tags**:
+- `Project: fdnix` - Project identifier
+- `Component: database|pipeline|api|frontend|certificate` - Stack component
+- `Environment: production|staging|dev` - Environment stage
+- `ManagedBy: CDK` - Management tool
+- `Repository: fdnix` - Source repository
+
+### Security Considerations
+
+1. **Principle of Least Privilege**: Each IAM role has minimal required permissions
+2. **Network Isolation**: Security groups restrict traffic to HTTPS only
+3. **Encryption**: S3 server-side encryption and SSL enforcement
+4. **Access Control**: Origin Access Control (OAC) for CloudFront → S3
+5. **Secrets Management**: No hardcoded credentials or secrets in code
+
+## Cost Estimation
+
+| Component | Monthly Cost | Notes |
+|-----------|--------------|-------|
+| S3 Storage | $5-20 | LanceDB files, JSONL data |
+| ECS Fargate | $20-40 | 2 hours daily execution |  
+| Lambda | $5-15 | Search API execution |
+| CloudFront | $1-5 | CDN distribution |
+| API Gateway | $1-10 | API requests |
+| **Total** | **$32-90** | Varies by usage |
+
+Additional one-time costs:
+- ECR storage: ~$1-2/month for container images
+- CloudWatch Logs: ~$1-5/month for log retention
 
 ## Monitoring and Observability
 
--   CloudWatch logs for all Lambda functions and ECS tasks.
--   CloudWatch metrics and alarms (can be extended).
--   X-Ray tracing support (can be enabled).
--   VPC Flow Logs for pipeline network traffic.
+- **CloudWatch Logs**: All components have structured logging
+- **CloudWatch Metrics**: ECS task metrics, Lambda performance, API Gateway metrics
+- **Step Functions Console**: Visual pipeline execution tracking
+- **X-Ray Tracing**: Available for Lambda functions (optional)
 
-## Security Features
+## Maintenance and Updates
 
--   All S3 buckets block public access.
--   Encryption at rest for all storage services (S3-managed keys).
--   IAM roles follow the principle of least privilege.
--   Lambda functions with minimal required permissions.
--   CloudFront configured with OAC; add response security headers later if needed.
--   API Gateway with throttling and usage plans.
--   VPC isolation for ECS processing tasks.
+- **Daily Pipeline**: Automatically processes latest nixpkgs data
+- **Container Images**: Lifecycle policies limit ECR storage costs
+- **Lambda Layers**: Automatically updated with new LanceDB versions
+- **SSL Certificates**: Auto-renewal via ACM with DNS validation
 
-## Cost Optimization
+---
 
--   Serverless-first architecture minimizes fixed costs.
--   S3 lifecycle policies for old versions.
--   CloudFront edge caching reduces origin requests.
--   ECR lifecycle policies limit image storage.
+**Next Steps**: 
+1. Deploy the stacks in order
+2. Configure DNS settings in Cloudflare
+3. Monitor the first pipeline execution
+4. Set up alerting for pipeline failures (optional)
 
-## Cleanup
-
-To destroy all resources:
-
-```bash
-npm run destroy
-```
-
-**Warning:** This will permanently delete all data. Ensure you have backups if needed.
-
-## Troubleshooting
-
-### Common Issues
-
-1.  **Bootstrap Required**: Ensure CDK is bootstrapped in your account.
-2.  **Permission Denied**: Verify IAM permissions for CDK deployment.
-3.  **Rust Lambda Build**: Ensure `(cd ../search-lambda && nix build)` completes successfully (produces `result/bin/bootstrap`).
-4.  **Container Images**: ECR repositories need container images pushed before ECS tasks can run.
-5.  **Custom Domain**: Ensure DNS records are properly configured in your DNS provider.
-6.  **Evaluator capacity**: If the evaluator never starts, check the ASG desired capacity and ECS instance registration. The state machine scales it up automatically, polls until `InService`, and scales back down after.
-7.  **Networking**: Tasks use IPv6 egress-only with S3/DynamoDB Gateway Endpoints. If pulling packages fails, allow HTTP/HTTPS egress (ports 80/443) as configured.
-
-### Useful Commands
-
-```bash
-# List all stacks
-npx cdk list
-
-# View stack dependencies
-npx cdk tree
-
-# Check CDK version
-npx cdk --version
-
-# Validate templates
-npx cdk synth --validation
-```
-
-## Custom Domain Setup (Manual)
-
-The frontend stack intentionally does not set a custom domain or attach a certificate. After deploy, set the domain manually:
-
-1.  Validate the ACM certificate (us-east-1):
-    - Deploy `FdnixCertificateStack`.
-    - In ACM, copy the DNS validation CNAMEs for both apex and `www` SANs.
-    - Add the validation CNAMEs in Cloudflare and wait for status to become Issued.
-2.  Attach domain to CloudFront:
-    - Open the frontend CloudFront distribution.
-    - Edit settings and add Alternate domain names: `fdnix.com`, `www.fdnix.com`.
-    - Select the validated ACM certificate from `us-east-1` and save changes.
-3.  Configure Cloudflare DNS:
-    - Create a CNAME for apex (`@`) pointing to the CloudFront domain (e.g., `dxxxx.cloudfront.net`). Cloudflare will apply CNAME flattening at the apex.
-    - Create a CNAME for `www` pointing to the same CloudFront domain.
-    - Optionally enable the proxy (orange cloud).
-4.  Cloudflare SSL/TLS mode: set to "Full (strict)".
-
-Notes:
-
-- You can deploy the frontend before the certificate is issued; custom domain attachment can be done later without re-deploying CDK.
-- The distribution initially serves only its default CloudFront domain until you complete the manual steps above.
-
-## Next Steps
-
-After successful deployment:
-
-1.  **Set up the custom domain**: Attach the domain and cert to CloudFront, then configure Cloudflare DNS as described above.
-2.  **Phase 2**: Build and deploy data processing containers.
-3.  **Search Lambda (Rust)**: Ensure Nix build exists (`../search-lambda/result/bin/bootstrap`), set env flags, and validate API Gateway integration.
-4.  **Frontend**: Build and deploy SolidJS frontend; point it to the API URL.
-5.  **CI/CD**: Set up automated deployments.
-
-## Support
-
-For issues or questions:
-
--   Check CloudFormation events in AWS Console.
--   Review CloudWatch logs.
--   Verify IAM permissions.
--   Ensure all prerequisites are met.
-Pipeline keys and inputs (Processor stage):
-
--   `JSONL_INPUT_KEY` - S3 key for the nixpkgs JSONL evaluation input (set by state machine or provided via `jsonlInputKey`).
--   `LANCEDB_DATA_KEY` - S3 key for the full LanceDB database output (defaults timestamped under `snapshots/`).
--   `LANCEDB_MINIFIED_KEY` - S3 key for the minified LanceDB output used by the Lambda layer (defaults timestamped under `snapshots/`).
--   `DEPENDENCY_S3_KEY` - S3 key for extracted dependency metadata (defaults timestamped under `dependencies/`).
--   `JSONL_OUTPUT_KEY` - S3 key used by the evaluator to write the JSONL output (timestamped under `evaluations/`).
+For questions or issues, refer to the [main project documentation](../../README.md) or check the Step Functions execution logs in the AWS Console.
