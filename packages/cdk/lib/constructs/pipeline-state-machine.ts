@@ -5,6 +5,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as autoscaling from 'aws-cdk-lib/aws-autoscaling';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
 import * as stepfunctionsTasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as iam from 'aws-cdk-lib/aws-iam';
 
 export interface PipelineStateMachineProps {
   cluster: ecs.Cluster;
@@ -61,9 +62,45 @@ export class PipelineStateMachine extends Construct {
       ],
     });
 
-    const waitForEcsRegistration = new stepfunctions.Wait(this, 'WaitForEcsRegistration', {
-      time: stepfunctions.WaitTime.duration(Duration.minutes(3)),
+    // Check if EC2 instances are running and registered with ECS
+    const checkInstancesTask = new stepfunctionsTasks.CallAwsService(this, 'CheckInstancesTask', {
+      service: 'autoscaling',
+      action: 'describeAutoScalingGroups',
+      parameters: {
+        AutoScalingGroupNames: [evaluatorAutoScalingGroup.autoScalingGroupName],
+      },
+      iamResources: [
+        `arn:aws:autoscaling:${stack.region}:${stack.account}:autoScalingGroup:*:autoScalingGroupName/${evaluatorAutoScalingGroup.autoScalingGroupName}`,
+      ],
+      resultPath: '$.AutoScalingResult',
     });
+
+    // 60-second wait between polling attempts
+    const waitBetweenPolls = new stepfunctions.Wait(this, 'WaitBetweenPolls', {
+      time: stepfunctions.WaitTime.duration(Duration.seconds(60)),
+    });
+
+    // Pass state to indicate instances are ready
+    const instancesReady = new stepfunctions.Pass(this, 'InstancesReady');
+
+    // Choice state to check if instances are ready
+    const checkInstancesReady = new stepfunctions.Choice(this, 'CheckInstancesReady')
+      .when(
+        stepfunctions.Condition.and(
+          stepfunctions.Condition.numberGreaterThanEquals('$.AutoScalingResult.AutoScalingGroups[0].DesiredCapacity', 1),
+          stepfunctions.Condition.isPresent('$.AutoScalingResult.AutoScalingGroups[0].Instances[0]'),
+          stepfunctions.Condition.stringEquals('$.AutoScalingResult.AutoScalingGroups[0].Instances[0].LifecycleState', 'InService')
+        ),
+        instancesReady
+      )
+      .otherwise(waitBetweenPolls);
+
+    // Create the polling loop
+    checkInstancesTask.next(checkInstancesReady);
+    waitBetweenPolls.next(checkInstancesTask);
+
+    // The polling loop starts with checking instances
+    const instancePollingLoop = checkInstancesTask;
 
     // Stage 1: Evaluator Task (EC2)
     const evaluatorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsEvaluatorTask', {
@@ -154,30 +191,29 @@ export class PipelineStateMachine extends Construct {
       resultPath: '$.ProcessorResult',
     });
 
-    // Evaluator with scale up, wait, run
+    // Connect the instances ready state to the evaluator task
+    instancesReady.next(evaluatorTask);
+
+    // Evaluator with scale up, poll for readiness, then run
     const evaluatorWithScaling = scaleUpEvaluatorTask
-      .next(waitForEcsRegistration)
-      .next(evaluatorTask);
+      .next(instancePollingLoop);
 
-    // Complete workflow for evaluator + processor with comprehensive error handling
-    const evaluatorAndProcessorFlow = evaluatorWithScaling
-      .next(processorTaskWithEvaluatorOutput);
-
-    // Wrap the entire evaluator+processor workflow in error handling
-    const evaluatorProcessorTryCatch = new stepfunctions.Parallel(this, 'EvaluatorProcessorTryCatch', {
-      resultPath: '$.WorkflowResults',
+    // Wrap only the evaluator workflow in error handling
+    const evaluatorTryCatch = new stepfunctions.Parallel(this, 'EvaluatorTryCatch', {
+      resultPath: '$.EvaluatorResults',
     })
-      .branch(evaluatorAndProcessorFlow)
-      .addCatch(new stepfunctions.Pass(this, 'WorkflowFailedPass', {
-        result: stepfunctions.Result.fromObject({ status: 'FAILED' }),
+      .branch(evaluatorWithScaling)
+      .addCatch(new stepfunctions.Pass(this, 'EvaluatorFailedPass', {
+        result: stepfunctions.Result.fromObject({ status: 'EVALUATOR_FAILED' }),
       }), {
         errors: ['States.ALL'],
-        resultPath: '$.WorkflowError',
+        resultPath: '$.EvaluatorError',
       });
 
-    // Always scale down after the workflow completes (success or failure)
-    const evaluatorWorkflowWithErrorHandling = evaluatorProcessorTryCatch
-      .next(scaleDownEvaluatorTask);
+    // Always scale down after the evaluator completes (success or failure)
+    const evaluatorWorkflowWithErrorHandling = evaluatorTryCatch
+      .next(scaleDownEvaluatorTask)
+      .next(processorTaskWithEvaluatorOutput);
 
     // Choice: skip evaluation if jsonlInputKey present
     const definition = new stepfunctions.Choice(this, 'CheckForExistingOutputs')
@@ -188,6 +224,13 @@ export class PipelineStateMachine extends Construct {
       definition,
       timeout: Duration.hours(6),
     });
+
+    // Add permission to describe Auto Scaling Groups
+    this.stateMachine.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['autoscaling:DescribeAutoScalingGroups'],
+      resources: ['*'], // DescribeAutoScalingGroups doesn't support resource-level permissions
+    }));
   }
 }
 

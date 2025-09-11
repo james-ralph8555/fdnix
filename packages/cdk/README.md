@@ -8,7 +8,7 @@ The infrastructure consists of four main stacks, a certificate stack, and a set 
 
 1.  **Certificate Stack** - Provisions an ACM certificate for the custom domain.
 2.  **Database Stack** - S3 artifact storage + Lambda Layer for the LanceDB dataset (minified).
-3.  **Pipeline Stack** - Data processing pipeline that builds the LanceDB dataset and publishes the Lambda layer.
+3.  **Pipeline Stack** - Two-stage pipeline (EC2 evaluator + Fargate processor) orchestrated by Step Functions that builds the LanceDB dataset and publishes the Lambda layer.
 4.  **Search API Stack** - A Rust Lambda-based search API with self-contained LanceDB runtime/dependencies and AWS Bedrock (Amazon Titan Embeddings) for query embeddings.
 5.  **Frontend Stack** - Static site hosting with CloudFront (no CDK-managed custom domain).
 
@@ -27,9 +27,11 @@ graph TD
     end
 
     subgraph FdnixPipelineStack
-        sfn["Step Functions Pipeline"]
-        ecs["ECS Fargate"]
-        ecr["ECR Repository"]
+        sfn["Step Functions"]
+        ec2_eval["ECS EC2: Evaluator"]
+        fg_proc["ECS Fargate: Processor"]
+        ecr_eval["ECR: nixpkgs-evaluator"]
+        ecr_proc["ECR: nixpkgs-processor"]
     end
 
     subgraph FdnixSearchApiStack
@@ -50,8 +52,12 @@ graph TD
     lambda --> db_layer
     lambda --> bedrock
 
-    sfn --> ecs
-    ecs --> s3_artifacts
+    sfn --> ec2_eval
+    ec2_eval --> s3_artifacts
+    sfn --> fg_proc
+    fg_proc --> s3_artifacts
+    ecr_eval -. images .- ec2_eval
+    ecr_proc -. images .- fg_proc
     sfn --> db_layer
 
     %% No CDK-managed custom domain: certificate provisioned separately
@@ -60,18 +66,20 @@ graph TD
 
 ## Data Pipeline Diagram
 
-The data pipeline is orchestrated by a Step Functions state machine that runs a single ECS Fargate task. The unified container handles metadata, embeddings, and publishes the Lambda layer.
+The data pipeline is now a two-stage workflow orchestrated by Step Functions. Stage 1 runs an EC2-based ECS task to evaluate nixpkgs. Stage 2 runs a Fargate-based ECS task to process metadata, (optionally) generate embeddings, build LanceDB databases, and publish the Lambda layer. You can also skip Stage 1 and run Stage 2 directly by providing an existing `jsonlInputKey`.
 
 ```mermaid
 graph TD
     subgraph "FdnixPipelineStack"
         direction LR
-        start((Start)) --> indexer_task[Indexer Task]
-        indexer_task --> done((End))
-
-        subgraph "ECS Fargate Task"
-            indexer_task
-        end
+        start((Start)) --> choice{jsonlInputKey?}
+        choice -- no --> scale_up[Scale up EC2 ASG]\n(poll until InService)
+        scale_up --> evaluator[Evaluator (ECS EC2)]
+        evaluator --> scale_down[Scale down EC2 ASG]
+        scale_down --> processor[Processor (ECS Fargate)]
+        choice -- yes --> set_defaults[Set defaults]\n(lancedb/deps keys)
+        set_defaults --> processor
+        processor --> done((End))
     end
 
     subgraph "FdnixDatabaseStack"
@@ -80,8 +88,9 @@ graph TD
         db_layer[[Lambda Layer: LanceDB Dataset]]
     end
 
-    indexer_task -- reads/writes (full + minified) --> s3_artifacts
-    indexer_task -- publishes minified to --> db_layer
+    evaluator -- writes JSONL --> s3_artifacts
+    processor -- reads/writes (full + minified) --> s3_artifacts
+    processor -- publishes minified to --> db_layer
 ```
 
 ## Search API Diagram
@@ -153,14 +162,13 @@ Embeddings configuration:
     -   `BEDROCK_MODEL_ID` - Embedding model id (default: `amazon.titan-embed-text-v2:0`).
     -   `BEDROCK_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
 
--   Pipeline (AWS Bedrock batch, Amazon Titan Embeddings):
-    -   `BEDROCK_MODEL_ID` (default: `amazon.titan-embed-text-v2:0`)
-    -   `BEDROCK_OUTPUT_DIMENSIONS` (default: `256`)
-    -   `BEDROCK_ROLE_ARN` (required; batch invocation role to access S3)
-    -   `BEDROCK_INPUT_BUCKET` and `BEDROCK_OUTPUT_BUCKET` (or a single `ARTIFACTS_BUCKET`)
-    -   `BEDROCK_BATCH_SIZE` (default: `50000`)
-    -   `BEDROCK_POLL_INTERVAL` (default: `60`)
-    -   `BEDROCK_MAX_WAIT_TIME` (default: `7200`)
+-   Pipeline processor (real-time; disabled by default):
+    -   `ENABLE_EMBEDDINGS` - Set to `true` to generate embeddings during processing (default: `false`).
+    -   `BEDROCK_MODEL_ID` - Embedding model id for processor (default: `amazon.titan-embed-text-v2:0`).
+    -   `BEDROCK_OUTPUT_DIMENSIONS` - Embedding dimensions (default: `256`).
+    -   `BEDROCK_MAX_RPM` - Requests per minute limit (e.g., `600`).
+    -   `BEDROCK_MAX_TOKENS_PER_MINUTE` - Token throughput cap.
+    -   `PROCESSING_BATCH_SIZE` - Batch size for processing/embedding (default tuned for rate limiting).
 
 ### AWS Prerequisites
 
@@ -256,20 +264,27 @@ npm run synth
 
 **Resources:**
 
--   `fdnix-processing-cluster` - ECS Fargate cluster.
--   `fdnix-nixpkgs-indexer` - ECR repository (unified container).
+-   `fdnix-pipeline-vpc` - Cost-optimized VPC (no NAT), IPv6 egress-only internet.
+-   `fdnix-processing-cluster` - ECS cluster (EC2 capacity provider + Fargate).
+-   `fdnix-evaluator-asg` - Auto Scaling Group + launch template (EC2 i4i.xlarge) for Stage 1.
+-   `fdnix-nixpkgs-evaluator` - ECR repository for the evaluator image.
+-   `fdnix-nixpkgs-processor` - ECR repository for the processor image.
+-   CloudWatch Log Groups per stage.
 -   `fdnix-daily-pipeline` - Step Functions state machine.
 -   `fdnix-daily-pipeline-trigger` - EventBridge rule (daily at 2:00 AM UTC).
 
 **Key Features:**
 
--   Pipeline orchestration extracted into a dedicated construct: `lib/constructs/pipeline-state-machine.ts` for cleaner separation of concerns.
--   Single-step or multi-step pipeline (depending on input): evaluator + processor with conditional skip based on `jsonlInputKey`.
--   Automated daily execution (2:00 AM UTC).
--   Unified container for the entire indexing flow.
--   Custom `DockerBuildConstruct` for building the container image.
--   Layer publishing performed inside the container (no separate Lambda).
--   CloudWatch logging and monitoring.
+-   Two-stage pipeline: Stage 1 (Evaluator on ECS EC2) → Stage 2 (Processor on ECS Fargate).
+-   Conditional skip: Provide `jsonlInputKey` to bypass evaluation and run processing only.
+-   VPC with $0/hr baseline: no NAT Gateway; IPv6 egress-only with S3/DynamoDB Gateway Endpoints.
+-   EC2 evaluator uses local NVMe on `i4i.xlarge` and auto-scales 0 → 1 → 0 around runs.
+-   Fargate processor sized at 2 vCPU / 6 GB RAM with 40 GB ephemeral storage.
+-   Two separate container images built via `DockerBuildConstruct` and pushed to ECR.
+-   Layer publishing performed inside the processor container using the unversioned layer ARN from the Database stack.
+-   CloudWatch logging, enhanced container insights, and restricted egress (80/443 over IPv6).
+
+See `STEP_FUNCTION_USAGE.md` for input examples and execution modes.
 
 ### Search API Stack (`FdnixSearchApiStack`)
 
@@ -382,6 +397,8 @@ npm run destroy
 3.  **Rust Lambda Build**: Ensure `(cd ../search-lambda && nix build)` completes successfully (produces `result/bin/bootstrap`).
 4.  **Container Images**: ECR repositories need container images pushed before ECS tasks can run.
 5.  **Custom Domain**: Ensure DNS records are properly configured in your DNS provider.
+6.  **Evaluator capacity**: If the evaluator never starts, check the ASG desired capacity and ECS instance registration. The state machine scales it up automatically, polls until `InService`, and scales back down after.
+7.  **Networking**: Tasks use IPv6 egress-only with S3/DynamoDB Gateway Endpoints. If pulling packages fails, allow HTTP/HTTPS egress (ports 80/443) as configured.
 
 ### Useful Commands
 
@@ -440,7 +457,10 @@ For issues or questions:
 -   Review CloudWatch logs.
 -   Verify IAM permissions.
 -   Ensure all prerequisites are met.
-Pipeline dataset keys (used by the indexer task):
+Pipeline keys and inputs (Processor stage):
 
--   `LANCEDB_DATA_PATH` - S3 key/prefix for the full LanceDB dataset (e.g., `datasets/fdnix-lancedb/`).
--   `LANCEDB_MINIFIED_PATH` - S3 key/prefix for the minified LanceDB dataset used by the Lambda layer (e.g., `datasets/fdnix-lancedb-min/`).
+-   `JSONL_INPUT_KEY` - S3 key for the nixpkgs JSONL evaluation input (set by state machine or provided via `jsonlInputKey`).
+-   `LANCEDB_DATA_KEY` - S3 key for the full LanceDB database output (defaults timestamped under `snapshots/`).
+-   `LANCEDB_MINIFIED_KEY` - S3 key for the minified LanceDB output used by the Lambda layer (defaults timestamped under `snapshots/`).
+-   `DEPENDENCY_S3_KEY` - S3 key for extracted dependency metadata (defaults timestamped under `dependencies/`).
+-   `JSONL_OUTPUT_KEY` - S3 key used by the evaluator to write the JSONL output (timestamped under `evaluations/`).
