@@ -94,9 +94,9 @@ class NixpkgsExtractor:
             "bar-with-logs",
             # "--no-instantiate",  # need to wait till nix-eval-jobs ets another release; this is only in main branch
             "--workers",
-            "8",
+            "4",
             "--max-memory-size",
-            "4096",
+            "6144",
             str(release_nix),
         ]
 

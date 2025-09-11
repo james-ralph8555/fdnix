@@ -263,7 +263,8 @@ npm run synth
 
 **Key Features:**
 
--   Single-step pipeline: one ECS task runs metadata + embeddings, produces the full DB, derives a minified DB, and publishes the minified DB as a Lambda layer.
+-   Pipeline orchestration extracted into a dedicated construct: `lib/constructs/pipeline-state-machine.ts` for cleaner separation of concerns.
+-   Single-step or multi-step pipeline (depending on input): evaluator + processor with conditional skip based on `jsonlInputKey`.
 -   Automated daily execution (2:00 AM UTC).
 -   Unified container for the entire indexing flow.
 -   Custom `DockerBuildConstruct` for building the container image.
