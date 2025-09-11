@@ -92,7 +92,6 @@ export class FdnixPipelineStack extends Stack {
     this.cluster = new ecs.Cluster(this, 'ProcessingCluster', {
       vpc,
       containerInsightsV2: ecs.ContainerInsights.ENHANCED,
-      enableExecuteCommand: true,
     });
 
     // ECR Repositories for both stages
@@ -265,10 +264,10 @@ export class FdnixPipelineStack extends Stack {
       removalPolicy: RemovalPolicy.DESTROY,
     });
 
-    // Stage 1: Fargate Task Definition for nixpkgs-evaluator (8vCPU, 48GB RAM, 40GB storage)
+    // Stage 1: Fargate Task Definition for nixpkgs-evaluator (8vCPU, 64GB RAM, 40GB storage)
     this.nixpkgsEvaluatorTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsEvaluatorTaskDefinition', {
       cpu: 8192,      // 8 vCPU - needed for nix-eval-jobs
-      memoryLimitMiB: 49152,  // 48GB RAM - needed for nix-eval-jobs
+      memoryLimitMiB: 65536,  // 64GB RAM - needed for RAM disk (/nix/store) + nix-eval-jobs
       ephemeralStorageGiB: 40, // 40GB ephemeral storage for large nix evaluations
       executionRole: fargateExecutionRole,
       taskRole: evaluatorTaskRole,
@@ -280,6 +279,7 @@ export class FdnixPipelineStack extends Stack {
         streamPrefix: 'nixpkgs-evaluator',
         logGroup: evaluatorLogGroup,
       }),
+      privileged: true, // Required for mounting tmpfs RAM disk
       environment: {
         AWS_REGION: this.region,
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,

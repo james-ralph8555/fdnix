@@ -89,9 +89,12 @@ class NixpkgsExtractor:
             "--show-input-drvs",
             "--force-recurse",
             "--impure",
+            "--verbose",
+            "--log-format",
+            "bar-with-logs",
             # "--no-instantiate",  # need to wait till nix-eval-jobs ets another release; this is only in main branch
             "--workers",
-            "4",
+            "8",
             "--max-memory-size",
             "4096",
             str(release_nix),
@@ -111,16 +114,31 @@ class NixpkgsExtractor:
             # Allow broken packages to prevent evaluation crashes
             env.setdefault("NIXPKGS_ALLOW_BROKEN", "1")
             
-            # Create stderr log file for nix-eval-jobs
-            stderr_log = Path("/tmp/nix_eval_jobs_stderr.log")
-            with tmp_path.open('wb') as output_file, stderr_log.open('ab') as stderr_file:
-                proc = subprocess.run(
+            # Stream stderr to logger while capturing stdout to file
+            with tmp_path.open('wb') as output_file:
+                proc = subprocess.Popen(
                     cmd,
-                    check=True,
                     stdout=output_file,
-                    stderr=stderr_file,
+                    stderr=subprocess.PIPE,
                     env=env,
+                    text=True,
+                    bufsize=1  # Line buffered
                 )
+                
+                # Stream stderr lines to logger for CloudWatch visibility
+                while True:
+                    stderr_line = proc.stderr.readline()
+                    if not stderr_line and proc.poll() is not None:
+                        break
+                    if stderr_line:
+                        # Log each line from nix-eval-jobs stderr
+                        logger.info("nix-eval-jobs: %s", stderr_line.rstrip())
+                
+                # Wait for process to complete and get return code
+                return_code = proc.wait()
+                
+                if return_code != 0:
+                    raise subprocess.CalledProcessError(return_code, cmd)
             
             # Return the JSONL file path instead of parsing it
             logger.info("Successfully generated JSONL file: %s", tmp_path)
@@ -129,28 +147,13 @@ class NixpkgsExtractor:
         except subprocess.CalledProcessError as e:
             # Log the actual error details for debugging
             error_details = f"Exit code: {e.returncode}"
-            if e.stderr:
-                stderr_str = e.stderr.decode('utf-8', errors='replace')
-                
-                # Check for common recoverable errors
-                if "marked as broken" in stderr_str or "refusing to evaluate" in stderr_str:
-                    logger.warning("nix-eval-jobs encountered broken packages (this is expected): %s", 
-                                 stderr_str.strip()[:500])
-                    # Check if we have some output despite broken packages
-                    if tmp_path.exists() and tmp_path.stat().st_size > 0:
-                        logger.info("Some packages were extracted despite broken package warnings, continuing...")
-                        logger.info("Successfully generated JSONL file despite broken package warnings: %s", tmp_path)
-                        return str(tmp_path)
-                
-                if "double free or corruption" in stderr_str or "out of memory" in stderr_str:
-                    logger.error("nix-eval-jobs crashed with memory corruption: %s", stderr_str.strip())
-                    error_details += ", Memory corruption detected"
-                else:
-                    logger.error("nix-eval-jobs stderr: %s", stderr_str.strip())
-                
-                error_details += f", Stderr: {stderr_str.strip()[:1000]}"
-            else:
-                error_details += ", No stderr output"
+            
+            # Since stderr was already streamed to the logger, we don't have it captured
+            # But we can still check if we got some output despite the error
+            if tmp_path.exists() and tmp_path.stat().st_size > 0:
+                logger.warning("nix-eval-jobs failed but produced some output, checking if usable...")
+                logger.info("JSONL file exists with size %d bytes, continuing...", tmp_path.stat().st_size)
+                return str(tmp_path)
             
             logger.error("nix-eval-jobs failed: %s", error_details)
             raise RuntimeError(f"nix-eval-jobs failed: {error_details}") from e

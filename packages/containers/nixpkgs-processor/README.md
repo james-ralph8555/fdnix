@@ -220,32 +220,9 @@ Publishes LanceDB as AWS Lambda layer:
 - `NODE_S3_MAX_WORKERS`: Max parallel threads for node uploads (default: `10`)
 - `LAYER_ARN`: Lambda layer ARN for publishing
 
-## Performance Characteristics
-
-### Processing Scale
-- **Input**: ~120K nixpkgs packages from JSONL (~500MB)
-- **Output**: 
-  - Vector database with 256-dim embeddings (~2GB main, ~500MB minified)
-  - Individual node S3 files (~120K JSON files, ~1GB total)
-  - Dependency graph with comprehensive relationship data
-- **Processing Time**: ~45 minutes for full pipeline with embeddings and nodes
-- **Incremental**: ~5 minutes for metadata-only updates
-
-### Resource Requirements
-- **CPU**: 1-2 cores (embedding generation is I/O bound)
-- **Memory**: 4-8GB (dependent on LanceDB index size)
-- **Storage**: 10GB temporary space for processing
-- **Network**: Bedrock API calls for embedding generation
-
-### Database Optimization
-- **Vector Index**: IVF-PQ with 256 partitions, 8 sub-vectors
-- **FTS Index**: Native LanceDB indexing on text fields
-- **Compression**: Automatic LanceDB columnar compression
-- **Query Performance**: <100ms for vector similarity, <50ms for FTS
-
 ## Container Deployment
 
-Built on `nixos/nix:2.31.0` with Python dependencies via Nix:
+Built on `nixos/nix` with Python dependencies via Nix:
 - LanceDB for vector storage
 - Boto3 for AWS integration  
 - Pandas for data processing
