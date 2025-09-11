@@ -20,6 +20,7 @@ in
     lancedb
     pylance
     graph-tool
+    brotli
     pip
   ]))
 ]

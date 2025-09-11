@@ -359,17 +359,29 @@ class DependencyGraph:
             strongly_connected = 0
             weakly_connected = 0
         
-        # Calculate degree statistics without materializing full degree lists
+        # Calculate degree statistics and collect data for leaderboards
         max_in = 0
         max_out = 0
         zero_in = 0
         zero_out = 0
         
+        # Lists to store (node_id, degree) for leaderboards
+        dependencies_list = []  # (node_id, out_degree) - what package depends on
+        dependents_list = []    # (node_id, in_degree) - what depends on package
+        
         if self._out_adj is None or self._in_adj is None:
             # Fallback to graph-tool iteration if adjacency not yet built
             for v in self.graph.vertices():
+                vertex_idx = int(v)
+                node_id = self.vertex_to_node_id.get(vertex_idx)
+                
                 in_deg = v.in_degree()
                 out_deg = v.out_degree()
+                
+                if node_id:
+                    dependencies_list.append((node_id, out_deg))
+                    dependents_list.append((node_id, in_deg))
+                
                 if in_deg == 0:
                     zero_in += 1
                 if out_deg == 0:
@@ -381,8 +393,15 @@ class DependencyGraph:
         else:
             # Use cached adjacency for faster degree inspection
             for idx in range(num_nodes):
+                node_id = self.vertex_to_node_id.get(idx)
+                
                 out_deg = len(self._out_adj[idx])
                 in_deg = len(self._in_adj[idx])
+                
+                if node_id:
+                    dependencies_list.append((node_id, out_deg))
+                    dependents_list.append((node_id, in_deg))
+                
                 if in_deg == 0:
                     zero_in += 1
                 if out_deg == 0:
@@ -391,6 +410,10 @@ class DependencyGraph:
                     max_in = in_deg
                 if out_deg > max_out:
                     max_out = out_deg
+
+        # Generate top 100 leaderboards
+        top_dependencies = sorted(dependencies_list, key=lambda x: x[1], reverse=True)[:100]
+        top_dependents = sorted(dependents_list, key=lambda x: x[1], reverse=True)[:100]
 
         return {
             "total_packages": num_nodes,
@@ -403,6 +426,8 @@ class DependencyGraph:
             "max_dependents": max_in,
             "packages_with_no_dependencies": zero_out,
             "packages_with_no_dependents": zero_in,
+            "top_100_most_dependencies": [{"package": pkg, "count": count} for pkg, count in top_dependencies],
+            "top_100_most_dependents": [{"package": pkg, "count": count} for pkg, count in top_dependents],
         }
     
     def export_graph(self, output_path: str, format: str = "gexf") -> None:

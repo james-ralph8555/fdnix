@@ -11,5 +11,6 @@ in
     boto3
     botocore
     requests
+    brotli
   ]))
 ]

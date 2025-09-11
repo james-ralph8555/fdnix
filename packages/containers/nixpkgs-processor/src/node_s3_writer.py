@@ -1,5 +1,6 @@
 import json
 import logging
+import brotli
 from typing import Any, Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -24,7 +25,8 @@ class NodeS3Writer:
         region: str = "us-east-1",
         clear_existing: bool = True,
         batch_size: int = 50,
-        max_workers: int = 30
+        max_workers: int = 30,
+        compression_level: int = 6
     ) -> None:
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix.rstrip('/') + '/'  # Ensure trailing slash
@@ -32,6 +34,7 @@ class NodeS3Writer:
         self.clear_existing = clear_existing
         self.batch_size = batch_size
         self.max_workers = max_workers
+        self.compression_level = compression_level
         self._s3_client = None
         self._upload_stats = {
             'success': 0,
@@ -216,20 +219,27 @@ class NodeS3Writer:
                 # Create S3 key for this node
                 s3_key = f"{self.s3_prefix}{node_id}.json"
                 
-                # Convert to JSON
-                json_data = json.dumps(node, indent=2, sort_keys=True)
+                # Convert to compact JSON and compress with brotli
+                json_data = json.dumps(node, separators=(',', ':'), sort_keys=True)
+                compressed_data = brotli.compress(
+                    json_data.encode('utf-8'),
+                    quality=self.compression_level
+                )
                 
                 # Upload to S3
                 s3_client.put_object(
                     Bucket=self.s3_bucket,
                     Key=s3_key,
-                    Body=json_data.encode('utf-8'),
+                    Body=compressed_data,
                     ContentType='application/json',
+                    ContentEncoding='br',
                     Metadata={
                         'package-name': node.get("packageName", ""),
                         'version': node.get("version", ""),
                         'category': node.get("category", ""),
-                        'generated-by': 'fdnix-nixpkgs-processor'
+                        'generated-by': 'fdnix-nixpkgs-processor',
+                        'compression': 'brotli',
+                        'compression-quality': str(self.compression_level)
                     }
                 )
                 
@@ -332,20 +342,27 @@ class NodeS3Writer:
                 ]
             }
             
-            # Upload index file
+            # Upload index file with brotli compression
             s3_client = self._get_s3_client()
             index_key = f"{self.s3_prefix}index.json"
-            json_data = json.dumps(index_data, indent=2, sort_keys=True)
+            json_data = json.dumps(index_data, separators=(',', ':'), sort_keys=True)
+            compressed_data = brotli.compress(
+                json_data.encode('utf-8'),
+                quality=self.compression_level
+            )
             
             s3_client.put_object(
                 Bucket=self.s3_bucket,
                 Key=index_key,
-                Body=json_data.encode('utf-8'),
+                Body=compressed_data,
                 ContentType='application/json',
+                ContentEncoding='br',
                 Metadata={
                     'type': 'node-index',
                     'total-packages': str(len(packages)),
-                    'generated-by': 'fdnix-nixpkgs-processor'
+                    'generated-by': 'fdnix-nixpkgs-processor',
+                    'compression': 'brotli',
+                    'compression-quality': str(self.compression_level)
                 }
             )
             

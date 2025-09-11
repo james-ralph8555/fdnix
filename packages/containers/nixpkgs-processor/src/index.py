@@ -8,7 +8,8 @@ from typing import List, Dict, Any
 
 from s3_jsonl_reader import S3JsonlReader
 from data_processor import DataProcessor
-from lancedb_writer import LanceDBWriter, DependencyS3Writer
+from lancedb_writer import LanceDBWriter
+from s3_stats_writer import S3StatsWriter
 from embedding_generator import EmbeddingGenerator
 from layer_publisher import LayerPublisher
 from node_s3_writer import NodeS3Writer
@@ -47,11 +48,11 @@ def validate_env() -> None:
         if not has_minified_key:
             os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.lancedb"
     
-    # Set default dependency key if not set
-    if not os.environ.get("DEPENDENCY_S3_KEY"):
+    # Set default stats key if not set
+    if not os.environ.get("STATS_S3_KEY"):
         import time
         timestamp = int(time.time())
-        os.environ["DEPENDENCY_S3_KEY"] = f"dependencies/fdnix-deps-{timestamp}.json"
+        os.environ["STATS_S3_KEY"] = f"stats/fdnix-stats-{timestamp}.json"
     
     # Set default node S3 prefix if not set
     if not os.environ.get("NODE_S3_PREFIX"):
@@ -106,7 +107,6 @@ async def main() -> int:
         
         # Phase 2: Data Processing (if requested)
         packages = None
-        dependencies = None
         graph_data = None
         
         if processing_mode in ("metadata", "both"):
@@ -114,17 +114,18 @@ async def main() -> int:
             
             processor = DataProcessor()
             
-            # Check if we need dependency graph processing for node S3 files
+            # Check if we need dependency graph processing for node S3 files or stats
             enable_node_s3 = _truthy(os.environ.get("ENABLE_NODE_S3", "true"))  # Default enabled
+            enable_stats = _truthy(os.environ.get("ENABLE_STATS", "true"))  # Default enabled
             
-            if enable_node_s3:
+            if enable_node_s3 or enable_stats:
                 # Use enhanced processing with dependency graph
-                packages, dependencies, graph_data = processor.process_with_dependency_graph(raw_packages)
+                packages, graph_data = processor.process_with_dependency_graph(raw_packages)
             else:
                 # Use standard processing (original behavior)
-                packages, dependencies = processor.process_raw_packages(raw_packages)
+                packages = processor.process_raw_packages(raw_packages)
             
-            # Create main database with all metadata (upload to data key)
+            # Create main database with metadata only (upload to data key)
             main_writer = LanceDBWriter(
                 output_path=main_db_path,
                 s3_bucket=bucket,
@@ -135,27 +136,22 @@ async def main() -> int:
             logger.info("Writing metadata to main LanceDB artifact...")
             main_writer.write_artifact(packages)
             
-            # Write dependency data to LanceDB (separate table in same database)
-            if dependencies:
-                logger.info("Writing dependency data to LanceDB...")
-                main_writer.write_dependency_artifact(dependencies)
-                logger.info("Dependency data written to LanceDB successfully!")
-            
-            # Write comprehensive dependency data to S3 (separate JSON file)
-            if dependencies and os.environ.get("DEPENDENCY_S3_KEY"):
-                logger.info("Writing comprehensive dependency data to S3...")
-                dep_s3_writer = DependencyS3Writer(
+            # Write comprehensive stats data to S3 (separate JSON file)
+            if graph_data and os.environ.get("STATS_S3_KEY"):
+                logger.info("Writing comprehensive stats data to S3...")
+                stats_s3_writer = S3StatsWriter(
                     s3_bucket=bucket,
-                    s3_key=os.environ.get("DEPENDENCY_S3_KEY"), 
+                    s3_key=os.environ.get("STATS_S3_KEY"), 
                     region=region
                 )
-                dep_metadata = {
+                stats_metadata = {
                     "extraction_timestamp": metadata.get("extraction_timestamp", "unknown"),
                     "nixpkgs_branch": metadata.get("nixpkgs_branch", "unknown"),
                     "total_packages": len(packages)
                 }
-                dep_s3_writer.write_dependency_json(dependencies, dep_metadata)
-                logger.info("Comprehensive dependency data uploaded to S3!")
+                graph_stats = graph_data.get("graph_stats", {})
+                stats_s3_writer.write_stats_json(graph_stats, stats_metadata)
+                logger.info("Comprehensive stats data uploaded to S3!")
             
             logger.info("Main database generation completed successfully!")
         

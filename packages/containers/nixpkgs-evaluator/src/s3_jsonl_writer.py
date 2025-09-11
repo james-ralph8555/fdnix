@@ -5,11 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
-try:
-    import boto3
-    from botocore.exceptions import ClientError, NoCredentialsError
-except ImportError:
-    boto3 = None
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
+import brotli
 
 logger = logging.getLogger("fdnix.s3-jsonl-writer")
 
@@ -18,9 +16,6 @@ class S3JsonlWriter:
     """Simple S3 writer for raw JSONL output from nix-eval-jobs."""
     
     def __init__(self, bucket: str, key: str, region: str = "us-east-1"):
-        if not boto3:
-            raise RuntimeError("boto3 is required for S3 operations")
-        
         self.bucket = bucket
         self.key = key
         self.region = region
@@ -74,17 +69,29 @@ class S3JsonlWriter:
             
             final_content = json.dumps(metadata) + '\n' + original_content
             
+            # Compress with brotli (moderate compression)
+            compressed_data = brotli.compress(final_content.encode('utf-8'), quality=6)
+            compression_ratio = len(compressed_data) / len(final_content.encode('utf-8'))
+            
+            logger.info("Compressed JSONL data: %.2f MB -> %.2f MB (%.1f%% ratio)", 
+                       len(final_content.encode('utf-8')) / 1024 / 1024,
+                       len(compressed_data) / 1024 / 1024,
+                       compression_ratio * 100)
+            
             # Upload to S3
             self.s3_client.put_object(
                 Bucket=self.bucket,
                 Key=self.key,
-                Body=final_content.encode('utf-8'),
+                Body=compressed_data,
                 ContentType='application/jsonl',
+                ContentEncoding='br',
                 Metadata={
                     'extraction-timestamp': metadata["_metadata"]["extraction_timestamp"],
                     'package-count': str(package_count),
                     'nixpkgs-branch': metadata["_metadata"]["nixpkgs_branch"],
-                    'original-file': metadata["_metadata"]["original_file"]
+                    'original-file': metadata["_metadata"]["original_file"],
+                    'compression': 'brotli',
+                    'compression-quality': '6'
                 }
             )
             

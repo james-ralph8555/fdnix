@@ -14,43 +14,38 @@ class DataProcessor:
     def __init__(self) -> None:
         self.graph_processor = DependencyGraphProcessor()
 
-    def process_raw_packages(self, raw_packages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def process_raw_packages(self, raw_packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process raw package data from nix-eval-jobs JSONL into structured format.
         
         Args:
             raw_packages: List of raw package dictionaries from nix-eval-jobs
             
         Returns:
-            Tuple of (packages, dependencies) where:
-            - packages: List of package metadata (for main LanceDB)
-            - dependencies: List of dependency information (for separate LanceDB table)
+            List of package metadata (for main LanceDB)
         """
         logger.info("Processing %d raw packages from Stage 1...", len(raw_packages))
         
         packages = self._process_package_data(raw_packages)
-        dependencies = self._process_dependency_data(raw_packages)
         
-        logger.info("Successfully processed %d packages and %d dependency entries", 
-                   len(packages), len(dependencies))
+        logger.info("Successfully processed %d packages", len(packages))
         
-        return packages, dependencies
+        return packages
     
-    def process_with_dependency_graph(self, raw_packages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    def process_with_dependency_graph(self, raw_packages: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Process raw packages and generate comprehensive dependency graph information.
         
         Args:
             raw_packages: List of raw package dictionaries from nix-eval-jobs
             
         Returns:
-            Tuple of (packages, dependencies, graph_data) where:
+            Tuple of (packages, graph_data) where:
             - packages: List of package metadata (for LanceDB)
-            - dependencies: List of dependency information (for LanceDB dependencies table)  
-            - graph_data: Comprehensive dependency graph information (for individual node S3 files)
+            - graph_data: Comprehensive dependency graph information (for individual node S3 files and stats)
         """
         logger.info("Processing %d raw packages with dependency graph...", len(raw_packages))
         
-        # Process standard package and dependency data
-        packages, dependencies = self.process_raw_packages(raw_packages)
+        # Process standard package data
+        packages = self.process_raw_packages(raw_packages)
         
         # Generate comprehensive dependency graph information
         logger.info("Building dependency graph for node S3 files...")
@@ -58,7 +53,7 @@ class DataProcessor:
         
         logger.info("Successfully processed packages with dependency graph")
         
-        return packages, dependencies, graph_data
+        return packages, graph_data
 
     def _process_package_data(self, raw_packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Process package data from nix-eval-jobs output."""
@@ -124,53 +119,6 @@ class DataProcessor:
         logger.info("Successfully processed %d packages", len(processed))
         return processed
 
-    def _process_dependency_data(self, raw_packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Process dependency data from nix-eval-jobs output."""
-        dependencies = []
-        current_ts = datetime.now(timezone.utc).isoformat()
-        
-        logger.info("Processing %d packages for dependency information", len(raw_packages))
-        
-        for pkg_data in raw_packages:
-            try:
-                attr_path = ".".join(pkg_data.get("attrPath", []))
-                name = pkg_data.get("name", "")
-                package_name, version = self._parse_name_version(name)
-                
-                # Extract dependencies from inputDrvs
-                input_drvs = pkg_data.get("inputDrvs", {})
-                build_inputs = []
-                propagated_inputs = []
-                
-                # Parse store paths to extract dependency names
-                for drv_path in input_drvs.keys():
-                    dep_name = self._extract_package_name_from_store_path(drv_path)
-                    if dep_name:
-                        # For simplicity, treat all inputDrvs as buildInputs
-                        # In a more sophisticated implementation, we could distinguish
-                        # between build and propagated inputs
-                        build_inputs.append(dep_name)
-                
-                dep_entry = {
-                    "packageId": f"{package_name}-{version}",
-                    "pname": package_name,
-                    "version": version,
-                    "attributePath": attr_path,
-                    "buildInputs": build_inputs,
-                    "propagatedBuildInputs": propagated_inputs,
-                    "totalDependencies": len(build_inputs) + len(propagated_inputs),
-                    "lastUpdated": current_ts
-                }
-                
-                dependencies.append(dep_entry)
-                
-            except Exception as e:
-                logger.warning("Error processing dependency for %s: %s", 
-                             pkg_data.get("name", "unknown"), e)
-                continue
-        
-        logger.info("Successfully processed %d dependency entries", len(dependencies))
-        return dependencies
 
     def _parse_name_version(self, name: str) -> Tuple[str, str]:
         """Parse package name and version from nix-eval-jobs name field."""
