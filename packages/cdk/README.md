@@ -121,7 +121,6 @@ graph TB
 
 **Components**:
 - **S3 Artifacts Bucket**: Stores LanceDB files, JSONL evaluations, and dependency graphs
-  - Versioned with 30-day retention for old versions
   - SSL enforcement and block public access
 - **Lambda Layer**: Contains minified LanceDB dataset for fast Lambda access
   - Optimized for search performance with essential data only
@@ -178,7 +177,7 @@ graph TB
 **Purpose**: Static site hosting with global CDN distribution
 
 **Components**:
-- **S3 Static Hosting**: Private bucket with versioning enabled
+- **S3 Static Hosting**: Private bucket for static assets
 - **CloudFront Distribution**:
   - Global CDN with HTTP/2 and HTTP/3 support
   - Origin Access Control (OAC) for secure S3 access

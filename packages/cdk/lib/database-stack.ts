@@ -15,11 +15,6 @@ export class FdnixDatabaseStack extends Stack {
 
     // S3 bucket for pipeline artifacts (LanceDB file storage)
     this.artifactsBucket = new s3.Bucket(this, 'ArtifactsBucket', {
-      versioned: true,
-      lifecycleRules: [{
-        id: 'delete-old-versions',
-        noncurrentVersionExpiration: Duration.days(30),
-      }],
       removalPolicy: RemovalPolicy.RETAIN,
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
