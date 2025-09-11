@@ -50,6 +50,7 @@ const pipelineStack = new FdnixPipelineStack(app, stackId('PipelineStack'), {
   },
 });
 
+
 // Search API Stack - Lambda-based search API
 const searchApiStack = new FdnixSearchApiStack(app, stackId('SearchApiStack'), {
   env,

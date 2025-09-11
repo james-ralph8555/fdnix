@@ -3,15 +3,15 @@ import { Construct } from 'constructs';
 import * as ecs from 'aws-cdk-lib/aws-ecs';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as events from 'aws-cdk-lib/aws-events';
-import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
-import * as stepfunctionsTasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as path from 'path';
 import { FdnixDatabaseStack } from './database-stack';
 import { DockerBuildConstruct } from './docker-build-construct';
+import { createPipelineStateMachineDefinition } from './pipeline-state-machine-definition';
 
 export interface FdnixPipelineStackProps extends StackProps {
   databaseStack: FdnixDatabaseStack;
@@ -27,9 +27,9 @@ export class FdnixPipelineStack extends Stack {
   public readonly nixpkgsProcessorRepository: ecr.Repository;
   public readonly nixpkgsProcessorTaskDefinition: ecs.FargateTaskDefinition;
   public readonly nixpkgsProcessorDockerBuild: DockerBuildConstruct;
-  // Pipeline
-  public readonly pipelineStateMachine: stepfunctions.StateMachine;
   public readonly bedrockBatchRole: iam.Role;
+  // Step Functions
+  public readonly pipelineStateMachine: stepfunctions.StateMachine;
 
   constructor(scope: Construct, id: string, props: FdnixPipelineStackProps) {
     super(scope, id, props);
@@ -288,10 +288,10 @@ export class FdnixPipelineStack extends Stack {
     });
 
 
-    // Stage 2: Fargate Task Definition for nixpkgs-processor (2vCPU, 6GB RAM, 40GB storage)
+    // Stage 2: Fargate Task Definition for nixpkgs-processor (4vCPU, 16GB RAM, 40GB storage)
     this.nixpkgsProcessorTaskDefinition = new ecs.FargateTaskDefinition(this, 'NixpkgsProcessorTaskDefinition', {
-      cpu: 2048,      // 2 vCPU - optimized for data processing
-      memoryLimitMiB: 6144,   // 6GB RAM - sufficient for LanceDB operations
+      cpu: 4096,      // 4 vCPU - increased for memory-intensive processing
+      memoryLimitMiB: 16384,  // 16GB RAM - increased to handle large dataset processing and embeddings
       ephemeralStorageGiB: 40, // 40GB ephemeral storage for large dataset processing
       executionRole: fargateExecutionRole,
       taskRole: processorTaskRole,
@@ -330,126 +330,34 @@ export class FdnixPipelineStack extends Stack {
     });
 
     // Step Functions State Machine for two-stage pipeline orchestration
-    // Stage 1: Evaluator Task
-    const evaluatorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsEvaluatorTask', {
-      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
+    // Create a security group for Step Functions managed Fargate tasks
+    const stepFunctionsSecurityGroup = new ec2.SecurityGroup(this, 'StepFunctionsSecurityGroup', {
+      vpc,
+      description: 'Security group for Step Functions managed Fargate tasks with HTTPS egress only',
+      allowAllOutbound: false,
+    });
+
+    // Allow HTTPS (443) outbound traffic only - for AWS APIs, Bedrock, etc.
+    stepFunctionsSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(443),
+      'HTTPS outbound for AWS services'
+    );
+
+    // Allow HTTP (80) for package downloads (Nix, pip, etc.)
+    stepFunctionsSecurityGroup.addEgressRule(
+      ec2.Peer.anyIpv4(),
+      ec2.Port.tcp(80),
+      'HTTP outbound for package downloads'
+    );
+
+    // Create the state machine definition using the extracted function
+    const definition = createPipelineStateMachineDefinition(this, {
       cluster: this.cluster,
-      taskDefinition: this.nixpkgsEvaluatorTaskDefinition,
-      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
-        platformVersion: ecs.FargatePlatformVersion.LATEST,
-      }),
-      assignPublicIp: true, // Required for public subnet access to AWS services
-      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
-      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
-      containerOverrides: [{
-        containerDefinition: evaluatorContainer,
-        environment: [
-          {
-            name: 'JSONL_OUTPUT_KEY',
-            value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
-          }
-        ]
-      }],
-      resultPath: '$.EvaluatorResult',
+      evaluatorTaskDefinition: this.nixpkgsEvaluatorTaskDefinition,
+      processorTaskDefinition: this.nixpkgsProcessorTaskDefinition,
+      fargateSecurityGroup: stepFunctionsSecurityGroup,
     });
-
-    // Pass state to set default values for missing keys when using existing outputs
-    // This ensures we have S3 keys for all outputs even if not provided in input
-    const setDefaultKeys = new stepfunctions.Pass(this, 'SetDefaultKeys', {
-      parameters: {
-        'jsonlInputKey.$': '$.jsonlInputKey',
-        'lancedbDataKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
-        'lancedbMinifiedKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
-        'dependencyS3Key.$': stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
-      }
-    });
-
-    // Stage 2a: Processor Task (when using existing JSONL outputs, skipping evaluation)
-    const processorTask = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsProcessorTask', {
-      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
-      cluster: this.cluster,
-      taskDefinition: this.nixpkgsProcessorTaskDefinition,
-      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
-        platformVersion: ecs.FargatePlatformVersion.LATEST,
-      }),
-      assignPublicIp: true, // Required for public subnet access to AWS services
-      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
-      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
-      containerOverrides: [{
-        containerDefinition: processorContainer,
-        environment: [
-          {
-            name: 'JSONL_INPUT_KEY',
-            value: stepfunctions.JsonPath.stringAt('$.jsonlInputKey')
-          },
-          {
-            name: 'LANCEDB_DATA_KEY',
-            value: stepfunctions.JsonPath.stringAt('$.lancedbDataKey')
-          },
-          {
-            name: 'LANCEDB_MINIFIED_KEY',
-            value: stepfunctions.JsonPath.stringAt('$.lancedbMinifiedKey')
-          },
-          {
-            name: 'DEPENDENCY_S3_KEY',
-            value: stepfunctions.JsonPath.stringAt('$.dependencyS3Key')
-          }
-        ]
-      }],
-      resultPath: '$.ProcessorResult',
-    });
-
-    // Stage 2b: Processor Task (when following evaluation stage with fresh outputs)
-    const processorTaskWithEvaluatorOutput = new stepfunctionsTasks.EcsRunTask(this, 'NixpkgsProcessorTaskWithEvaluatorOutput', {
-      integrationPattern: stepfunctions.IntegrationPattern.RUN_JOB,
-      cluster: this.cluster,
-      taskDefinition: this.nixpkgsProcessorTaskDefinition,
-      launchTarget: new stepfunctionsTasks.EcsFargateLaunchTarget({
-        platformVersion: ecs.FargatePlatformVersion.LATEST,
-      }),
-      assignPublicIp: true, // Required for public subnet access to AWS services
-      securityGroups: [fargateSecurityGroup], // Use our HTTPS-only security group
-      subnets: { subnetType: ec2.SubnetType.PUBLIC }, // Explicitly use public subnets
-      containerOverrides: [{
-        containerDefinition: processorContainer,
-        environment: [
-          {
-            name: 'JSONL_INPUT_KEY',
-            value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
-          },
-          {
-            name: 'LANCEDB_DATA_KEY',
-            value: stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
-          },
-          {
-            name: 'LANCEDB_MINIFIED_KEY',
-            value: stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
-          },
-          {
-            name: 'DEPENDENCY_S3_KEY',
-            value: stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
-          }
-        ]
-      }],
-      resultPath: '$.ProcessorResult',
-    });
-
-    // Check if JSONL outputs are provided in the input to skip evaluation
-    // If jsonlInputKey is present, we skip evaluation and go straight to processing
-    // Otherwise, we run the full pipeline: evaluation then processing
-    const checkForExistingOutputs = new stepfunctions.Choice(this, 'CheckForExistingOutputs')
-      .when(
-        stepfunctions.Condition.isPresent('$.jsonlInputKey'),
-        setDefaultKeys.next(processorTask)
-      )
-      .otherwise(
-        evaluatorTask.next(processorTaskWithEvaluatorOutput)
-      );
-
-    // Define the conditional pipeline:
-    // Path 1: JSONL provided -> SetDefaultKeys -> ProcessorTask (skip evaluation)
-    // Path 2: No JSONL -> EvaluatorTask -> ProcessorTaskWithEvaluatorOutput (full pipeline)
-    const definition = checkForExistingOutputs;
 
     this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
       definition,
@@ -489,10 +397,12 @@ export class FdnixPipelineStack extends Stack {
         'iam:PassRole',
       ],
       resources: [
-        fargateExecutionRole.roleArn,
-        evaluatorTaskRole.roleArn,
-        processorTaskRole.roleArn,
+        this.nixpkgsEvaluatorTaskDefinition.executionRole!.roleArn,
+        this.nixpkgsEvaluatorTaskDefinition.taskRole!.roleArn,
+        this.nixpkgsProcessorTaskDefinition.executionRole!.roleArn,
+        this.nixpkgsProcessorTaskDefinition.taskRole!.roleArn,
       ],
     }));
+
   }
 }

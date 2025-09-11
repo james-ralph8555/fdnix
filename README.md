@@ -173,10 +173,22 @@ npm run synth
 
 Secrets: No external API keys required for embeddings. Store any sensitive values in AWS SSM Parameter Store or Secrets Manager. IAM policies across stacks follow least-privilege.
 
+### Pipeline Architecture
+
+The data processing pipeline is orchestrated using AWS Step Functions with conditional execution paths:
+
+- **Full Pipeline**: When no existing JSONL data is provided, runs nixpkgs evaluation followed by processing
+- **Processing Only**: When JSONL input is provided, skips evaluation and processes existing data directly
+- **Dynamic S3 Keys**: All output keys are generated using execution timestamps for versioning
+- **Fargate Tasks**: Both evaluation and processing run as ECS Fargate tasks with HTTPS-only egress
+
+The Step Functions state machine handles parameter passing between stages and generates timestamped S3 keys for all pipeline artifacts.
+
 ### Backend Details
 - For backend and infrastructure details, see:
   - `packages/search-lambda/README.md`
   - `packages/cdk/README.md`
+  - `packages/cdk/STEP_FUNCTION_USAGE.md`
 
 ### Project Structure
 - Monorepo with workspaces under `packages/`:
