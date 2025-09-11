@@ -22,13 +22,13 @@ class S3JsonlWriter:
         self.s3_client = boto3.client('s3', region_name=region)
         
     def write_jsonl_file(self, jsonl_file_path: str) -> str:
-        """Upload JSONL file directly to S3.
+        """Upload JSONL file directly to S3 with brotli compression.
         
         Args:
             jsonl_file_path: Path to the JSONL file to upload
             
         Returns:
-            S3 key where the data was written
+            S3 key where the data was written (with .br extension)
         """
         jsonl_path = Path(jsonl_file_path)
         if not jsonl_path.exists():
@@ -78,10 +78,13 @@ class S3JsonlWriter:
                        len(compressed_data) / 1024 / 1024,
                        compression_ratio * 100)
             
+            # Add .br extension for compressed file
+            compressed_key = self.key + '.br'
+            
             # Upload to S3
             self.s3_client.put_object(
                 Bucket=self.bucket,
-                Key=self.key,
+                Key=compressed_key,
                 Body=compressed_data,
                 ContentType='application/jsonl',
                 ContentEncoding='br',
@@ -95,8 +98,8 @@ class S3JsonlWriter:
                 }
             )
             
-            logger.info("Successfully uploaded JSONL file to S3: s3://%s/%s", self.bucket, self.key)
-            return self.key
+            logger.info("Successfully uploaded JSONL file to S3: s3://%s/%s", self.bucket, compressed_key)
+            return compressed_key
             
         except (ClientError, NoCredentialsError) as e:
             logger.error("Failed to upload JSONL to S3: %s", str(e))

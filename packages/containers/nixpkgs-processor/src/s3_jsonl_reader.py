@@ -5,8 +5,10 @@ from typing import Any, Dict, List, Tuple
 try:
     import boto3
     from botocore.exceptions import ClientError, NoCredentialsError
+    import brotli
 except ImportError:
     boto3 = None
+    brotli = None
 
 logger = logging.getLogger("fdnix.s3-jsonl-reader")
 
@@ -17,6 +19,8 @@ class S3JsonlReader:
     def __init__(self, bucket: str, key: str, region: str = "us-east-1"):
         if not boto3:
             raise RuntimeError("boto3 is required for S3 operations")
+        if not brotli:
+            raise RuntimeError("brotli is required for compressed file support")
         
         self.bucket = bucket
         self.key = key
@@ -24,19 +28,26 @@ class S3JsonlReader:
         self.s3_client = boto3.client('s3', region_name=region)
         
     def read_raw_jsonl(self) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-        """Read raw package data from S3 JSONL file.
+        """Read raw package data from brotli-compressed S3 JSONL file.
         
         Returns:
             Tuple of (raw_packages, metadata)
         """
         try:
-            logger.info("Downloading JSONL from s3://%s/%s", self.bucket, self.key)
+            # Ensure the file has .br extension for brotli compression
+            if not self.key.endswith('.br'):
+                raise RuntimeError(f"Only brotli-compressed files (.br) are supported. Got: {self.key}")
             
-            # Download the file
+            logger.info("Downloading brotli-compressed JSONL from s3://%s/%s", self.bucket, self.key)
+            
+            # Download the compressed file
             response = self.s3_client.get_object(Bucket=self.bucket, Key=self.key)
-            content = response['Body'].read().decode('utf-8')
+            compressed_data = response['Body'].read()
             
-            logger.info("Downloaded %.2f MB of JSONL data", len(content) / 1024 / 1024)
+            # Decompress with brotli
+            content = brotli.decompress(compressed_data).decode('utf-8')
+            
+            logger.info("Downloaded and decompressed %.2f MB of JSONL data", len(content) / 1024 / 1024)
             
             # Parse JSONL content
             lines = content.strip().split('\n')

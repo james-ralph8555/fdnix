@@ -8,9 +8,11 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as path from 'path';
 import * as fs from 'fs';
 import { FdnixSearchApiStack } from './search-api-stack';
+import { FdnixDatabaseStack } from './database-stack';
 
 export interface FdnixFrontendStackProps extends StackProps {
   searchApiStack: FdnixSearchApiStack;
+  databaseStack: FdnixDatabaseStack;
 }
 
 export class FdnixFrontendStack extends Stack {
@@ -21,7 +23,7 @@ export class FdnixFrontendStack extends Stack {
   constructor(scope: Construct, id: string, props: FdnixFrontendStackProps) {
     super(scope, id, props);
 
-    const { searchApiStack } = props;
+    const { searchApiStack, databaseStack } = props;
 
     // Validate that frontend build exists
     const frontendDistPath = path.join(__dirname, '../../frontend/dist');
@@ -69,11 +71,23 @@ export class FdnixFrontendStack extends Stack {
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
     };
 
+    // S3 behavior for dependency graph data
+    const s3Behavior: cloudfront.BehaviorOptions = {
+      origin: origins.S3BucketOrigin.withOriginAccessControl(databaseStack.artifactsBucket, {
+        originAccessControl: this.oac,
+      }),
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+      compress: true,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+    };
+
     this.distribution = new cloudfront.Distribution(this, 'CloudFrontDistribution', {
       comment: 'CloudFront distribution for fdnix frontend',
       defaultBehavior,
       additionalBehaviors: {
         '/api/*': apiBehavior,
+        '/graph/*': s3Behavior,
       },
       defaultRootObject: 'index.html',
       errorResponses: [
@@ -98,6 +112,12 @@ export class FdnixFrontendStack extends Stack {
 
     // No explicit bucket policy needed: S3BucketOrigin.withOriginAccessControl
     // attaches least-privilege policies for the distribution automatically.
+    
+    // Grant CloudFront OAC access to database bucket for dependency graph files
+    databaseStack.artifactsBucket.grantRead(
+      new iam.ServicePrincipal('cloudfront.amazonaws.com'),
+      'graph/*'
+    );
 
     // DNS is managed by Cloudflare
     // After deployment, configure Cloudflare DNS to point to the CloudFront distribution:

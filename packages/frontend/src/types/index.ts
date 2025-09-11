@@ -71,3 +71,78 @@ export interface AppSettings {
   apiBaseUrl: string;
   resultsPerPage: number;
 }
+
+// Dependency graph types
+export interface NodeData {
+  id: string;
+  name: string;
+  version?: string;
+  type: 'main' | 'dependency' | 'dependent';
+  category?: string;
+  description?: string;
+  expanded?: boolean;
+  x?: number;
+  y?: number;
+  fx?: number | null;
+  fy?: number | null;
+}
+
+export interface LinkData {
+  source: string | NodeData;
+  target: string | NodeData;
+  type: 'dependency' | 'dependent';
+}
+
+export interface GraphData {
+  nodes: NodeData[];
+  links: LinkData[];
+}
+
+export interface DependencyGraphProps {
+  packageName: string;
+  packageVersion?: string;
+  onClose: () => void;
+}
+
+export interface PackageNodeData {
+  attributePath: string;
+  available: boolean;
+  broken: boolean;
+  category: string;
+  dependencies: {
+    all: string[];
+    count: number;
+    direct: string[];
+    totalCount: number;
+  };
+  dependents: {
+    all: string[];
+    count: number;
+    direct: string[];
+    totalCount: number;
+  };
+  description: string;
+  homepage?: string;
+  license: {
+    licenses: Array<{
+      deprecated: boolean;
+      free: boolean;
+      fullName: string;
+      redistributable: boolean;
+      shortName: string;
+      spdxId: string;
+      url: string;
+    }>;
+    type: string;
+  };
+  maintainers: Array<{
+    email: string;
+    github: string;
+    githubId: number;
+    name: string;
+  }>;
+  nodeId: string;
+  packageName: string;
+  platforms: string[];
+  version: string;
+}

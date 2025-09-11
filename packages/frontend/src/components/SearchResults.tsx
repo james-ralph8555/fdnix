@@ -1,7 +1,10 @@
-import { For, Show, createSignal } from 'solid-js';
+import { For, Show, createSignal, lazy } from 'solid-js';
 import type { Package } from '../types';
 import { formatList, truncateText } from '../utils/format';
 import { enhancePackage, getLicenseList, getInstallCommand, getShellCommand, getDisplayName } from '../utils/package';
+
+// Lazy load the DependencyGraph component
+const DependencyGraph = lazy(() => import('./DependencyGraph').then(m => ({ default: m.DependencyGraph })));
 
 interface SearchResultsProps {
   results: Package[];
@@ -13,6 +16,7 @@ interface SearchResultsProps {
 
 export function SearchResults(props: SearchResultsProps) {
   const { results, query, loading = false, error = null, onRetry } = props;
+  const [showDependencyGraph, setShowDependencyGraph] = createSignal<string | null>(null);
 
   return (
     <div class="w-full">
@@ -62,19 +66,28 @@ export function SearchResults(props: SearchResultsProps) {
 
       <div class="grid gap-4 md:gap-6">
         <For each={results}>
-          {(pkg) => <PackageCard package={pkg} />}
+          {(pkg) => <PackageCard package={pkg} onShowGraph={setShowDependencyGraph} />}
         </For>
       </div>
+
+      {/* Dependency Graph Modal */}
+      <Show when={showDependencyGraph()}>
+        <DependencyGraph
+          packageName={showDependencyGraph()!}
+          onClose={() => setShowDependencyGraph(null)}
+        />
+      </Show>
     </div>
   );
 }
 
 interface PackageCardProps {
   package: Package;
+  onShowGraph: (packageName: string) => void;
 }
 
 function PackageCard(props: PackageCardProps) {
-  const { package: rawPkg } = props;
+  const { package: rawPkg, onShowGraph } = props;
   const pkg = enhancePackage(rawPkg); // Enhance with parsed license info
   const [showCommands, setShowCommands] = createSignal(false);
   const [copiedCommand, setCopiedCommand] = createSignal<string | null>(null);
@@ -132,12 +145,24 @@ function PackageCard(props: PackageCardProps) {
           </p>
         </div>
         
-        <button
-          onClick={() => setShowCommands(!showCommands())}
-          class="ml-4 btn-secondary text-sm"
-        >
-          Install
-        </button>
+        <div class="ml-4 flex gap-2">
+          <button
+            onClick={() => onShowGraph(pkg.packageName)}
+            class="btn-secondary text-sm"
+            title="View dependency graph"
+          >
+            <svg class="h-4 w-4 mr-1 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14-5l2 2-2 2m-14 3l2 2-2 2" />
+            </svg>
+            Graph
+          </button>
+          <button
+            onClick={() => setShowCommands(!showCommands())}
+            class="btn-secondary text-sm"
+          >
+            Install
+          </button>
+        </div>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">

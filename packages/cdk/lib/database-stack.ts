@@ -13,12 +13,21 @@ export class FdnixDatabaseStack extends Stack {
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
-    // S3 bucket for pipeline artifacts (LanceDB file storage)
+    // S3 bucket for pipeline artifacts (LanceDB file storage and dependency graph JSON files)
     this.artifactsBucket = new s3.Bucket(this, 'ArtifactsBucket', {
       removalPolicy: RemovalPolicy.RETAIN,
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
+      cors: [
+        {
+          allowedMethods: [s3.HttpMethods.GET],
+          allowedOrigins: ['*'], // Will be restricted in production via CloudFront
+          allowedHeaders: ['*'],
+          exposedHeaders: ['Content-Length', 'Content-Encoding', 'Content-Type'],
+          maxAge: 3600,
+        },
+      ],
     });
 
     // Lambda Layer for minified LanceDB file

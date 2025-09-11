@@ -79,6 +79,7 @@ const certificateStack = new FdnixCertificateStack(app, stackId('CertificateStac
 const frontendStack = new FdnixFrontendStack(app, stackId('FrontendStack'), {
   env,
   searchApiStack,
+  databaseStack,
   description: 'Frontend hosting for fdnix search interface',
   tags: {
     Project: 'fdnix',

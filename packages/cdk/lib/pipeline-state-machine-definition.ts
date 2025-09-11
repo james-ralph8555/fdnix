@@ -37,21 +37,34 @@ export function createPipelineStateMachineDefinition(
       environment: [
         {
           name: 'JSONL_OUTPUT_KEY',
-          value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl.br', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
         }
       ]
     }],
     resultPath: '$.EvaluatorResult',
   });
 
-  // Pass state to set default values for missing keys when using existing outputs
+  // Extract parameters from Name/Value array format and set default values
   // This ensures we have S3 keys for all outputs even if not provided in input
   const setDefaultKeys = new stepfunctions.Pass(scope, 'SetDefaultKeys', {
     parameters: {
+      'jsonlInputKey.$': '$.[?(@.Name==\'JSONL_INPUT_KEY\')].Value | [0]',
+      'lancedbDataKey.$': '$.[?(@.Name==\'LANCEDB_DATA_KEY\')].Value | [0] // null',
+      'lancedbMinifiedKey.$': '$.[?(@.Name==\'LANCEDB_MINIFIED_KEY\')].Value | [0] // null', 
+      'dependencyS3Key.$': '$.[?(@.Name==\'DEPENDENCY_S3_KEY\')].Value | [0] // null',
+      'defaultLancedbDataKey': stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
+      'defaultLancedbMinifiedKey': stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
+      'defaultDependencyS3Key': stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+    }
+  });
+
+  // Apply defaults for null values
+  const applyDefaults = new stepfunctions.Pass(scope, 'ApplyDefaults', {
+    parameters: {
       'jsonlInputKey.$': '$.jsonlInputKey',
-      'lancedbDataKey': stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
-      'lancedbMinifiedKey': stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
-      'dependencyS3Key': stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+      'lancedbDataKey.$': '$.lancedbDataKey // $.defaultLancedbDataKey',
+      'lancedbMinifiedKey.$': '$.lancedbMinifiedKey // $.defaultLancedbMinifiedKey',
+      'dependencyS3Key.$': '$.dependencyS3Key // $.defaultDependencyS3Key'
     }
   });
 
@@ -106,7 +119,7 @@ export function createPipelineStateMachineDefinition(
       environment: [
         {
           name: 'JSONL_INPUT_KEY',
-          value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl.br', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
         },
         {
           name: 'LANCEDB_DATA_KEY',
@@ -126,19 +139,19 @@ export function createPipelineStateMachineDefinition(
   });
 
   // Check if JSONL outputs are provided in the input to skip evaluation
-  // If jsonlInputKey is present, we skip evaluation and go straight to processing
+  // If JSONL_INPUT_KEY parameter is present, we skip evaluation and go straight to processing
   // Otherwise, we run the full pipeline: evaluation then processing
   const checkForExistingOutputs = new stepfunctions.Choice(scope, 'CheckForExistingOutputs')
     .when(
-      stepfunctions.Condition.isPresent('$.jsonlInputKey'),
-      setDefaultKeys.next(processorTask)
+      stepfunctions.Condition.isPresent('$.[?(@.Name==\'JSONL_INPUT_KEY\')]'),
+      setDefaultKeys.next(applyDefaults).next(processorTask)
     )
     .otherwise(
       evaluatorTask.next(processorTaskWithEvaluatorOutput)
     );
 
   // Define the conditional pipeline:
-  // Path 1: JSONL provided -> SetDefaultKeys -> ProcessorTask (skip evaluation)
+  // Path 1: JSONL provided -> SetDefaultKeys -> ApplyDefaults -> ProcessorTask (skip evaluation)
   // Path 2: No JSONL -> EvaluatorTask -> ProcessorTaskWithEvaluatorOutput (full pipeline)
   return checkForExistingOutputs;
 }
