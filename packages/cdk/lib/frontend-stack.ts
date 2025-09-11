@@ -1,4 +1,4 @@
-import { Stack, StackProps, RemovalPolicy, Duration, Size, CfnOutput } from 'aws-cdk-lib';
+import { Stack, StackProps, RemovalPolicy, Duration, Size, CfnOutput, Fn } from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
@@ -8,11 +8,9 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as path from 'path';
 import * as fs from 'fs';
 import { FdnixSearchApiStack } from './search-api-stack';
-import { FdnixDatabaseStack } from './database-stack';
 
 export interface FdnixFrontendStackProps extends StackProps {
   searchApiStack: FdnixSearchApiStack;
-  databaseStack: FdnixDatabaseStack;
 }
 
 export class FdnixFrontendStack extends Stack {
@@ -23,7 +21,11 @@ export class FdnixFrontendStack extends Stack {
   constructor(scope: Construct, id: string, props: FdnixFrontendStackProps) {
     super(scope, id, props);
 
-    const { searchApiStack, databaseStack } = props;
+    const { searchApiStack } = props;
+
+    // Import processed files bucket from DatabaseStack outputs
+    const processedFilesBucketName = Fn.importValue('FdnixProcessedFilesBucketName');
+    const processedFilesBucket = s3.Bucket.fromBucketName(this, 'ProcessedFilesBucket', processedFilesBucketName);
 
     // Validate that frontend build exists
     const frontendDistPath = path.join(__dirname, '../../frontend/dist');
@@ -41,6 +43,7 @@ export class FdnixFrontendStack extends Stack {
       enforceSSL: true,
       removalPolicy: RemovalPolicy.RETAIN,
       autoDeleteObjects: false,
+      versioned: false,
     });
 
     // Origin Access Control for CloudFront
@@ -71,9 +74,9 @@ export class FdnixFrontendStack extends Stack {
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
     };
 
-    // S3 behavior for dependency graph data
+    // S3 behavior for dependency graph data (from processed files bucket)
     const s3Behavior: cloudfront.BehaviorOptions = {
-      origin: origins.S3BucketOrigin.withOriginAccessControl(databaseStack.artifactsBucket, {
+      origin: origins.S3BucketOrigin.withOriginAccessControl(processedFilesBucket, {
         originAccessControl: this.oac,
       }),
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -113,8 +116,8 @@ export class FdnixFrontendStack extends Stack {
     // No explicit bucket policy needed: S3BucketOrigin.withOriginAccessControl
     // attaches least-privilege policies for the distribution automatically.
     
-    // Grant CloudFront OAC access to database bucket for dependency graph files
-    databaseStack.artifactsBucket.grantRead(
+    // Grant CloudFront OAC access to processed files bucket for dependency graph files
+    processedFilesBucket.grantRead(
       new iam.ServicePrincipal('cloudfront.amazonaws.com'),
       'graph/*'
     );

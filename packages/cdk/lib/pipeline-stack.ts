@@ -149,6 +149,9 @@ export class FdnixPipelineStack extends Stack {
     // Grant S3 access - evaluator needs read/write for JSONL, processor needs full access
     databaseStack.artifactsBucket.grantReadWrite(evaluatorTaskRole);
     databaseStack.artifactsBucket.grantReadWrite(processorTaskRole);
+    
+    // Grant processor write access to processed files bucket for dependency graphs, stats, etc.
+    databaseStack.processedFilesBucket.grantReadWrite(processorTaskRole);
 
 
     // Create IAM role for Bedrock batch inference
@@ -316,6 +319,7 @@ export class FdnixPipelineStack extends Stack {
         PROCESSING_BATCH_SIZE: '100', // Smaller batches for better rate limiting
         // S3 configuration
         ARTIFACTS_BUCKET: databaseStack.artifactsBucket.bucketName,
+        PROCESSED_FILES_BUCKET: databaseStack.processedFilesBucket.bucketName,
         // Input from Stage 1 - will be set dynamically by Step Functions
         // JSONL_INPUT_KEY: 'evaluations/nixpkgs-raw.jsonl', // Set by Step Functions
         // Dual database configuration
@@ -360,7 +364,7 @@ export class FdnixPipelineStack extends Stack {
     });
 
     this.pipelineStateMachine = new stepfunctions.StateMachine(this, 'PipelineStateMachine', {
-      definition,
+      definitionBody: stepfunctions.DefinitionBody.fromChainable(definition),
       timeout: Duration.hours(6),
     });
 

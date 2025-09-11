@@ -30,7 +30,7 @@ def _truthy(val: str | None) -> bool:
 def validate_env() -> None:
     """Validate environment variables for Stage 2 (processor)."""
     # Required for reading Stage 1 output
-    required_basic = ["ARTIFACTS_BUCKET", "AWS_REGION", "JSONL_INPUT_KEY"]
+    required_basic = ["ARTIFACTS_BUCKET", "PROCESSED_FILES_BUCKET", "AWS_REGION", "JSONL_INPUT_KEY"]
     missing_basic = [k for k in required_basic if not os.environ.get(k)]
     
     if missing_basic:
@@ -76,12 +76,14 @@ async def main() -> int:
     try:
         validate_env()
         
-        bucket = os.environ["ARTIFACTS_BUCKET"]
+        artifacts_bucket = os.environ["ARTIFACTS_BUCKET"]
+        processed_files_bucket = os.environ["PROCESSED_FILES_BUCKET"]
         region = os.environ["AWS_REGION"]
         jsonl_input_key = os.environ["JSONL_INPUT_KEY"]
         
         logger.info("Configuration:")
-        logger.info("  S3 Bucket: %s", bucket)
+        logger.info("  Artifacts S3 Bucket: %s", artifacts_bucket)
+        logger.info("  Processed Files S3 Bucket: %s", processed_files_bucket)
         logger.info("  S3 Region: %s", region)
         logger.info("  JSONL Input Key: %s", jsonl_input_key)
         
@@ -94,9 +96,9 @@ async def main() -> int:
         main_db_path = os.environ.get("OUTPUT_PATH", "/out/fdnix-data.lancedb")
         minified_db_path = os.environ.get("OUTPUT_MINIFIED_PATH", "/out/fdnix.lancedb")
         
-        # Phase 1: Read raw JSONL from Stage 1
+        # Phase 1: Read raw JSONL from Stage 1 (from artifacts bucket)
         logger.info("=== JSONL READING PHASE ===")
-        reader = S3JsonlReader(bucket=bucket, key=jsonl_input_key, region=region)
+        reader = S3JsonlReader(bucket=artifacts_bucket, key=jsonl_input_key, region=region)
         raw_packages, metadata = reader.read_raw_jsonl()
         
         if not raw_packages:
@@ -125,10 +127,10 @@ async def main() -> int:
                 # Use standard processing (original behavior)
                 packages = processor.process_raw_packages(raw_packages)
             
-            # Create main database with metadata only (upload to data key)
+            # Create main database with metadata only (upload to artifacts bucket)
             main_writer = LanceDBWriter(
                 output_path=main_db_path,
-                s3_bucket=bucket,
+                s3_bucket=artifacts_bucket,
                 s3_key=os.environ.get("LANCEDB_DATA_KEY"),
                 region=region,
             )
@@ -136,11 +138,11 @@ async def main() -> int:
             logger.info("Writing metadata to main LanceDB artifact...")
             main_writer.write_artifact(packages)
             
-            # Write comprehensive stats data to S3 (separate JSON file)
+            # Write comprehensive stats data to S3 (to processed files bucket)
             if graph_data and os.environ.get("STATS_S3_KEY"):
-                logger.info("Writing comprehensive stats data to S3...")
+                logger.info("Writing comprehensive stats data to processed files bucket...")
                 stats_s3_writer = S3StatsWriter(
-                    s3_bucket=bucket,
+                    s3_bucket=processed_files_bucket,
                     s3_key=os.environ.get("STATS_S3_KEY"), 
                     region=region
                 )
@@ -191,7 +193,7 @@ async def main() -> int:
             logger.info("=== MINIFIED DATABASE GENERATION PHASE ===")
             minified_writer = LanceDBWriter(
                 output_path=minified_db_path,
-                s3_bucket=bucket,
+                s3_bucket=artifacts_bucket,
                 s3_key=os.environ.get("LANCEDB_MINIFIED_KEY"),
                 region=region,
             )
@@ -206,7 +208,7 @@ async def main() -> int:
             
             node_s3_prefix = os.environ.get("NODE_S3_PREFIX", "nodes/")
             node_writer = NodeS3Writer(
-                s3_bucket=bucket,
+                s3_bucket=processed_files_bucket,
                 s3_prefix=node_s3_prefix,
                 region=region,
                 clear_existing=_truthy(os.environ.get("CLEAR_EXISTING_NODES", "true")),
@@ -241,13 +243,13 @@ async def main() -> int:
             logger.info("=== LAYER PUBLISH PHASE ===")
             layer_arn = os.environ.get("LAYER_ARN", "").strip()
             
-            # Use minified key for layer publishing
+            # Use minified key for layer publishing (from artifacts bucket)
             key = os.environ.get("LANCEDB_MINIFIED_KEY", "")
             if not key:
                 raise RuntimeError("LANCEDB_MINIFIED_KEY required for layer publishing")
 
             publisher = LayerPublisher(region=region)
-            publisher.publish_from_s3(bucket=bucket, key=key, layer_arn=layer_arn)
+            publisher.publish_from_s3(bucket=artifacts_bucket, key=key, layer_arn=layer_arn)
             logger.info("Layer published using minified database from key: %s", key)
 
         logger.info("=== STAGE 2 COMPLETED SUCCESSFULLY ===")

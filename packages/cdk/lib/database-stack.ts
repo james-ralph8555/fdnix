@@ -7,18 +7,30 @@ import * as path from 'path';
 
 export class FdnixDatabaseStack extends Stack {
   public readonly artifactsBucket: s3.Bucket;
+  public readonly processedFilesBucket: s3.Bucket;
   public readonly databaseLayer: lambda.LayerVersion;
   public readonly databaseAccessRole: iam.Role;
 
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
 
-    // S3 bucket for pipeline artifacts (LanceDB file storage and dependency graph JSON files)
+    // S3 bucket for pipeline artifacts (LanceDB file storage, Lambda layers, raw JSONL files)
+    // This bucket contains internal pipeline files not directly accessed by frontend
     this.artifactsBucket = new s3.Bucket(this, 'ArtifactsBucket', {
       removalPolicy: RemovalPolicy.RETAIN,
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true,
+      versioned: false,
+    });
+
+    // S3 bucket for processed files accessible by frontend (dependency graph JSON files, stats, etc.)
+    this.processedFilesBucket = new s3.Bucket(this, 'ProcessedFilesBucket', {
+      removalPolicy: RemovalPolicy.RETAIN,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true,
+      versioned: false,
       cors: [
         {
           allowedMethods: [s3.HttpMethods.GET],
@@ -52,8 +64,9 @@ export class FdnixDatabaseStack extends Stack {
       ],
     });
 
-    // Grant S3 permissions for artifacts
+    // Grant S3 permissions for artifacts and processed files
     this.artifactsBucket.grantReadWrite(this.databaseAccessRole);
+    this.processedFilesBucket.grantReadWrite(this.databaseAccessRole);
 
     // Grant Lambda layer permissions for publishing new versions
     // Use safe ARN splitting/formatting to derive unversioned layer ARNs
@@ -94,8 +107,20 @@ export class FdnixDatabaseStack extends Stack {
     // Outputs
     new CfnOutput(this, 'ArtifactsBucketName', {
       value: this.artifactsBucket.bucketName,
-      description: 'S3 bucket for pipeline artifacts (stores both main and minified databases)',
+      description: 'S3 bucket for internal pipeline artifacts (LanceDB, layers, raw JSONL)',
       exportName: 'FdnixArtifactsBucketName',
+    });
+
+    new CfnOutput(this, 'ProcessedFilesBucketName', {
+      value: this.processedFilesBucket.bucketName,
+      description: 'S3 bucket for processed files accessible by frontend (dependency graphs, stats)',
+      exportName: 'FdnixProcessedFilesBucketName',
+    });
+
+    new CfnOutput(this, 'ProcessedFilesBucketArn', {
+      value: this.processedFilesBucket.bucketArn,
+      description: 'ARN of S3 bucket for processed files',
+      exportName: 'FdnixProcessedFilesBucketArn',
     });
 
     new CfnOutput(this, 'DatabaseLayerArn', {
