@@ -1,58 +1,39 @@
-# fdnix — Hybrid Search for nixpkgs
+# fdnix — Fast Search for nixpkgs
 
-Fast, relevant, filterable search for the Nix packages collection. fdnix blends traditional keyword matching with modern semantic (vector) search to help you find the right package quickly.
+Fast, relevant, filterable search for the Nix packages collection. fdnix helps you find the right package quickly with purpose‑built search and a clean UI.
 
 ## Features
 
-- Hybrid search: Combines semantic similarity with keyword relevance for better results.
-- Lightning fast: Serverless backend and a static frontend deliver low‑latency responses.
-- Smart ranking: Merges results from vector and keyword search (e.g., reciprocal rank fusion).
+- Text search: Relevance‑tuned keyword search across package metadata.
+- Lightning fast: Static frontend + serverless API for low latency.
+- Smart ranking: Prioritizes strong matches and well‑described packages.
 - Fresh data: Automated daily indexing keeps package info up to date.
-- Rich results: Shows name, version, description, license, and homepage when available.
-- Built for exploration: Encourages discovery beyond exact names via semantic matching.
+- Rich results: Name, version, description, license, and homepage when available.
 - Privacy‑friendly: Static frontend; no tracking beyond essential API access.
 
 ## Why fdnix?
 
-- Broader recall than plain keyword search — find related packages even if you don’t know the exact name.
-- Better precision through fusion of keyword and semantic signals.
-- Simple, responsive UI designed to get you to the right package quickly.
+- Find packages by name, task, or capability (e.g., "http server").
+- Narrow quickly with filters like license and category.
+- Copy ready‑to‑use commands directly from results.
 
 ## Quick Start
 
-- Open the fdnix web app and start typing a package name, concept, or task (e.g., “http server”, “postgres”, “image processing”).
-- Use the filters (license, category — as they are introduced) to narrow results.
-- Click a result to view metadata and jump to the package’s homepage or documentation.
-
- 
-
-## Implementation Summary
-
-- Minified LanceDB: Lambda ships a minified LanceDB dataset containing only essential columns for search (name, version, attr path, description, homepage, simplified license/maintainers, flags). The full dataset is still produced for analytics/debugging and stored in S3.
-- Updated Indexing Workflow: The container builds the full dataset first (e.g., `fdnix-data.lancedb`), then derives a minified dataset (`fdnix.lancedb`) from it, builds FTS/ANN indexes, and publishes the minified artifact to the Lambda layer.
-- Env Configuration: `LANCEDB_DATA_KEY` stores the full dataset; `LANCEDB_MINIFIED_KEY` stores the minified dataset used by the layer.
-- Infra Alignment: CDK descriptions and the layer publisher reference the minified dataset; the artifacts bucket stores both datasets using different keys.
-
-Benefits: smaller Lambda layer, faster cold starts, improved query latency, lower storage/transfer costs, and preserved inspectability via the full database in S3.
-
-Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed. Use only:
-- `LANCEDB_DATA_KEY`: S3 key/prefix for the full dataset upload
-- `LANCEDB_MINIFIED_KEY`: S3 key/prefix for the minified dataset and layer publishing
-- `ARTIFACTS_BUCKET` and `AWS_REGION` are required when uploading/publishing
+- Open the fdnix web app and start typing a package name or task (e.g., "http server", "postgres").
+- Use filters (license, category as available) to narrow results.
+- Click a result to view metadata and jump to the homepage or docs.
 
 ## Search Tips
 
-- Quotes for specifics: Use quotes to prefer tight keyword matches (e.g., `"nix fmt"`).
-- Broaden with concepts: Try problem‑oriented phrases like `"markdown to pdf"` or `"http client"`.
-- Mix modes naturally: The engine fuses semantic and keyword scores for you — start broad, then filter.
+- Quotes for specifics: Use quotes to prefer tight matches (e.g., "nix fmt").
+- Start broad, then filter: Try task‑oriented phrases like "markdown to pdf".
+- Exact names: Include the exact package name if you know it.
 
 ## How It Works (High‑Level)
 
-- Frontend provides a fast, static UI.
-- A serverless API (Rust Lambda) blends semantic understanding and keyword signals to rank results over a compact, read‑only LanceDB dataset bundled in a Lambda layer; the full dataset is retained in S3 for diagnostics and analytics.
-- Rust binary + LanceDB crates: No external database libraries in the runtime; LanceDB handles FTS (BM25) and vector ANN.
-- Embeddings: both the pipeline and runtime use AWS Bedrock (Amazon Titan Embeddings) — batch for indexing, real-time for user queries.
-- A daily pipeline refreshes the dataset and rolls out updates with minimal downtime.
+- Frontend: fast, static UI.
+- Serverless API: ranks text‑search results over a compact, read‑only index packaged with the function.
+- Daily refresh: the indexing pipeline updates data with minimal downtime.
 
 ## Jamstack + CloudFront/API Gateway
 
@@ -68,11 +49,10 @@ Legacy Support Removal: Backward compatibility for `DUCKDB_KEY` has been removed
 
 ## v0.0.1 Highlights
 
-- Hybrid search path in place: LanceDB FTS (BM25) + optional semantic vectors (ANN) via Bedrock when `ENABLE_EMBEDDINGS=1`.
-- Basic filters: license and category, plus UI toggles for broken/unfree (API supports them; UI wiring is partial).
+- Fast text search across nixpkgs metadata.
+- Basic filters: license and category, plus UI toggles for broken/unfree (API wiring is partial).
 - Copyable commands: install and temporary shell snippets per result.
 - Typical search latency: 300–700 ms per query (baseline to improve).
-- Minified LanceDB dataset shipped via Lambda layer for faster cold starts and lower transfer.
 
 ## Roadmap (P07 — fdnix)
 
@@ -87,9 +67,7 @@ Quick Wins
   - Status: partial. Implemented `nix-env -iA` (install) and `nix-shell -p` (temporary shell) commands for users. To add: `nix shell -p`, `nix run`, flake template. Note: Backend now uses `nix-eval-jobs` for data extraction.
 
 Medium
-- Semantic search over description/readme/maintainers using the LanceDB setup; rerank by attrpath exact matches.
-  - Status: hybrid search implemented with LanceDB (FTS + vector) when embeddings enabled. Attrpath exact-match rerank: planned.
-- Evals: add an evaluation harness and small gold set to measure relevance, regressions, and ranking quality.
+- Relevance evaluations: add a small gold set to measure ranking quality and regressions.
   - Status: planned.
 - Update & CVE badges (NVD by package name + aliases); warn on broken/insecure flags.
   - Status: planned.
@@ -155,55 +133,18 @@ npm run diff
 npm run synth
 ```
 
-### Embeddings Configuration
-
-- Runtime (API, Bedrock real-time):
-  - `AWS_REGION`: Lambda region (auto-set) used for Bedrock Runtime.
-  - `BEDROCK_MODEL_ID`: Embedding model id (default: `amazon.titan-embed-text-v2:0`).
-  - `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`).
-
-- Pipeline (Bedrock batch):
-  - `BEDROCK_MODEL_ID` (default: `amazon.titan-embed-text-v2:0`)
-  - `BEDROCK_OUTPUT_DIMENSIONS` (default: `256`)
-  - `BEDROCK_ROLE_ARN` (required for batch inference)
-  - `BEDROCK_INPUT_BUCKET` and `BEDROCK_OUTPUT_BUCKET` (or a single `ARTIFACTS_BUCKET`)
-  - `BEDROCK_BATCH_SIZE` (default: `50000`)
-  - `BEDROCK_POLL_INTERVAL` (default: `60`)
-  - `BEDROCK_MAX_WAIT_TIME` (default: `7200`)
-
-Secrets: No external API keys required for embeddings. Store any sensitive values in AWS SSM Parameter Store or Secrets Manager. IAM policies across stacks follow least-privilege.
-
 ### Pipeline Architecture
 
 The data processing pipeline is orchestrated using AWS Step Functions with conditional execution paths:
 
-- **Full Pipeline**: When no existing JSONL data is provided, runs nixpkgs evaluation followed by processing
-- **Processing Only**: When JSONL input is provided, skips evaluation and processes existing data directly
-- **Dynamic S3 Keys**: All output keys are generated using execution timestamps for versioning
-- **Fargate Tasks**: Both evaluation and processing run as ECS Fargate tasks with HTTPS-only egress
+- Full pipeline: when no existing JSONL data is provided, runs nixpkgs evaluation followed by processing.
+- Processing only: when JSONL input is provided, skips evaluation and processes existing data directly.
+- Outputs: artifacts are written to S3 and used to publish the compact search index for the API.
+- Deployment: uses AWS CDK; the frontend is served via S3 + CloudFront.
 
-The Step Functions state machine handles parameter passing between stages and generates timestamped S3 keys for all pipeline artifacts.
-
-### Backend Details
-- For backend and infrastructure details, see:
-  - `packages/search-lambda/README.md`
-  - `packages/cdk/README.md`
-  - `packages/cdk/STEP_FUNCTION_USAGE.md`
-
-### Project Structure
-- Monorepo with workspaces under `packages/`:
-  - `cdk/` (AWS CDK in TypeScript)
-  - `containers/` (unified `nixpkgs-indexer/` container for metadata → embeddings → minified + optional layer publish)
-- `search-lambda/` (Rust Lambda backend)
-  - `frontend/` (SolidJS)
-- CDK commands must be run from the `packages/cdk` workspace
-- Deployment uses AWS CDK; the frontend is served via S3 + CloudFront
-
-Container notes: The previous separate `metadata-generator` and `embedding-generator` images have been replaced by a single `nixpkgs-indexer` image that runs a three-phase pipeline: metadata → embeddings → minified. The minified LanceDB dataset is uploaded to S3 and used by the Lambda layer; the container can optionally publish the layer in the same ECS task. Embeddings are generated via AWS Bedrock batch (Amazon Titan) in the pipeline. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
+Container notes: The `nixpkgs-indexer` image runs a three‑phase pipeline: metadata → index → publish. It uploads the compact search index to S3 and can optionally publish the associated Lambda layer in the same ECS task. See `packages/containers/README.md` and `packages/containers/nixpkgs-indexer/README.md`.
 
 If you want to track progress or help prioritize features, please open an issue.
-
-
 
 ## Custom Domain (Cloudflare)
 
@@ -234,3 +175,4 @@ Disclaimer of warranty and liability:
 
 Project license:
 - The fdnix code in this repository is licensed under the MIT License (see `LICENSE`).
+

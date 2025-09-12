@@ -1,19 +1,133 @@
-pub mod lancedb_client;
-pub mod bedrock_client;
+pub mod sqlite_client;
 
-pub use lancedb_client::*;
-pub use bedrock_client::*;
+pub use sqlite_client::*;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::env;
 use std::sync::OnceLock;
-use tracing::{info, warn, debug};
+use tracing::{info};
 
-// Global clients (initialized once)
-static LANCEDB_CLIENT: OnceLock<Option<LanceDBClient>> = OnceLock::new();
-static BEDROCK_CLIENT: OnceLock<Option<BedrockClient>> = OnceLock::new();
+// Global client (initialized once)
+static SQLITE_CLIENT: OnceLock<Option<SQLiteClient>> = OnceLock::new();
+
+pub async fn handle_search_request(
+    query: String, 
+    limit: i32, 
+    offset: i32, 
+    license_filter: Option<String>,
+    category_filter: Option<String>,
+    include_broken: bool,
+    include_unfree: bool
+) -> Result<SearchResponseBody, Box<dyn std::error::Error + Send + Sync>> {
+    // Get SQLite client from static storage
+    let sqlite_client = SQLITE_CLIENT.get()
+        .ok_or("SQLite client not initialized - this should not happen as Lambda should fail at startup")?
+        .as_ref()
+        .ok_or("SQLite client failed to initialize during startup - check Lambda layer and database configuration")?;
+
+    // Prepare search parameters
+    let search_params = SearchParams {
+        query: query.clone(),
+        limit,
+        offset,
+        license_filter,
+        category_filter,
+        include_broken,
+        include_unfree,
+    };
+
+    // Perform FTS search
+    let search_start = std::time::Instant::now();
+    let results = sqlite_client.fts_search(&search_params).await?;
+    let search_elapsed = search_start.elapsed();
+    
+    info!(
+        "Search completed: type={}, results={}, duration={}ms", 
+        results.search_type, 
+        results.total_count,
+        search_elapsed.as_millis()
+    );
+
+    // Convert packages to JSON values for response
+    let packages_json: Vec<Value> = results.packages.into_iter().map(|pkg| {
+        json!({
+            "packageId": pkg.package_id,
+            "packageName": pkg.package_name,
+            "version": pkg.version,
+            "description": pkg.description,
+            "homepage": pkg.homepage,
+            "license": pkg.license,
+            "attributePath": pkg.attribute_path,
+            "category": pkg.category,
+            "broken": pkg.broken,
+            "unfree": pkg.unfree,
+            "available": pkg.available,
+            "relevanceScore": pkg.relevance_score
+        })
+    }).collect();
+
+    Ok(SearchResponseBody {
+        message: "Search completed".to_string(),
+        query: Some(query),
+        total_count: Some(results.total_count),
+        query_time_ms: Some(results.query_time_ms),
+        search_type: Some(results.search_type),
+        packages: Some(packages_json),
+        note: None,
+        version: None,
+        runtime: None,
+        query_received: None,
+        lancedb_path: None,
+        bedrock_model_id: None,
+        aws_region: None,
+        enable_embeddings: None,
+        lancedb_initialized: None,
+        bedrock_initialized: None,
+        lancedb_healthy: None,
+        bedrock_healthy: None,
+    })
+}
+
+pub async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("Starting fdnix-search-api Rust Lambda v{}", env!("CARGO_PKG_VERSION"));
+
+    // Initialize SQLite client with path validation
+    let sqlite_client = match get_sqlite_path().await {
+        Ok(sqlite_path) => {
+            info!("Initializing SQLite client with path: {}", sqlite_path);
+            let start_time = std::time::Instant::now();
+            match SQLiteClient::new(&sqlite_path) {
+                Ok(mut client) => {
+                    match client.initialize().await {
+                        Ok(_) => {
+                            let elapsed = start_time.elapsed();
+                            info!("SQLite client initialized successfully in {}ms", elapsed.as_millis());
+                            Some(client)
+                        }
+                        Err(e) => {
+                            return Err(format!("SQLite initialization failed: {}", e).into());
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("SQLite client creation failed: {}", e).into());
+                }
+            }
+        }
+        Err(e) => {
+            return Err(format!("Failed to find valid SQLite path: {}", e).into());
+        }
+    };
+
+    // Store client in static storage
+    SQLITE_CLIENT.set(sqlite_client).map_err(|_| "Failed to set SQLite client")?;
+
+    info!("Lambda initialization complete - SQLite: {}", 
+          SQLITE_CLIENT.get().and_then(|c| c.as_ref()).is_some());
+    Ok(())
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct ApiGatewayRequest {
@@ -95,98 +209,25 @@ pub fn extract_query_params(params: &Option<HashMap<String, String>>) -> (String
     (query, limit, offset, license_filter, category_filter, include_broken, include_unfree)
 }
 
-pub fn is_embeddings_enabled() -> bool {
-    env::var("ENABLE_EMBEDDINGS")
-        .map(|val| val == "1" || val.to_lowercase() == "true" || val.to_lowercase() == "yes")
-        .unwrap_or(false)
-}
 
-pub async fn get_lancedb_path() -> Result<String, String> {
-    use std::path::Path;
+pub async fn get_sqlite_path() -> Result<String, String> {
+    // SQLite database path
+    let sqlite_path = "/opt/fdnix/fdnix.db";
     
-    // Try paths in priority order: env var, Lambda layer paths, local paths
-    let candidate_paths = vec![
-        env::var("LANCEDB_PATH").unwrap_or_default(),
-        "/opt/fdnix/fdnix.lancedb".to_string(),  // Original expected path
-        "/opt".to_string(),                      // Lambda layer root where packages.lance should be extracted
-        ".".to_string(),                         // Current directory
-        "./packages.lance".to_string(),          // Fallback to packages.lance directory
-        "packages.lance".to_string(),            // Fallback to packages.lance directory
-    ];
+    info!("Checking SQLite database path: {}", sqlite_path);
     
-    for path in &candidate_paths {
-        if path.is_empty() {
-            continue;
-        }
-        
-        info!("Checking database path: {}", path);
-        
-        let path_obj = Path::new(path);
-        if path_obj.exists() && path_obj.is_dir() {
-            // First, check if this directory itself has LanceDB structure (direct database)
-            let data_dir = path_obj.join("data");
-            let versions_dir = path_obj.join("_versions");
-            
-            if data_dir.exists() && versions_dir.exists() {
-                info!("Valid LanceDB structure found at: {}", path);
-                
-                // List contents for debugging
-                if let Ok(entries) = std::fs::read_dir(path) {
-                    let contents: Vec<String> = entries
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.file_name().to_string_lossy().to_string())
-                        .collect();
-                    debug!("Database directory contents: {:?}", contents);
-                }
-                
-                return Ok(path.clone());
-            }
-            
-            // Otherwise, check if this directory contains packages.lance subdirectory
-            let packages_lance_dir = path_obj.join("packages.lance");
-            if packages_lance_dir.exists() && packages_lance_dir.is_dir() {
-                let data_dir = packages_lance_dir.join("data");
-                let versions_dir = packages_lance_dir.join("_versions");
-                
-                if data_dir.exists() && versions_dir.exists() {
-                    info!("Valid LanceDB structure found at: {}", packages_lance_dir.display());
-                    
-                    // List contents for debugging
-                    if let Ok(entries) = std::fs::read_dir(&packages_lance_dir) {
-                        let contents: Vec<String> = entries
-                            .filter_map(|e| e.ok())
-                            .map(|e| e.file_name().to_string_lossy().to_string())
-                            .collect();
-                        debug!("Database directory contents: {:?}", contents);
-                    }
-                    
-                    // Return the parent directory path, as LanceDB expects to connect to the parent
-                    return Ok(path.clone());
-                } else {
-                    warn!("packages.lance directory exists but missing LanceDB structure at: {} (data: {}, versions: {})", 
-                          packages_lance_dir.display(), data_dir.exists(), versions_dir.exists());
-                }
-            } else {
-                debug!("No packages.lance subdirectory found in: {}", path);
-            }
-        } else {
-            debug!("Path does not exist or is not a directory: {}", path);
-        }
+    if std::path::Path::new(sqlite_path).exists() {
+        info!("Valid SQLite database found at: {}", sqlite_path);
+        Ok(sqlite_path.to_string())
+    } else {
+        Err(format!("SQLite database not found at: {}. Ensure the database layer is properly attached.", sqlite_path))
     }
-    
-    // If we reach here, no valid path was found
-    let attempted_paths = candidate_paths.into_iter()
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<String>>()
-        .join(", ");
-    
-    Err(format!("No valid LanceDB database found. Attempted paths: [{}]. Ensure the database layer is properly attached and contains packages.lance directory with data/ and _versions/ subdirectories.", attempted_paths))
 }
 
 pub async fn create_health_check_response(query_param: String) -> SearchResponseBody {
     let mut response = SearchResponseBody {
-        message: "fdnix search API (Rust) — stub active".to_string(),
-        note: Some("This is a Rust Lambda stub. LanceDB integration ready.".to_string()),
+        message: "fdnix search API (Rust) — SQLite FTS active".to_string(),
+        note: Some("This is a Rust Lambda with SQLite FTS search.".to_string()),
         version: Some("0.1.0".to_string()),
         runtime: Some("provided.al2023".to_string()),
         query: None,
@@ -195,23 +236,19 @@ pub async fn create_health_check_response(query_param: String) -> SearchResponse
         search_type: None,
         packages: None,
         query_received: if !query_param.is_empty() { Some(query_param) } else { None },
-        lancedb_path: env::var("LANCEDB_PATH").ok(),
-        bedrock_model_id: env::var("BEDROCK_MODEL_ID").ok(),
+        lancedb_path: None,
+        bedrock_model_id: None,
         aws_region: env::var("AWS_REGION").ok(),
-        enable_embeddings: env::var("ENABLE_EMBEDDINGS").ok(),
-        lancedb_initialized: Some(LANCEDB_CLIENT.get().and_then(|c| c.as_ref()).is_some()),
-        bedrock_initialized: Some(BEDROCK_CLIENT.get().and_then(|c| c.as_ref()).is_some()),
+        enable_embeddings: None,
+        lancedb_initialized: None,
+        bedrock_initialized: None,
         lancedb_healthy: None,
         bedrock_healthy: None,
     };
 
-    // Check client health
-    if let Some(lancedb_client) = LANCEDB_CLIENT.get().and_then(|c| c.as_ref()) {
-        response.lancedb_healthy = Some(lancedb_client.health_check().await);
-    }
-
-    if let Some(bedrock_client) = BEDROCK_CLIENT.get().and_then(|c| c.as_ref()) {
-        response.bedrock_healthy = Some(bedrock_client.health_check().await.unwrap_or(false));
+    // Check SQLite client health
+    if let Some(sqlite_client) = SQLITE_CLIENT.get().and_then(|c| c.as_ref()) {
+        response.lancedb_healthy = Some(sqlite_client.health_check().await);
     }
 
     response

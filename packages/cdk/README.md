@@ -4,7 +4,7 @@ This directory contains the AWS CDK (Cloud Development Kit) infrastructure for t
 
 ## Architecture Overview
 
-The fdnix infrastructure consists of five main stacks that work together to provide a complete search solution:
+The fdnix infrastructure consists of six main stacks that work together to provide a complete search solution:
 
 ```mermaid
 graph TB
@@ -14,10 +14,8 @@ graph TB
     end
     
     subgraph "AWS Infrastructure"
-        subgraph "Frontend (CloudFront + S3)"
-            CF[CloudFront Distribution]
+        subgraph "Frontend (S3)"
             S3F[S3 Static Hosting]
-            ACM[ACM Certificate]
         end
         
         subgraph "API Layer"
@@ -48,6 +46,7 @@ graph TB
         subgraph "External Services"
             BR[Amazon Bedrock<br/>Titan Embeddings]
             CF_DNS[Cloudflare DNS]
+            ACM[ACM Certificate]
         end
         
         subgraph "Networking"
@@ -122,7 +121,7 @@ graph TB
 **Components**:
 - **S3 Artifacts Bucket**: Stores LanceDB files, Lambda layer zips, and JSONL evaluations (internal pipeline data)
   - SSL enforcement and block public access
-- **S3 Processed Files Bucket**: Publicly consumable artifacts for the app (e.g., dependency graphs under `/graph/*` via CloudFront)
+- **S3 Processed Files Bucket**: Publicly consumable artifacts for the app (e.g., dependency graphs under `/nodes/*` via CloudFront)
   - SSL enforcement and block public access
 - **Lambda Layer**: Contains minified LanceDB dataset for fast Lambda access
   - Optimized for search performance with essential data only
@@ -176,21 +175,32 @@ graph TB
 
 ### 4. Frontend Stack (`FdnixFrontendStack`)
 
-**Purpose**: Static site hosting with global CDN distribution
+**Purpose**: Static site hosting (S3 bucket + asset deployment)
 
 **Components**:
-- **S3 Static Hosting**: Private bucket for static assets
+- **S3 Static Hosting**: Private bucket for static assets (accessed via CloudFront OAC)
+- **Deployment**: Uploads `packages/frontend/dist` artifacts to S3
+
+**Cost**: ~$0-2/month (S3 hosting)
+
+### 5. CloudFront Stack (`FdnixCloudFrontStack`)
+
+**Purpose**: Global CDN distribution and routing for the app
+
+**Components**:
 - **CloudFront Distribution**:
   - Global CDN with HTTP/2 and HTTP/3 support
   - Origin Access Control (OAC) for secure S3 access
   - API proxy behavior for `/api/*` paths
-  - Processed files behavior for `/graph/*` paths (from processed files bucket)
-  - SPA routing with 404 → index.html fallback
-- **Deployment Automation**: S3 deployment with cache invalidation
+  - Processed files behavior for `/nodes/*` paths (from processed files bucket)
+  - SPA routing with 404/403 → `index.html` fallback
+- **S3 Permissions**: Grants OAC read access to `nodes/*` in processed files bucket
 
-**Cost**: ~$1-5/month (CloudFront + S3 hosting)
+Note: An ACM certificate stack is provisioned separately. See Certificate Stack below.
 
-### 5. Certificate Stack (`FdnixCertificateStack`)
+**Cost**: ~$1-3/month (CloudFront)
+
+### 6. Certificate Stack (`FdnixCertificateStack`)
 
 **Purpose**: SSL/TLS certificate management for custom domains
 
@@ -335,7 +345,7 @@ graph TD
 
 1. **AWS CLI configured** with appropriate permissions
 2. **Node.js 18+** and npm installed  
-3. **AWS CDK v2** installed globally: `npm install -g aws-cdk`
+3. **AWS CDK v2** available (globally via `npm i -g aws-cdk` or use `npx cdk`)
 4. **Build artifacts** prepared:
    ```bash
    # Build search lambda
@@ -351,24 +361,27 @@ The stacks have dependencies and must be deployed in order:
 
 ```bash
 # 1. Database stack (foundation)
-cdk deploy FdnixDatabaseStack
+npx cdk deploy FdnixDatabaseStack
 
-# 2. Certificate stack (independent)  
-cdk deploy FdnixCertificateStack
+# 2. Certificate stack (independent, us-east-1 recommended for CloudFront)
+npx cdk deploy FdnixCertificateStack
 
 # 3. Pipeline stack (depends on database)
-cdk deploy FdnixPipelineStack
+npx cdk deploy FdnixPipelineStack
 
 # 4. Search API stack (depends on database)
-cdk deploy FdnixSearchApiStack
+npx cdk deploy FdnixSearchApiStack
 
-# 5. Frontend stack (depends on search API and certificate)
-cdk deploy FdnixFrontendStack
+# 5. Frontend stack (depends on search API)
+npx cdk deploy FdnixFrontendStack
+
+# 6. CloudFront stack (depends on frontend and certificate)
+npx cdk deploy FdnixCloudFrontStack
 ```
 
 Or deploy all at once:
 ```bash
-cdk deploy --all
+npx cdk deploy --all
 ```
 
 ### Environment Variables
@@ -387,12 +400,12 @@ export FDNIX_STACK_PREFIX=Fdnix           # Optional: stack naming prefix
 
 After frontend stack deployment:
 
-1. Get the CloudFront distribution domain from stack outputs
-2. In Cloudflare DNS, create:
-   - **CNAME**: `fdnix.com` → CloudFront domain (enable CNAME flattening at apex)
-   - **CNAME**: `www.fdnix.com` → CloudFront domain
-3. Set SSL/TLS mode to **Full (strict)**
-4. Validate ACM certificate via DNS (add CNAME records from ACM)
+1. Get the CloudFront distribution domain from CloudFrontStack outputs
+2. Validate the ACM certificate via DNS (add CNAME records provided by ACM)
+3. In Cloudflare DNS, create:
+   - **CNAME**: `fdnix.com` → CloudFront distribution domain (enable CNAME flattening at apex)
+   - **CNAME**: `www.fdnix.com` → CloudFront distribution domain
+4. Set SSL/TLS mode to **Full (strict)**
 
 ### Manual Pipeline Execution
 
@@ -422,8 +435,10 @@ packages/cdk/
 │   ├── certificate-stack.ts     # ACM certificate
 │   ├── database-stack.ts        # S3, Lambda layer, IAM
 │   ├── docker-build-construct.ts # Reusable Docker build
-│   ├── frontend-stack.ts        # S3, CloudFront, deployment
+│   ├── frontend-stack.ts        # S3 hosting + asset deployment
+│   ├── cloudfront-stack.ts      # CloudFront distribution and routing
 │   ├── pipeline-stack.ts        # Step Functions, ECS, VPC
+│   ├── pipeline-state-machine-definition.ts # Extracted SFN definition
 │   ├── search-api-stack.ts      # Lambda, API Gateway
 │   └── empty-layer/            # Placeholder Lambda layer
 ├── cdk.json                    # CDK configuration
@@ -438,7 +453,8 @@ packages/cdk/
 3. **Environment Abstraction**: Environment variables with sensible defaults
 4. **Resource Tagging**: Consistent tagging strategy across all resources
 5. **Construct Reuse**: `DockerBuildConstruct` for reusable container builds
-6. **Validation**: Runtime checks for build artifacts before deployment
+6. **Extracted State Machine**: Pipeline definition factored into `pipeline-state-machine-definition.ts`
+7. **Validation**: Runtime checks for build artifacts before deployment
 
 ### Inter-Stack Communication
 
@@ -447,7 +463,8 @@ graph LR
     DB[Database Stack] --> PIPE[Pipeline Stack]
     DB --> API[Search API Stack]
     API --> FE[Frontend Stack]
-    CERT[Certificate Stack] --> FE
+    FE --> CF[CloudFront Stack]
+    CERT[Certificate Stack] --> CF
     
     subgraph "Shared Resources"
         S3[Artifacts Bucket]
@@ -516,10 +533,11 @@ Additional one-time costs:
 
 ---
 
-**Next Steps**: 
-1. Deploy the stacks in order
-2. Configure DNS settings in Cloudflare
-3. Monitor the first pipeline execution
-4. Set up alerting for pipeline failures (optional)
+**Next Steps**:
+1. Build the Lambda and frontend artifacts
+2. Deploy the stacks in order (including CloudFront)
+3. Configure DNS settings in Cloudflare
+4. Monitor the first pipeline execution
+5. Review STEP_FUNCTION_USAGE.md for advanced pipeline runs
 
 For questions or issues, refer to the [main project documentation](../../README.md) or check the Step Functions execution logs in the AWS Console.

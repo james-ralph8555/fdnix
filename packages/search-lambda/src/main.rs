@@ -1,15 +1,14 @@
 use lambda_runtime::{service_fn, Error, LambdaEvent};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::env;
-use std::sync::OnceLock;
-use tracing::{info, warn, error, debug};
+use tracing::{error};
 
-use fdnix_search_lambda::*;
+use fdnix_search_lambda::{
+    ApiGatewayRequest, ApiGatewayResponse, 
+    extract_query_params, create_health_check_response,
+    handle_search_request, initialize_clients
+};
 
-// Global clients (initialized once)
-static LANCEDB_CLIENT: OnceLock<Option<LanceDBClient>> = OnceLock::new();
-static BEDROCK_CLIENT: OnceLock<Option<BedrockClient>> = OnceLock::new();
 
 async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayResponse, Error> {
     let payload = event.payload;
@@ -78,192 +77,10 @@ async fn function_handler(event: LambdaEvent<Value>) -> Result<ApiGatewayRespons
 }
 
 
-async fn handle_search_request(
-    query: String, 
-    limit: i32, 
-    offset: i32, 
-    license_filter: Option<String>,
-    category_filter: Option<String>,
-    include_broken: bool,
-    include_unfree: bool
-) -> Result<SearchResponseBody, Box<dyn std::error::Error + Send + Sync>> {
-    // Get clients from static storage
-    let lancedb_client = LANCEDB_CLIENT.get()
-        .ok_or("LanceDB client not initialized - this should not happen as Lambda should fail at startup")?
-        .as_ref()
-        .ok_or("LanceDB client failed to initialize during startup - check Lambda layer and LANCEDB_PATH configuration")?;
-
-    // Prepare search parameters
-    let search_params = SearchParams {
-        query: query.clone(),
-        limit,
-        offset,
-        license_filter,
-        category_filter,
-        include_broken,
-        include_unfree,
-    };
-
-    // Check if embeddings are enabled and generate if needed
-    let query_embedding = if is_embeddings_enabled() {
-        if let Some(bedrock_client) = BEDROCK_CLIENT.get()
-            .and_then(|c| c.as_ref()) {
-            debug!("Generating embedding for search query: '{}'", query.chars().take(50).collect::<String>());
-            match bedrock_client.generate_embedding(&query).await {
-                Ok(embedding) => {
-                    info!("Successfully generated query embedding with {} dimensions", embedding.len());
-                    Some(embedding)
-                }
-                Err(e) => {
-                    warn!("Failed to generate query embedding, falling back to FTS-only: {}", e);
-                    None
-                }
-            }
-        } else {
-            warn!("Bedrock client not available for embedding generation");
-            None
-        }
-    } else {
-        debug!("Embeddings disabled, using FTS-only search");
-        None
-    };
-
-    // Perform search
-    debug!("Executing hybrid search with query: '{}', limit: {}, offset: {}", query, limit, offset);
-    let search_start = std::time::Instant::now();
-    let results = lancedb_client.hybrid_search(&search_params, query_embedding.as_deref()).await?;
-    let search_elapsed = search_start.elapsed();
-    
-    info!(
-        "Search completed: type={}, results={}, duration={}ms", 
-        results.search_type, 
-        results.total_count,
-        search_elapsed.as_millis()
-    );
-
-    // Convert packages to JSON values for response
-    let packages_json: Vec<Value> = results.packages.into_iter().map(|pkg| {
-        json!({
-            "packageId": pkg.package_id,
-            "packageName": pkg.package_name,
-            "version": pkg.version,
-            "description": pkg.description,
-            "homepage": pkg.homepage,
-            "license": pkg.license,
-            "attributePath": pkg.attribute_path,
-            "category": pkg.category,
-            "broken": pkg.broken,
-            "unfree": pkg.unfree,
-            "available": pkg.available,
-            "relevanceScore": pkg.relevance_score
-        })
-    }).collect();
-
-    Ok(SearchResponseBody {
-        message: "Search completed".to_string(),
-        query: Some(query),
-        total_count: Some(results.total_count),
-        query_time_ms: Some(results.query_time_ms),
-        search_type: Some(results.search_type),
-        packages: Some(packages_json),
-        // Health check fields not used in search response
-        note: None,
-        version: None,
-        runtime: None,
-        query_received: None,
-        lancedb_path: None,
-        bedrock_model_id: None,
-        aws_region: None,
-        enable_embeddings: None,
-        lancedb_initialized: None,
-        bedrock_initialized: None,
-        lancedb_healthy: None,
-        bedrock_healthy: None,
-    })
-}
 
 
 
 
-async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    info!("Starting fdnix-search-api Rust Lambda v{}", env!("CARGO_PKG_VERSION"));
-    debug!("Lambda initialization starting with environment configuration");
-
-    // Log environment configuration
-    debug!("Environment variables: LANCEDB_PATH={:?}, AWS_REGION={:?}, ENABLE_EMBEDDINGS={:?}", 
-           env::var("LANCEDB_PATH").ok(), 
-           env::var("AWS_REGION").ok(), 
-           env::var("ENABLE_EMBEDDINGS").ok());
-
-    // Initialize LanceDB client with path validation and fallback
-    let lancedb_client = match get_lancedb_path().await {
-        Ok(lancedb_path) => {
-            info!("Initializing LanceDB client with validated path: {}", lancedb_path);
-            let start_time = std::time::Instant::now();
-            match LanceDBClient::new(&lancedb_path) {
-                Ok(mut client) => {
-                    match client.initialize().await {
-                        Ok(_) => {
-                            let elapsed = start_time.elapsed();
-                            info!("LanceDB client initialized successfully in {}ms", elapsed.as_millis());
-                            Some(client)
-                        }
-                        Err(e) => {
-                            error!("Failed to initialize LanceDB client after {}ms: {}", start_time.elapsed().as_millis(), e);
-                            return Err(format!("LanceDB initialization failed: {}", e).into());
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to create LanceDB client after {}ms: {}", start_time.elapsed().as_millis(), e);
-                    return Err(format!("LanceDB client creation failed: {}", e).into());
-                }
-            }
-        }
-        Err(e) => {
-            error!("Failed to find valid LanceDB path: {}", e);
-            return Err(e.into());
-        }
-    };
-
-    // Initialize Bedrock client only if embeddings are enabled
-    let bedrock_client = if is_embeddings_enabled() {
-        let aws_region = env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".to_string());
-        let bedrock_model = env::var("BEDROCK_MODEL_ID")
-            .unwrap_or_else(|_| "amazon.titan-embed-text-v2:0".to_string());
-        let dimensions = env::var("BEDROCK_OUTPUT_DIMENSIONS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(256);
-
-        info!("Initializing Bedrock client with model: {}, region: {}, dimensions: {}", bedrock_model, aws_region, dimensions);
-        let start_time = std::time::Instant::now();
-        
-        match BedrockClient::new(&aws_region, &bedrock_model, dimensions).await {
-            Ok(client) => {
-                let elapsed = start_time.elapsed();
-                info!("Bedrock client initialized successfully in {}ms", elapsed.as_millis());
-                Some(client)
-            }
-            Err(e) => {
-                error!("Failed to initialize Bedrock client after {}ms: {}", start_time.elapsed().as_millis(), e);
-                None
-            }
-        }
-    } else {
-        info!("Embeddings disabled, skipping Bedrock client initialization");
-        None
-    };
-
-    // Store clients in static storage
-    LANCEDB_CLIENT.set(lancedb_client).map_err(|_| "Failed to set LanceDB client")?;
-    BEDROCK_CLIENT.set(bedrock_client).map_err(|_| "Failed to set Bedrock client")?;
-
-    info!("Lambda initialization complete - LanceDB: {}, Bedrock: {}", 
-          LANCEDB_CLIENT.get().and_then(|c| c.as_ref()).is_some(),
-          BEDROCK_CLIENT.get().and_then(|c| c.as_ref()).is_some());
-    Ok(())
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {

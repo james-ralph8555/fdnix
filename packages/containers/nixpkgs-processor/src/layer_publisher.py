@@ -14,7 +14,7 @@ logger = logging.getLogger("fdnix.layer-publisher")
 class LayerPublisher:
     """Publishes a new Lambda Layer version from an S3 object.
 
-    Expects the LanceDB artifact to be available in S3 and publishes it as a new
+    Expects the SQLite database file to be available in S3 and publishes it as a new
     layer version using the unversioned Layer ARN (name) passed in.
     """
 
@@ -27,8 +27,8 @@ class LayerPublisher:
         """Publish a new layer version and return the LayerVersionArn.
 
         Args:
-            bucket: S3 bucket containing the LanceDB directory structure
-            key: S3 key prefix for the LanceDB directory structure
+            bucket: S3 bucket containing the SQLite database file
+            key: S3 key for the SQLite database file
             layer_arn: Unversioned layer ARN or name (e.g., arn:aws:lambda:...:layer:fdnix-database-layer)
         """
         if not boto3:
@@ -39,7 +39,7 @@ class LayerPublisher:
 
         logger.info("Publishing new layer version from s3://%s/%s to %s", bucket, key, layer_arn)
         
-        # Create a ZIP file from the LanceDB directory structure
+        # Create a ZIP file containing just the SQLite database
         import tempfile
         import zipfile
         from pathlib import Path
@@ -48,69 +48,37 @@ class LayerPublisher:
         lambda_client = boto3.client("lambda", region_name=self.region)
 
         try:
-            # Download the LanceDB directory structure to a temporary directory
+            # Download the SQLite database file to a temporary directory
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
-                lancedb_dir = temp_path / "lancedb"
-                lancedb_dir.mkdir()
                 
-                # List and download all objects with the prefix
-                logger.info("Downloading LanceDB directory structure from S3...")
-                paginator = s3_client.get_paginator('list_objects_v2')
-                pages = paginator.paginate(Bucket=bucket, Prefix=key)
+                # Download the SQLite database file
+                logger.info("Downloading SQLite database from S3...")
+                local_db_path = temp_path / "fdnix.db"
+                s3_client.download_file(bucket, key, str(local_db_path))
+                logger.debug(f"Downloaded SQLite database to {local_db_path}")
                 
-                for page in pages:
-                    if 'Contents' in page:
-                        for obj in page['Contents']:
-                            s3_key = obj['Key']
-                            # Calculate local file path
-                            relative_path = s3_key[len(key):].lstrip('/')
-                            if relative_path:  # Skip empty paths
-                                local_file_path = lancedb_dir / relative_path
-                                
-                                # Create parent directories
-                                local_file_path.parent.mkdir(parents=True, exist_ok=True)
-                                
-                                # Download file
-                                s3_client.download_file(bucket, s3_key, str(local_file_path))
-                                logger.debug(f"Downloaded {s3_key} to {local_file_path}")
-                
-                # Create ZIP file with correct directory structure for Lambda layer
-                zip_path = temp_path / "lancedb.zip"
+                # Create ZIP file with the SQLite database in the correct location
+                zip_path = temp_path / "sqlite-layer.zip"
                 logger.info("Creating ZIP file for Lambda layer...")
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-                    for file_path in lancedb_dir.rglob("*"):
-                        if file_path.is_file():
-                            # Calculate path within ZIP - preserve the full directory structure
-                            # This ensures files are extracted to packages.lance/ in the Lambda layer
-                            relative_path = file_path.relative_to(lancedb_dir)
-                            
-                            # If the file is at the root level of lancedb directory, 
-                            # assume it should be in packages.lance/
-                            if len(relative_path.parts) == 1:
-                                arc_name = Path("packages.lance") / relative_path
-                            else:
-                                # If already in a subdirectory structure, preserve it
-                                # but ensure it starts with packages.lance if not already
-                                if relative_path.parts[0] != "packages.lance":
-                                    arc_name = Path("packages.lance") / relative_path
-                                else:
-                                    arc_name = relative_path
-                                    
-                            logger.debug(f"Adding {file_path} as {arc_name} to ZIP")
-                            zip_file.write(file_path, arc_name)
+                    # Add the SQLite database to the ZIP in the correct location for Lambda
+                    # The database should be extracted to /opt/fdnix/fdnix.db in the Lambda layer
+                    arc_name = "fdnix.db"
+                    zip_file.write(local_db_path, arc_name)
+                    logger.debug(f"Added {local_db_path} as {arc_name} to ZIP")
                 
                 # Upload ZIP to S3 with timestamp to avoid overlap
                 import time
                 timestamp = int(time.time())
-                zip_key = f"{key.rstrip('/')}-{timestamp}.zip"
+                zip_key = f"{key.rsplit('.', 1)[0]}-{timestamp}.zip"
                 logger.info(f"Uploading ZIP file to s3://{bucket}/{zip_key}")
                 s3_client.upload_file(str(zip_path), bucket, zip_key)
                 
                 # Publish layer using the ZIP file
                 resp = lambda_client.publish_layer_version(
                     LayerName=layer_arn,
-                    Description="Minified LanceDB database with search indexes for fdnix search API",
+                    Description="Minified SQLite database with FTS search for fdnix search API",
                     Content={"S3Bucket": bucket, "S3Key": zip_key},
                     CompatibleRuntimes=["provided.al2023"],
                     CompatibleArchitectures=["x86_64"],

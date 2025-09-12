@@ -42,12 +42,12 @@ export class FdnixDatabaseStack extends Stack {
       ],
     });
 
-    // Lambda Layer for minified LanceDB file
-    // This layer will contain the minified LanceDB dataset at /opt/fdnix/fdnix.lancedb/
+    // Lambda Layer for minified SQLite database file
+    // This layer will contain the minified SQLite dataset at /opt/fdnix/fdnix.db
     // Initial version with empty layer - will be updated by pipeline
     this.databaseLayer = new lambda.LayerVersion(this, 'DatabaseLayer', {
       code: lambda.Code.fromAsset(path.join(__dirname, 'empty-layer')),
-      description: 'Minified LanceDB dataset optimized for Lambda with search indexes and essential data only',
+      description: 'Minified SQLite dataset optimized for Lambda with FTS search and essential data only',
       compatibleRuntimes: [lambda.Runtime.PROVIDED_AL2023],
       compatibleArchitectures: [lambda.Architecture.X86_64],
     });

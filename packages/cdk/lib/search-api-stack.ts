@@ -48,16 +48,7 @@ export class FdnixSearchApiStack extends Stack {
       ],
     });
 
-    // Bedrock permissions for real-time embedding generation
-    const bedrockModelId = 'amazon.titan-embed-text-v2:0';
-    const bedrockModelArn = `arn:aws:bedrock:${Stack.of(this).region}::foundation-model/${bedrockModelId}`;
-    this.lambdaExecutionRole.addToPolicy(new iam.PolicyStatement({
-      actions: [
-        'bedrock:InvokeModel',
-        'bedrock:InvokeModelWithResponseStream',
-      ],
-      resources: [bedrockModelArn],
-    }));
+    // Note: Bedrock permissions removed - using FTS-only search with SQLite
 
     // Lambda function for hybrid search API
     // Implemented in Rust using the custom runtime (PROVIDED_AL2023).
@@ -72,10 +63,8 @@ export class FdnixSearchApiStack extends Stack {
       role: this.lambdaExecutionRole,
       layers: [databaseStack.databaseLayer],
       environment: {
-        LANCEDB_PATH: '/opt/fdnix/fdnix.lancedb',
-        BEDROCK_MODEL_ID: bedrockModelId,
-        BEDROCK_OUTPUT_DIMENSIONS: '256',
-        ENABLE_EMBEDDINGS: 'false', // Set to 'true' for hybrid mode when embeddings available
+        SQLITE_PATH: '/opt/fdnix/fdnix.db',
+        ENABLE_EMBEDDINGS: 'false', // Embeddings disabled, using FTS-only search
       },
     });
 

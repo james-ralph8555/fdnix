@@ -106,7 +106,6 @@ class DataProcessor:
                     "position": self._sanitize_string(meta.get("position", "")),
                     "outputsToInstall": meta.get("outputsToInstall") if isinstance(meta.get("outputsToInstall"), list) else [],
                     "lastUpdated": current_ts,
-                    "hasEmbedding": False,
                 })
 
                 if len(processed) % 1000 == 0:

@@ -8,9 +8,8 @@ from typing import List, Dict, Any
 
 from s3_jsonl_reader import S3JsonlReader
 from data_processor import DataProcessor
-from lancedb_writer import LanceDBWriter
+from sqlite_writer import SQLiteWriter
 from s3_stats_writer import S3StatsWriter
-from embedding_generator import EmbeddingGenerator
 from layer_publisher import LayerPublisher
 from node_s3_writer import NodeS3Writer
 
@@ -37,16 +36,20 @@ def validate_env() -> None:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing_basic)}")
     
     # Set default keys for outputs if not provided
-    has_data_key = bool(os.environ.get("LANCEDB_DATA_KEY"))
-    has_minified_key = bool(os.environ.get("LANCEDB_MINIFIED_KEY"))
+    has_data_key = bool(os.environ.get("SQLITE_DATA_KEY", os.environ.get("LANCEDB_DATA_KEY")))
+    has_minified_key = bool(os.environ.get("SQLITE_MINIFIED_KEY", os.environ.get("LANCEDB_MINIFIED_KEY")))
     
     if not has_data_key or not has_minified_key:
         import time
         timestamp = int(time.time())
         if not has_data_key:
-            os.environ["LANCEDB_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.lancedb"
+            os.environ["SQLITE_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.db"
+            if not os.environ.get("LANCEDB_DATA_KEY"):
+                os.environ["LANCEDB_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.db"
         if not has_minified_key:
-            os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.lancedb"
+            os.environ["SQLITE_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.db"
+            if not os.environ.get("LANCEDB_MINIFIED_KEY"):
+                os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.db"
     
     # Set default stats key if not set
     if not os.environ.get("STATS_S3_KEY"):
@@ -60,13 +63,14 @@ def validate_env() -> None:
 
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):
-        required_keys = ["LAYER_ARN", "ARTIFACTS_BUCKET", "AWS_REGION", "LANCEDB_MINIFIED_KEY"]
-        missing = [k for k in required_keys if not os.environ.get(k)]
-            
-        if missing:
-            raise RuntimeError(
-                "Layer publish requested but missing envs: " + ", ".join(missing)
-            )
+        required_keys = ["LAYER_ARN", "ARTIFACTS_BUCKET", "AWS_REGION", "SQLITE_MINIFIED_KEY"]
+        # Keep backward compatibility with old key names
+        if not os.environ.get("SQLITE_MINIFIED_KEY") and not os.environ.get("LANCEDB_MINIFIED_KEY"):
+            missing = [k for k in required_keys if not os.environ.get(k)]
+            if missing:
+                raise RuntimeError(
+                    "Layer publish requested but missing envs: " + ", ".join(missing)
+                )
 
 
 async def main() -> int:
@@ -93,8 +97,8 @@ async def main() -> int:
             processing_mode = "both"
         
         # Setup paths for both databases
-        main_db_path = os.environ.get("OUTPUT_PATH", "/out/fdnix-data.lancedb")
-        minified_db_path = os.environ.get("OUTPUT_MINIFIED_PATH", "/out/fdnix.lancedb")
+        main_db_path = os.environ.get("OUTPUT_PATH", "/out/fdnix-data.db")
+        minified_db_path = os.environ.get("OUTPUT_MINIFIED_PATH", "/out/fdnix.db")
         
         # Phase 1: Read raw JSONL from Stage 1 (from artifacts bucket)
         logger.info("=== JSONL READING PHASE ===")
@@ -128,14 +132,14 @@ async def main() -> int:
                 packages = processor.process_raw_packages(raw_packages)
             
             # Create main database with metadata only (upload to artifacts bucket)
-            main_writer = LanceDBWriter(
+            main_writer = SQLiteWriter(
                 output_path=main_db_path,
                 s3_bucket=artifacts_bucket,
-                s3_key=os.environ.get("LANCEDB_DATA_KEY"),
+                s3_key=os.environ.get("SQLITE_DATA_KEY", os.environ.get("LANCEDB_DATA_KEY")),  # Keep old env var for now
                 region=region,
             )
 
-            logger.info("Writing metadata to main LanceDB artifact...")
+            logger.info("Writing metadata to main SQLite artifact...")
             main_writer.write_artifact(packages)
             
             # Write comprehensive stats data to S3 (to processed files bucket)
@@ -157,49 +161,21 @@ async def main() -> int:
             
             logger.info("Main database generation completed successfully!")
         
-        # Phase 3: Embedding Generation (if needed and enabled)
-        enable_embeddings = _truthy(os.environ.get("ENABLE_EMBEDDINGS", "true"))  # Default to enabled
-        if processing_mode in ("embedding", "both") and enable_embeddings:
-            logger.info("=== EMBEDDING GENERATION PHASE ===")
-            
-            # Set required environment for embedding generator
-            if not os.environ.get("BEDROCK_MODEL_ID"):
-                os.environ["BEDROCK_MODEL_ID"] = "amazon.titan-embed-text-v2:0"
-            if not os.environ.get("BEDROCK_OUTPUT_DIMENSIONS"):
-                os.environ["BEDROCK_OUTPUT_DIMENSIONS"] = "256"
-            
-            # Always use the main database for embeddings
-            if not os.environ.get("LANCEDB_PATH"):
-                os.environ["LANCEDB_PATH"] = main_db_path
-            
-            # Check for force rebuild flag
-            force_rebuild = _truthy(os.environ.get("FORCE_REBUILD_EMBEDDINGS"))
-            if force_rebuild:
-                logger.info("Force rebuild enabled - will regenerate all embeddings")
-            
-            # Ensure S3 key is set for main DB during embedding stage
-            if not os.environ.get("LANCEDB_DATA_KEY"):
-                os.environ["LANCEDB_DATA_KEY"] = "fdnix-data.lancedb"
-
-            generator = EmbeddingGenerator()
-            await generator.run(force_rebuild=force_rebuild)
-            logger.info("Embedding generation completed successfully!")
-        elif processing_mode in ("embedding", "both"):
-            logger.info("=== EMBEDDING GENERATION SKIPPED (EMBEDDINGS DISABLED) ===")
-            logger.info("ENABLE_EMBEDDINGS is set to false, skipping embedding generation")
+        # Note: Embedding generation phase removed - using FTS-only search with SQLite
+        # The system now only processes metadata and creates SQLite databases for FTS
 
         # Phase 4: Minified Database Generation (if requested)
         if processing_mode in ("minified", "both"):
             logger.info("=== MINIFIED DATABASE GENERATION PHASE ===")
-            minified_writer = LanceDBWriter(
+            minified_writer = SQLiteWriter(
                 output_path=minified_db_path,
                 s3_bucket=artifacts_bucket,
-                s3_key=os.environ.get("LANCEDB_MINIFIED_KEY"),
+                s3_key=os.environ.get("SQLITE_MINIFIED_KEY", os.environ.get("LANCEDB_MINIFIED_KEY")),  # Keep old env var for now
                 region=region,
             )
-            logger.info("Creating minified database from main database (with embeddings if present)...")
+            logger.info("Creating minified SQLite database from main database...")
             minified_writer.create_minified_db_from_main(main_db_path)
-            logger.info("Minified database generation completed successfully!")
+            logger.info("Minified SQLite database generation completed successfully!")
         
         # Phase 5: Individual Node S3 Writing (if requested and graph data available)
         enable_node_s3 = _truthy(os.environ.get("ENABLE_NODE_S3", "true"))
@@ -238,19 +214,19 @@ async def main() -> int:
             logger.info("=== INDIVIDUAL NODE S3 WRITING SKIPPED ===")
             logger.info("Node S3 writing requested but no graph data available (check ENABLE_NODE_S3 and data processing)")
         
-        # Phase 6: Publish LanceDB layer (if requested)
+        # Phase 6: Publish SQLite layer (if requested)
         if _truthy(os.environ.get("PUBLISH_LAYER")):
             logger.info("=== LAYER PUBLISH PHASE ===")
             layer_arn = os.environ.get("LAYER_ARN", "").strip()
             
             # Use minified key for layer publishing (from artifacts bucket)
-            key = os.environ.get("LANCEDB_MINIFIED_KEY", "")
+            key = os.environ.get("SQLITE_MINIFIED_KEY", os.environ.get("LANCEDB_MINIFIED_KEY", ""))
             if not key:
-                raise RuntimeError("LANCEDB_MINIFIED_KEY required for layer publishing")
+                raise RuntimeError("SQLITE_MINIFIED_KEY or LANCEDB_MINIFIED_KEY required for layer publishing")
 
             publisher = LayerPublisher(region=region)
             publisher.publish_from_s3(bucket=artifacts_bucket, key=key, layer_arn=layer_arn)
-            logger.info("Layer published using minified database from key: %s", key)
+            logger.info("Layer published using minified SQLite database from key: %s", key)
 
         logger.info("=== STAGE 2 COMPLETED SUCCESSFULLY ===")
         logger.info("Processing completed successfully!")

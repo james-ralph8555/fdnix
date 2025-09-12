@@ -1,22 +1,20 @@
 # nixpkgs-processor
 
-A container-based data processing pipeline that transforms raw nixpkgs package metadata into searchable, embedding-enriched vector databases for the fdnix search engine.
+A container-based data processing pipeline that transforms raw nixpkgs package metadata into searchable SQLite databases with full-text search capabilities for the fdnix search engine.
 
 ## Architecture Overview
 
-This processor implements a multi-phase data transformation pipeline that converts nix-eval-jobs JSONL output into optimized LanceDB vector databases with embedded semantic search capabilities.
+This processor implements a multi-phase data transformation pipeline that converts nix-eval-jobs JSONL output into optimized SQLite databases with full-text search capabilities.
 
 ```mermaid
 graph TB
     A[S3 JSONL Input] --> B[S3JsonlReader]
     B --> C[DataProcessor] 
-    C --> D[LanceDB Writer]
+    C --> D[SQLite Writer]
     C --> E[Dependency Writer]
-    D --> F[EmbeddingGenerator]
-    F --> G[Vector Index Creation]
-    G --> H[Minified DB Creation]
-    H --> I[Layer Publisher]
-    I --> J[S3 Artifact Upload]
+    D --> F[Minified DB Creation]
+    F --> G[Layer Publisher]
+    G --> H[S3 Artifact Upload]
     
     subgraph "Data Processing Phase"
         C
@@ -24,15 +22,10 @@ graph TB
         E
     end
     
-    subgraph "Embedding Phase"
+    subgraph "Publishing Phase"
         F
         G
-    end
-    
-    subgraph "Publishing Phase"
         H
-        I
-        J
     end
 ```
 
@@ -85,9 +78,9 @@ flowchart TD
     H --> J[LanceDB Dependency Table]
 ```
 
-### Phase 3: Database Creation (`lancedb_writer.py`)
+### Phase 3: Database Creation (`sqlite_writer.py`)
 
-Creates optimized LanceDB vector databases:
+Creates optimized SQLite databases with FTS capabilities:
 
 #### Package Table Schema
 - **Core Fields**: package_id, package_name, version, attribute_path
@@ -95,56 +88,18 @@ Creates optimized LanceDB vector databases:
 - **Metadata Fields**: license, maintainers, platforms, category
 - **Status Fields**: broken, unfree, available, insecure, unsupported
 - **Search Fields**: main_program, position, outputs_to_install
-- **Vector Fields**: has_embedding, content_hash, vector (256-dim)
+- **Metadata Fields**: content_hash
 
-#### Dependency Table Schema
-- **Identity**: package_id, pname, version, attribute_path
-- **Dependencies**: build_inputs, propagated_build_inputs (JSON arrays)
-- **Metrics**: total_dependencies count
+#### FTS Virtual Table Schema
+- **Search Fields**: package_id, package_name, attribute_path, description, long_description, main_program
+- **Content Storage**: Minimal (rowid reference only) - stores no actual content data
+- **Index Type**: SQLite FTS5 virtual table for efficient full-text search
 
 #### Index Creation
-- **FTS Index**: Full-text search on name, description, attribute_path
-- **Vector Index**: IVF-PQ index with cosine distance for semantic search
+- **FTS Index**: Full-text search on all text fields with SQLite FTS5
+- **Performance Indexes**: Regular indexes on package_name, category, and status fields
 
-### Phase 4: Embedding Generation (`embedding_generator.py`)
-
-Generates semantic embeddings using AWS Bedrock:
-
-#### Text Processing
-Creates embedding text by combining:
-- Package name and version
-- Main program name  
-- Description and long description
-- Homepage URL
-- License information
-- Maintainer details
-- Platform support
-- Attribute path
-
-#### Embedding Pipeline
-- **Content Hashing**: Uses content hashes for incremental updates
-- **Batch Processing**: Processes packages in configurable batches
-- **Rate Limiting**: Respects Bedrock API limits
-- **Incremental Updates**: Reuses existing embeddings for unchanged content
-- **Vector Indexing**: Creates IVF-PQ indexes for fast similarity search
-
-```mermaid
-sequenceDiagram
-    participant EG as EmbeddingGenerator
-    participant BC as BedrockClient
-    participant LDB as LanceDB
-    participant S3 as S3Storage
-    
-    EG->>LDB: Fetch packages needing embeddings
-    EG->>EG: Create embedding text
-    EG->>BC: Generate embeddings (batch)
-    BC-->>EG: Return vectors
-    EG->>LDB: Update packages with vectors
-    EG->>LDB: Create vector index
-    EG->>S3: Upload updated database
-```
-
-### Phase 5: Individual Node S3 Writing (`node_s3_writer.py`)
+### Phase 4: Individual Node S3 Writing (`node_s3_writer.py`)
 
 Creates individual JSON files for dependency viewer module:
 
@@ -177,18 +132,18 @@ s3://bucket/nodes/
 - **Clear Existing**: Optional cleanup of previous node files
 - **Index Generation**: Creates searchable index of all nodes
 
-### Phase 6: Minified Database Creation
+### Phase 5: Minified Database Creation
 
 Creates optimized subset for runtime:
 - **Column Filtering**: Keeps only essential fields for search
-- **Index Optimization**: Recreates FTS and vector indexes
+- **Index Optimization**: Recreates FTS indexes
 - **Size Reduction**: Removes debug/build-only metadata
 - **Performance**: Optimized for query response time
 
-### Phase 7: Layer Publishing (`layer_publisher.py`)
+### Phase 6: Layer Publishing (`layer_publisher.py`)
 
-Publishes LanceDB as AWS Lambda layer:
-- **Compression**: Packages minified database
+Publishes SQLite database as AWS Lambda layer:
+- **Compression**: Packages single database file into ZIP
 - **Version Management**: Updates Lambda layer versions
 - **Deployment**: Makes layer available to search APIs
 
@@ -201,21 +156,13 @@ Publishes LanceDB as AWS Lambda layer:
 - `JSONL_INPUT_KEY`: S3 key for input JSONL file (must point to the evaluator's brotli-compressed `.jsonl.br`)
 
 ### Processing Control
-- `PROCESSING_MODE`: `metadata` | `embedding` | `minified` | `both` (aliases `all`/`full` → `both`; default: `both`)
-- `ENABLE_EMBEDDINGS`: Enable/disable embedding generation (default: `true` in code)
-- `FORCE_REBUILD_EMBEDDINGS`: Regenerate all embeddings (default: `false`)
+- `PROCESSING_MODE`: `metadata` | `minified` | `both` (aliases `all`/`full` → `both`; default: `both`)
 - `ENABLE_NODE_S3`: Enable/disable individual node S3 writing (default: `true`)
 - `ENABLE_STATS`: Enable/disable writing aggregate stats JSON (default: `true`)
 
-### Bedrock Configuration
-- `BEDROCK_MODEL_ID`: Embedding model (default: `amazon.titan-embed-text-v2:0`)
-- `BEDROCK_OUTPUT_DIMENSIONS`: Vector dimensions (default: `256`)
-- `BEDROCK_MAX_RPM`: Rate limit (requests/minute)
-- `PROCESSING_BATCH_SIZE`: Embedding batch size (default: `100`)
-
 ### Output Configuration
-- `LANCEDB_DATA_KEY`: S3 key for main database (defaulted if unset)
-- `LANCEDB_MINIFIED_KEY`: S3 key for minified database (defaulted if unset)
+- `SQLITE_DATA_KEY`: S3 key for main database (defaulted if unset, backward compatible with `LANCEDB_DATA_KEY`)
+- `SQLITE_MINIFIED_KEY`: S3 key for minified database (defaulted if unset, backward compatible with `LANCEDB_MINIFIED_KEY`)
 - `STATS_S3_KEY`: S3 key for stats JSON (defaulted if unset)
 - `NODE_S3_PREFIX`: S3 prefix for individual node files (default: `nodes/`)
 - `CLEAR_EXISTING_NODES`: Clear existing node files before upload (default: `true`)
@@ -228,10 +175,10 @@ Publishes LanceDB as AWS Lambda layer:
 ## Container Deployment
 
 Built on `nixos/nix` with Python dependencies via Nix:
-- LanceDB for vector storage
+- SQLite for database storage with FTS5
+- SQLAlchemy for database operations
 - Boto3 for AWS integration  
 - Pandas for data processing
-- AWS Bedrock SDK for embeddings
 
 Entry point: `python src/index.py`
 
@@ -240,14 +187,13 @@ Entry point: `python src/index.py`
 Build:
 - `docker build -t fdnix/nixpkgs-processor packages/containers/nixpkgs-processor`
 
-Run (reads evaluator output and generates artifacts without embeddings):
+Run (reads evaluator output and generates SQLite artifacts):
 - `docker run --rm \
     -e AWS_REGION=us-east-1 \
     -e ARTIFACTS_BUCKET=fdnix-artifacts \
     -e PROCESSED_FILES_BUCKET=fdnix-processed \
     -e JSONL_INPUT_KEY=evaluations/<ts>/nixpkgs-raw.jsonl.br \
     -e PROCESSING_MODE=both \
-    -e ENABLE_EMBEDDINGS=false \
     fdnix/nixpkgs-processor`
 
 ## Error Handling

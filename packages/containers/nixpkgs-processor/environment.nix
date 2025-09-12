@@ -17,10 +17,10 @@ in
     pydantic
     pandas
     pyarrow
-    lancedb
-    pylance
-    graph-tool
+    sqlalchemy
+    alembic
     brotli
     pip
+    graph-tool
   ]))
 ]
