@@ -5,6 +5,7 @@ import { FdnixDatabaseStack } from '../lib/database-stack';
 import { FdnixPipelineStack } from '../lib/pipeline-stack';
 import { FdnixSearchApiStack } from '../lib/search-api-stack';
 import { FdnixFrontendStack } from '../lib/frontend-stack';
+import { FdnixCloudFrontStack } from '../lib/cloudfront-stack';
 import { FdnixCertificateStack } from '../lib/certificate-stack';
 
 const app = new cdk.App();
@@ -63,18 +64,6 @@ const searchApiStack = new FdnixSearchApiStack(app, stackId('SearchApiStack'), {
   },
 });
 
-// Certificate Stack - ACM certificate for custom domain (us-east-1)
-const certificateStack = new FdnixCertificateStack(app, stackId('CertificateStack'), {
-  env,
-  description: 'ACM certificate for fdnix frontend custom domain',
-  tags: {
-    Project: 'fdnix',
-    Component: 'certificate',
-    Environment: envTag,
-  },
-  domainName,
-});
-
 // Frontend Stack - Static site hosting
 const frontendStack = new FdnixFrontendStack(app, stackId('FrontendStack'), {
   env,
@@ -87,11 +76,38 @@ const frontendStack = new FdnixFrontendStack(app, stackId('FrontendStack'), {
   },
 });
 
+// Certificate Stack - ACM certificate for custom domain (us-east-1)
+const certificateStack = new FdnixCertificateStack(app, stackId('CertificateStack'), {
+  env,
+  description: 'ACM certificate for fdnix frontend custom domain',
+  tags: {
+    Project: 'fdnix',
+    Component: 'certificate',
+    Environment: envTag,
+  },
+  domainName,
+});
+
+// CloudFront Stack - CDN distribution
+const cloudFrontStack = new FdnixCloudFrontStack(app, stackId('CloudFrontStack'), {
+  env,
+  frontendStack,
+  searchApiStack,
+  certificateArn: Fn.importValue('FdnixCertificateArn'),
+  description: 'CloudFront distribution for fdnix frontend',
+  tags: {
+    Project: 'fdnix',
+    Component: 'cloudfront',
+    Environment: envTag,
+  },
+});
+
 // Stack dependencies
 pipelineStack.addDependency(databaseStack);
 searchApiStack.addDependency(databaseStack);
 frontendStack.addDependency(searchApiStack);
-frontendStack.addDependency(certificateStack);
+cloudFrontStack.addDependency(frontendStack);
+cloudFrontStack.addDependency(certificateStack);
 
 // Cross-stack outputs are handled within each individual stack
 
