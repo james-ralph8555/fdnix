@@ -5,7 +5,6 @@ import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import * as path from 'path';
 import * as fs from 'fs';
 import { FdnixFrontendStack } from './frontend-stack';
@@ -92,9 +91,7 @@ export class FdnixCloudFrontStack extends Stack {
           responsePagePath: '/index.html',
           ttl: Duration.minutes(5),
         },
-      },
-      certificate: acm.Certificate.fromCertificateArn(this, 'ImportedCertificate', certificateArn),
-      domainNames: [domainName, `www.${domainName}`],
+      ],
       minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
       httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,

@@ -49,8 +49,6 @@ export class FdnixFrontendStack extends Stack {
         s3deploy.Source.asset(path.join(__dirname, '../../frontend/dist')),
       ],
       destinationBucket: this.hostingBucket,
-      distribution: this.distribution,
-      distributionPaths: ['/*'],
       memoryLimit: 512,
       ephemeralStorageSize: Size.mebibytes(1024),
     });

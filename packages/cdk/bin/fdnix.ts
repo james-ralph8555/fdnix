@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
+import { Fn } from 'aws-cdk-lib';
 import { FdnixDatabaseStack } from '../lib/database-stack';
 import { FdnixPipelineStack } from '../lib/pipeline-stack';
 import { FdnixSearchApiStack } from '../lib/search-api-stack';
@@ -107,7 +108,6 @@ pipelineStack.addDependency(databaseStack);
 searchApiStack.addDependency(databaseStack);
 frontendStack.addDependency(searchApiStack);
 cloudFrontStack.addDependency(frontendStack);
-cloudFrontStack.addDependency(certificateStack);
 
 // Cross-stack outputs are handled within each individual stack
 
