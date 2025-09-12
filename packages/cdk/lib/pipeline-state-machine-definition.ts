@@ -44,15 +44,6 @@ export function createPipelineStateMachineDefinition(
     resultPath: '$.EvaluatorResult',
   });
 
-  // Set default keys for outputs not provided in input
-  const setDefaultKeys = new stepfunctions.Pass(scope, 'SetDefaultKeys', {
-    parameters: {
-      'jsonlInputKey.$': '$.JSONL_INPUT_KEY',
-      'lancedbDataKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
-      'lancedbMinifiedKey.$': stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime')),
-      'dependencyS3Key.$': stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
-    }
-  });
 
 
   // Stage 2a: Processor Task (when using existing JSONL outputs, skipping evaluation)
@@ -71,19 +62,19 @@ export function createPipelineStateMachineDefinition(
       environment: [
         {
           name: 'JSONL_INPUT_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.jsonlInputKey')
+          value: stepfunctions.JsonPath.stringAt('$.JSONL_INPUT_KEY')
         },
         {
           name: 'LANCEDB_DATA_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.lancedbDataKey')
+          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_DATA_KEY')
         },
         {
           name: 'LANCEDB_MINIFIED_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.lancedbMinifiedKey')
+          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_MINIFIED_KEY')
         },
         {
           name: 'DEPENDENCY_S3_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.dependencyS3Key')
+          value: stepfunctions.JsonPath.stringAt('$.DEPENDENCY_S3_KEY')
         }
       ]
     }],
@@ -106,19 +97,19 @@ export function createPipelineStateMachineDefinition(
       environment: [
         {
           name: 'JSONL_INPUT_KEY',
-          value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl.br', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          value: stepfunctions.JsonPath.stringAt('$.JSONL_INPUT_KEY')
         },
         {
           name: 'LANCEDB_DATA_KEY',
-          value: stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_DATA_KEY')
         },
         {
           name: 'LANCEDB_MINIFIED_KEY',
-          value: stepfunctions.JsonPath.format('snapshots/{}/fdnix.lancedb', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_MINIFIED_KEY')
         },
         {
           name: 'DEPENDENCY_S3_KEY',
-          value: stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
+          value: stepfunctions.JsonPath.stringAt('$.DEPENDENCY_S3_KEY')
         }
       ]
     }],
@@ -129,14 +120,14 @@ export function createPipelineStateMachineDefinition(
   const checkForExistingOutputs = new stepfunctions.Choice(scope, 'CheckForExistingOutputs')
     .when(
       stepfunctions.Condition.isPresent('$.JSONL_INPUT_KEY'),
-      setDefaultKeys.next(processorTask)
+      processorTask
     )
     .otherwise(
       evaluatorTask.next(processorTaskWithEvaluatorOutput)
     );
 
   // Define the conditional pipeline:
-  // Path 1: JSONL provided -> SetDefaultKeys -> ApplyDefaults -> ProcessorTask (skip evaluation)
+  // Path 1: All parameters provided -> ProcessorTask (skip evaluation)
   // Path 2: No JSONL -> EvaluatorTask -> ProcessorTaskWithEvaluatorOutput (full pipeline)
   return checkForExistingOutputs;
 }

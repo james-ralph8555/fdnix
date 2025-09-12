@@ -6,7 +6,7 @@ class GraphService {
 
   constructor() {
     // Use CloudFront path for graph data
-    this.bucketUrl = '/graph';
+    this.bucketUrl = '/nodes';
   }
 
   async fetchPackageNode(nodeId: string): Promise<PackageNodeData | null> {
@@ -15,7 +15,7 @@ class GraphService {
     }
 
     try {
-      const url = `${this.bucketUrl}/${nodeId}.json`;
+      const url = `${this.bucketUrl}/${nodeId}.json.br`;
       const response = await fetch(url, {
         headers: {
           'Accept': 'application/json',
@@ -31,18 +31,8 @@ class GraphService {
         throw new Error(`Failed to fetch package node: ${response.statusText}`);
       }
 
-      let data: PackageNodeData;
-      
-      const contentEncoding = response.headers.get('Content-Encoding');
-      if (contentEncoding?.includes('br')) {
-        const buffer = await response.arrayBuffer();
-        const decompressed = new DecompressionStream('gzip');
-        const stream = new Response(buffer).body?.pipeThrough(decompressed);
-        const text = await new Response(stream).text();
-        data = JSON.parse(text);
-      } else {
-        data = await response.json();
-      }
+      // Browser automatically handles brotli decompression when Content-Encoding: br is set
+      const data: PackageNodeData = await response.json();
 
       this.cache.set(nodeId, data);
       return data;
@@ -92,7 +82,9 @@ class GraphService {
     );
 
     mainPackage.dependencies.direct.forEach((depName) => {
-      const depId = `${depName}-${mainPackage.version}`;
+      // Use a placeholder version for dependency nodes since we don't have the actual version
+      // These will be properly resolved when the node is expanded
+      const depId = `${depName}-unknown`;
       addNode(depId, depName, 'dependency');
       
       links.push({
@@ -103,7 +95,9 @@ class GraphService {
     });
 
     mainPackage.dependents.direct.forEach((depName) => {
-      const depId = `${depName}-dependent`;
+      // Use a placeholder for dependent nodes since we don't have the actual version
+      // These will be properly resolved when the node is expanded
+      const depId = `${depName}-unknown`;
       addNode(depId, depName, 'dependent');
       
       links.push({
@@ -130,7 +124,8 @@ class GraphService {
     }
 
     packageData.dependencies.direct.forEach((depName) => {
-      const depId = `${depName}-${packageData.version}`;
+      // Use a placeholder version for dependency nodes since we don't know their actual versions
+      const depId = `${depName}-unknown`;
       
       if (!existingNodeIds.has(depId)) {
         newNodes.push({
@@ -156,7 +151,8 @@ class GraphService {
     });
 
     packageData.dependents.direct.forEach((depName) => {
-      const depId = `${depName}-dependent`;
+      // Use a placeholder for dependent nodes since we don't know their actual versions
+      const depId = `${depName}-unknown`;
       
       if (!existingNodeIds.has(depId)) {
         newNodes.push({

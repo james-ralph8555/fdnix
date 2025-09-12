@@ -72,10 +72,17 @@ export function SearchResults(props: SearchResultsProps) {
 
       {/* Dependency Graph Modal */}
       <Show when={showDependencyGraph()}>
-        <DependencyGraph
-          packageName={showDependencyGraph()!}
-          onClose={() => setShowDependencyGraph(null)}
-        />
+        {(() => {
+          const nodeId = showDependencyGraph()!;
+          const packageName = nodeId.split('-')[0]; // Extract package name from nodeId
+          return (
+            <DependencyGraph
+              packageName={packageName}
+              nodeId={nodeId}
+              onClose={() => setShowDependencyGraph(null)}
+            />
+          );
+        })()}
       </Show>
     </div>
   );
@@ -147,7 +154,7 @@ function PackageCard(props: PackageCardProps) {
         
         <div class="ml-4 flex gap-2">
           <button
-            onClick={() => onShowGraph(pkg.packageName)}
+            onClick={() => onShowGraph(`${pkg.packageName}-${pkg.version}`)}
             class="btn-secondary text-sm"
             title="View dependency graph"
           >

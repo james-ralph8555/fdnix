@@ -99,8 +99,8 @@ export interface GraphData {
 }
 
 export interface DependencyGraphProps {
-  packageName: string;
-  packageVersion?: string;
+  packageName: string; // Display name for the UI
+  nodeId: string; // Full nodeId for API requests (packageName-version)
   onClose: () => void;
 }
 

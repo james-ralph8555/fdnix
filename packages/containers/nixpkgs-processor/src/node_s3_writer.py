@@ -216,8 +216,8 @@ class NodeS3Writer:
             try:
                 node_id = node.get("nodeId", "unknown")
                 
-                # Create S3 key for this node
-                s3_key = f"{self.s3_prefix}{node_id}.json"
+                # Create S3 key for this node with .br extension for brotli compression
+                s3_key = f"{self.s3_prefix}{node_id}.json.br"
                 
                 # Convert to compact JSON and compress with brotli
                 json_data = json.dumps(node, separators=(',', ':'), sort_keys=True)
@@ -344,7 +344,7 @@ class NodeS3Writer:
             
             # Upload index file with brotli compression
             s3_client = self._get_s3_client()
-            index_key = f"{self.s3_prefix}index.json"
+            index_key = f"{self.s3_prefix}index.json.br"
             json_data = json.dumps(index_data, separators=(',', ':'), sort_keys=True)
             compressed_data = brotli.compress(
                 json_data.encode('utf-8'),

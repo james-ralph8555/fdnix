@@ -75,6 +75,7 @@ export class FdnixFrontendStack extends Stack {
     };
 
     // S3 behavior for dependency graph data (from processed files bucket)
+
     const s3Behavior: cloudfront.BehaviorOptions = {
       origin: origins.S3BucketOrigin.withOriginAccessControl(processedFilesBucket, {
         originAccessControl: this.oac,
@@ -90,7 +91,7 @@ export class FdnixFrontendStack extends Stack {
       defaultBehavior,
       additionalBehaviors: {
         '/api/*': apiBehavior,
-        '/graph/*': s3Behavior,
+        '/nodes/*': s3Behavior,
       },
       defaultRootObject: 'index.html',
       errorResponses: [
@@ -119,7 +120,7 @@ export class FdnixFrontendStack extends Stack {
     // Grant CloudFront OAC access to processed files bucket for dependency graph files
     processedFilesBucket.grantRead(
       new iam.ServicePrincipal('cloudfront.amazonaws.com'),
-      'graph/*'
+      'nodes/*'
     );
 
     // DNS is managed by Cloudflare

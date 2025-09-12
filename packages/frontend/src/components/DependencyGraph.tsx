@@ -57,7 +57,7 @@ export function DependencyGraph(props: DependencyGraphProps) {
       d3 = await loadD3();
 
       // Fetch initial package data
-      const packageData = await graphService.fetchPackageNode(props.packageName);
+      const packageData = await graphService.fetchPackageNode(props.nodeId);
       if (!packageData) {
         setError(`Package "${props.packageName}" not found`);
         return;

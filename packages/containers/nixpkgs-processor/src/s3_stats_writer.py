@@ -54,11 +54,14 @@ class S3StatsWriter:
         logger.info("Uploading compressed stats data to s3://%s/%s (compression: %d -> %d bytes)", 
                    self.s3_bucket, self.s3_key, len(json_data.encode('utf-8')), len(compressed_data))
         
+        # Ensure stats key has .br suffix for brotli compression
+        stats_key = self.s3_key if self.s3_key.endswith('.br') else f"{self.s3_key}.br"
+        
         # Upload to S3 with appropriate content encoding
         s3 = boto3.client("s3", region_name=self.region)
         s3.put_object(
             Bucket=self.s3_bucket,
-            Key=self.s3_key,
+            Key=stats_key,
             Body=compressed_data,
             ContentType='application/json',
             ContentEncoding='br'  # Indicate brotli compression
