@@ -5,8 +5,8 @@ Run complete nixpkgs evaluation + processing:
 
 ```json
 {
-  "LANCEDB_DATA_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix-data.lancedb",
-  "LANCEDB_MINIFIED_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix.lancedb",
+  "SQLITE_DATA_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix-data.db",
+  "SQLITE_MINIFIED_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix.db",
   "DEPENDENCY_S3_KEY": "dependencies/2025-09-11T18:48:01.632Z/fdnix-deps.json"
 }
 ```
@@ -17,8 +17,8 @@ Skip evaluation, process existing data (brotli-compressed JSONL required):
 ```json
 {
   "JSONL_INPUT_KEY": "evaluations/2025-09-11T18:48:01.632Z/nixpkgs-raw.jsonl.br",
-  "LANCEDB_DATA_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix-data.lancedb",
-  "LANCEDB_MINIFIED_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix.lancedb",
+  "SQLITE_DATA_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix-data.db",
+  "SQLITE_MINIFIED_KEY": "snapshots/2025-09-11T18:48:01.632Z/fdnix.db",
   "DEPENDENCY_S3_KEY": "dependencies/2025-09-11T18:48:01.632Z/fdnix-deps.json"
 }
 ```

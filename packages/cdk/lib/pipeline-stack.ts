@@ -91,7 +91,7 @@ export class FdnixPipelineStack extends Stack {
     // ECS Cluster
     this.cluster = new ecs.Cluster(this, 'ProcessingCluster', {
       vpc,
-      containerInsightsV2: ecs.ContainerInsights.ENHANCED,
+      containerInsights: false,
     });
 
     // ECR Repositories for both stages
