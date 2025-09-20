@@ -65,12 +65,12 @@ export function createPipelineStateMachineDefinition(
           value: stepfunctions.JsonPath.stringAt('$.JSONL_INPUT_KEY')
         },
         {
-          name: 'LANCEDB_DATA_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_DATA_KEY')
+          name: 'SQLITE_DATA_KEY',
+          value: stepfunctions.JsonPath.stringAt('$.SQLITE_DATA_KEY')
         },
         {
-          name: 'LANCEDB_MINIFIED_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_MINIFIED_KEY')
+          name: 'SQLITE_MINIFIED_KEY',
+          value: stepfunctions.JsonPath.stringAt('$.SQLITE_MINIFIED_KEY')
         },
         {
           name: 'DEPENDENCY_S3_KEY',
@@ -97,19 +97,19 @@ export function createPipelineStateMachineDefinition(
       environment: [
         {
           name: 'JSONL_INPUT_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.JSONL_INPUT_KEY')
+          value: stepfunctions.JsonPath.format('evaluations/{}/nixpkgs-raw.jsonl.br', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
         },
         {
-          name: 'LANCEDB_DATA_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_DATA_KEY')
+          name: 'SQLITE_DATA_KEY',
+          value: stepfunctions.JsonPath.format('snapshots/{}/fdnix-data.db', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
         },
         {
-          name: 'LANCEDB_MINIFIED_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.LANCEDB_MINIFIED_KEY')
+          name: 'SQLITE_MINIFIED_KEY',
+          value: stepfunctions.JsonPath.format('snapshots/{}/fdnix.db', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
         },
         {
           name: 'DEPENDENCY_S3_KEY',
-          value: stepfunctions.JsonPath.stringAt('$.DEPENDENCY_S3_KEY')
+          value: stepfunctions.JsonPath.format('dependencies/{}/fdnix-deps.json', stepfunctions.JsonPath.stringAt('$$.Execution.StartTime'))
         }
       ]
     }],
