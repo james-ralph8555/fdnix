@@ -21,7 +21,7 @@ class DataProcessor:
             raw_packages: List of raw package dictionaries from nix-eval-jobs
             
         Returns:
-            List of package metadata (for main LanceDB)
+            List of package metadata (for main SQLite database)
         """
         logger.info("Processing %d raw packages from Stage 1...", len(raw_packages))
         
@@ -39,7 +39,7 @@ class DataProcessor:
             
         Returns:
             Tuple of (packages, graph_data) where:
-            - packages: List of package metadata (for LanceDB)
+            - packages: List of package metadata (for SQLite database)
             - graph_data: Comprehensive dependency graph information (for individual node S3 files and stats)
         """
         logger.info("Processing %d raw packages with dependency graph...", len(raw_packages))
@@ -108,7 +108,7 @@ class DataProcessor:
                     "lastUpdated": current_ts,
                 })
 
-                if len(processed) % 1000 == 0:
+                if len(processed) % 10000 == 0:
                     logger.info("Processed %d packages...", len(processed))
 
             except Exception as e:  # keep processing

@@ -532,7 +532,7 @@ class DependencyGraphProcessor:
                 }
                 
                 node_count += 1
-                if node_count % 1000 == 0:
+                if node_count % 10000 == 0:
                     logger.info("Processed dependency info for %d nodes...", node_count)
                     
             except Exception as e:

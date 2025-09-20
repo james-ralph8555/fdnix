@@ -52,7 +52,7 @@ pub async fn handle_search_request(
 
     // Convert packages to JSON values for response
     let packages_json: Vec<Value> = results.packages.into_iter().map(|pkg| {
-        json!({
+        let mut package_json = json!({
             "packageId": pkg.package_id,
             "packageName": pkg.package_name,
             "version": pkg.version,
@@ -65,7 +65,36 @@ pub async fn handle_search_request(
             "unfree": pkg.unfree,
             "available": pkg.available,
             "relevanceScore": pkg.relevance_score
-        })
+        });
+        
+        // Add additional fields if available (from minified data)
+        if let Some(maintainers) = pkg.maintainers {
+            package_json["maintainers"] = Value::Array(maintainers);
+        }
+        if let Some(platforms) = pkg.platforms {
+            package_json["platforms"] = Value::Array(
+                platforms.into_iter().map(Value::String).collect()
+            );
+        }
+        if let Some(long_desc) = pkg.long_description {
+            package_json["longDescription"] = Value::String(long_desc);
+        }
+        if let Some(main_program) = pkg.main_program {
+            package_json["mainProgram"] = Value::String(main_program);
+        }
+        if let Some(position) = pkg.position {
+            package_json["position"] = Value::String(position);
+        }
+        if let Some(outputs) = pkg.outputs_to_install {
+            package_json["outputsToInstall"] = Value::Array(
+                outputs.into_iter().map(Value::String).collect()
+            );
+        }
+        if let Some(last_updated) = pkg.last_updated {
+            package_json["lastUpdated"] = Value::String(last_updated);
+        }
+        
+        package_json
     }).collect();
 
     Ok(SearchResponseBody {
@@ -94,11 +123,11 @@ pub async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send
     info!("Starting fdnix-search-api Rust Lambda v{}", env!("CARGO_PKG_VERSION"));
 
     // Initialize SQLite client with path validation
-    let sqlite_client = match get_sqlite_path().await {
-        Ok(sqlite_path) => {
-            info!("Initializing SQLite client with path: {}", sqlite_path);
+    let sqlite_client = match get_sqlite_paths().await {
+        Ok((sqlite_path, dict_path)) => {
+            info!("Initializing SQLite client with database: {}, dictionary: {}", sqlite_path, dict_path);
             let start_time = std::time::Instant::now();
-            match SQLiteClient::new(&sqlite_path) {
+            match SQLiteClient::new(&sqlite_path, &dict_path) {
                 Ok(mut client) => {
                     match client.initialize().await {
                         Ok(_) => {
@@ -117,7 +146,7 @@ pub async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send
             }
         }
         Err(e) => {
-            return Err(format!("Failed to find valid SQLite path: {}", e).into());
+            return Err(format!("Failed to find valid SQLite paths: {}", e).into());
         }
     };
 
@@ -210,18 +239,24 @@ pub fn extract_query_params(params: &Option<HashMap<String, String>>) -> (String
 }
 
 
-pub async fn get_sqlite_path() -> Result<String, String> {
-    // SQLite database path
-    let sqlite_path = "/opt/fdnix/fdnix.db";
+pub async fn get_sqlite_paths() -> Result<(String, String), String> {
+    // Check for minified database and dictionary
+    let db_path = "/opt/fdnix/minified.db";
+    let dict_path = "/opt/fdnix/shared.dict";
     
-    info!("Checking SQLite database path: {}", sqlite_path);
-    
-    if std::path::Path::new(sqlite_path).exists() {
-        info!("Valid SQLite database found at: {}", sqlite_path);
-        Ok(sqlite_path.to_string())
-    } else {
-        Err(format!("SQLite database not found at: {}. Ensure the database layer is properly attached.", sqlite_path))
+    // Validate both files exist
+    if !std::path::Path::new(db_path).exists() {
+        return Err(format!("Minified SQLite database not found at: {}", db_path));
     }
+    
+    if !std::path::Path::new(dict_path).exists() {
+        return Err(format!("Compression dictionary not found at: {}", dict_path));
+    }
+    
+    info!("Valid minified SQLite database found at: {}", db_path);
+    info!("Valid compression dictionary found at: {}", dict_path);
+    
+    Ok((db_path.to_string(), dict_path.to_string()))
 }
 
 pub async fn create_health_check_response(query_param: String) -> SearchResponseBody {
@@ -246,9 +281,17 @@ pub async fn create_health_check_response(query_param: String) -> SearchResponse
         bedrock_healthy: None,
     };
 
-    // Check SQLite client health
+    // Check SQLite client health and schema type
     if let Some(sqlite_client) = SQLITE_CLIENT.get().and_then(|c| c.as_ref()) {
-        response.lancedb_healthy = Some(sqlite_client.health_check().await);
+        let is_healthy = sqlite_client.health_check().await;
+        response.lancedb_healthy = Some(is_healthy);
+        
+        if is_healthy {
+            // Determine schema type from client state
+            {
+                response.message = "fdnix search API (Rust) — SQLite FTS with minified data active".to_string();
+                response.note = Some("This is a Rust Lambda with SQLite FTS search using Zstandard-compressed data.".to_string());
+          }
     }
 
     response

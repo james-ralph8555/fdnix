@@ -74,21 +74,76 @@ flowchart TD
     
     F --> H[Dependency Record]
     
-    G --> I[LanceDB Package Table]
-    H --> J[LanceDB Dependency Table]
+    G --> I[SQLite Package Table]
+    H --> J[SQLite Dependency Table]
 ```
 
 ### Phase 3: Database Creation (`sqlite_writer.py`)
 
-Creates optimized SQLite databases with FTS capabilities:
+Creates optimized SQLite databases with normalized schema and FTS capabilities:
 
-#### Package Table Schema
-- **Core Fields**: package_id, package_name, version, attribute_path
-- **Content Fields**: description, long_description, homepage
-- **Metadata Fields**: license, maintainers, platforms, category
-- **Status Fields**: broken, unfree, available, insecure, unsupported
-- **Search Fields**: main_program, position, outputs_to_install
-- **Metadata Fields**: content_hash
+#### Normalized Database Schema
+
+The database uses a normalized design to eliminate data duplication and improve storage efficiency:
+
+**Lookup Tables:**
+- **licenses**: Unique license information (short_name, full_name, spdx_id, url, is_free, is_redistributable, is_deprecated)
+- **architectures**: Unique architecture names (~20 total systems like x86_64-linux, aarch64-darwin)
+- **maintainers**: Unique maintainer information (name, email, github, github_id)
+
+**Main Package Table:**
+- **Core Fields**: package_id, package_name, version, attribute_path, description, long_description, homepage
+- **Metadata Fields**: category, broken, unfree, available, insecure, unsupported
+- **Search Fields**: main_program, position, outputs_to_install, content_hash
+
+**Junction Tables:**
+- **package_licenses**: Many-to-many relationship between packages and licenses
+- **package_architectures**: Many-to-many relationship between packages and supported architectures  
+- **package_maintainers**: Many-to-many relationship between packages and maintainers
+
+**Package Variations Table:**
+- **package_variations**: Specific package-system combinations with drv_path and outputs
+
+#### Schema Diagram
+```sql
+-- Main packages table (one row per unique package)
+CREATE TABLE packages (
+    package_id TEXT PRIMARY KEY,
+    package_name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    -- ... other package metadata fields
+);
+
+-- Lookup tables for normalization
+CREATE TABLE licenses (license_id INTEGER PRIMARY KEY, short_name TEXT UNIQUE, ...);
+CREATE TABLE architectures (arch_id INTEGER PRIMARY KEY, name TEXT UNIQUE, ...);
+CREATE TABLE maintainers (maintainer_id INTEGER PRIMARY KEY, name, email, github, ...);
+
+-- Junction tables for relationships
+CREATE TABLE package_licenses (package_id TEXT, license_id INTEGER, PRIMARY KEY(...));
+CREATE TABLE package_architectures (package_id TEXT, arch_id INTEGER, PRIMARY KEY(...));
+CREATE TABLE package_maintainers (package_id TEXT, maintainer_id INTEGER, PRIMARY KEY(...));
+
+-- Package variations (package + system combinations)
+CREATE TABLE package_variations (variation_id TEXT PRIMARY KEY, package_id TEXT, system TEXT, ...);
+```
+
+#### Normalization Benefits
+
+**Storage Efficiency:**
+- Eliminates duplicate JSON storage for licenses, architectures, and maintainers
+- Reduces database size by ~90% compared to denormalized approach
+- Integer foreign keys replace large JSON objects
+
+**Query Performance:**
+- Faster joins using integer foreign keys vs JSON parsing
+- Optimized indexes on small lookup tables
+- Efficient filtering by license, architecture, or maintainer
+
+**Data Integrity:**
+- Referential integrity ensures consistent relationships
+- No duplicate license/architecture/maintainer entries
+- Centralized metadata management
 
 #### FTS Virtual Table Schema
 - **Search Fields**: package_id, package_name, attribute_path, description, long_description, main_program
@@ -98,8 +153,49 @@ Creates optimized SQLite databases with FTS capabilities:
 #### Index Creation
 - **FTS Index**: Full-text search on all text fields with SQLite FTS5
 - **Performance Indexes**: Regular indexes on package_name, category, and status fields
+- **Normalized Indexes**: Optimized indexes on all lookup and junction tables for fast relationship queries
 
-### Phase 4: Individual Node S3 Writing (`node_s3_writer.py`)
+### Phase 4: Minified Database Creation (`minified_writer.py`)
+
+Creates highly compressed SQLite databases using zstd dictionary-based compression for optimal storage efficiency:
+
+#### Compression Architecture
+- **Dictionary Training**: Samples package data to create optimized compression dictionary
+- **Key-Value Storage**: Compressed package data stored as BLOBs in SQLite
+- **FTS5 External Content**: Searchable metadata linked to compressed content
+- **Artifacts**: Generates both `minified.db` and `shared.dict` files
+
+#### Schema
+```sql
+-- Compressed key-value store
+CREATE TABLE packages_kv (
+    id TEXT PRIMARY KEY,
+    data BLOB NOT NULL
+);
+
+-- FTS5 with external content linkage
+CREATE VIRTUAL TABLE packages_fts USING fts5(
+    id,
+    name,
+    description,
+    content='packages_kv',
+    content_rowid='id'
+);
+```
+
+#### Compression Process
+1. **Dictionary Training**: Analyze ~10,000 package samples to create optimal compression dictionary
+2. **Data Compression**: Compress each package JSON using the trained dictionary
+3. **Storage**: Store compressed BLOBs in key-value table with searchable metadata
+4. **Optimization**: Apply VACUUM to minimize final database size
+
+#### Benefits
+- **High Compression Ratios**: Dictionary-based compression optimized for package data
+- **Fast Search**: FTS5 with external content provides full-text search capabilities
+- **Small Footprint**: Significantly reduced storage requirements
+- **Built-in zstd**: Uses Python 3.14's native zstd module, no external dependencies
+
+### Phase 5: Individual Node S3 Writing (`node_s3_writer.py`)
 
 Creates individual JSON files for dependency viewer module:
 
@@ -111,7 +207,7 @@ Creates individual JSON files for dependency viewer module:
 
 #### Node File Generation
 Each package becomes a separate S3 JSON file containing:
-- **Core Metadata**: All LanceDB fields (excluding embeddings/FTS)
+- **Core Metadata**: All SQLite fields (excluding embeddings/FTS)
 - **Dependencies**: Direct and transitive dependency lists
 - **Dependents**: Packages that depend on this package
 - **Metrics**: Dependency counts and relationship statistics
@@ -132,7 +228,7 @@ s3://bucket/nodes/
 - **Clear Existing**: Optional cleanup of previous node files
 - **Index Generation**: Creates searchable index of all nodes
 
-### Phase 5: Minified Database Creation
+### Phase 6: Minified Database Creation
 
 Creates optimized subset for runtime:
 - **Column Filtering**: Keeps only essential fields for search
@@ -140,7 +236,7 @@ Creates optimized subset for runtime:
 - **Size Reduction**: Removes debug/build-only metadata
 - **Performance**: Optimized for query response time
 
-### Phase 6: Layer Publishing (`layer_publisher.py`)
+### Phase 7: Layer Publishing (`layer_publisher.py`)
 
 Publishes SQLite database as AWS Lambda layer:
 - **Compression**: Packages single database file into ZIP
@@ -151,7 +247,7 @@ Publishes SQLite database as AWS Lambda layer:
 
 ### Required Variables
 - `AWS_REGION`: AWS region for services
-- `ARTIFACTS_BUCKET`: S3 bucket for input JSONL and LanceDB artifacts
+- `ARTIFACTS_BUCKET`: S3 bucket for input JSONL and SQLite artifacts
 - `PROCESSED_FILES_BUCKET`: S3 bucket for stats JSON and per-package node JSON files
 - `JSONL_INPUT_KEY`: S3 key for input JSONL file (must point to the evaluator's brotli-compressed `.jsonl.br`)
 
@@ -168,19 +264,36 @@ Publishes SQLite database as AWS Lambda layer:
 - `CLEAR_EXISTING_NODES`: Clear existing node files before upload (default: `true`)
 - `NODE_S3_MAX_WORKERS`: Max parallel threads for node uploads (default: `10`)
 
+### Zstd Compression Configuration
+- `ZSTD_DICT_SIZE`: Dictionary size in bytes for zstd compression (default: 65536)
+- `ZSTD_SAMPLE_COUNT`: Number of package samples for dictionary training (default: 10000)
+- `ZSTD_COMPRESSION_LEVEL`: zstd compression level (default: 3)
+
 ### Layer Publishing (optional)
 - `PUBLISH_LAYER`: When `true`, publishes the minified database to the Lambda layer
 - `LAYER_ARN`: Target Lambda layer ARN
 
 ## Container Deployment
 
-Built on `nixos/nix` with Python dependencies via Nix:
+Built on `nixos/nix` with Python 3.14 dependencies via Nix:
 - SQLite for database storage with FTS5
+- zstd for dictionary-based compression (built-in to Python 3.14)
+- Brotli for S3 upload compression
 - SQLAlchemy for database operations
 - Boto3 for AWS integration  
 - Pandas for data processing
 
 Entry point: `python src/index.py`
+
+## Artifacts
+
+The processor generates the following artifacts:
+- **Main Database**: Complete SQLite database with all package data
+- **Minified Database**: Highly compressed SQLite database using zstd with shared dictionary
+- **Compression Dictionary**: Shared dictionary file for optimal decompression
+- **Stats JSON**: Comprehensive dependency and package statistics
+- **Node Files**: Individual package JSON files for dependency viewer (optional)
+- **Lambda Layer**: Compressed database packaged as AWS Lambda layer (optional)
 
 ## Build & Run (examples)
 

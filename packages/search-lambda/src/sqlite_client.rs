@@ -18,6 +18,14 @@ pub struct Package {
     pub unfree: bool,
     pub available: bool,
     pub relevance_score: f64,
+    // Additional fields from minified data
+    pub maintainers: Option<Vec<serde_json::Value>>,
+    pub platforms: Option<Vec<String>>,
+    pub long_description: Option<String>,
+    pub main_program: Option<String>,
+    pub position: Option<String>,
+    pub outputs_to_install: Option<Vec<String>>,
+    pub last_updated: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,38 +60,57 @@ pub enum SQLiteClientError {
 }
 
 pub struct SQLiteClient {
-    db_path: String,
+    pub db_path: String,
+    pub dict_path: String,
     connection: Option<Connection>,
+    dictionary: Option<zstd::dict::DecoderDictionary<'static>>,
 }
 
 unsafe impl Send for SQLiteClient {}
 unsafe impl Sync for SQLiteClient {}
 
 impl SQLiteClient {
-    pub fn new(db_path: &str) -> Result<Self, SQLiteClientError> {
-        info!("SQLiteClient created for database: {}", db_path);
+    pub fn new(db_path: &str, dict_path: &str) -> Result<Self, SQLiteClientError> {
+        info!("SQLiteClient created for database: {}, dictionary: {}", db_path, dict_path);
 
         Ok(SQLiteClient {
             db_path: db_path.to_string(),
+            dict_path: dict_path.to_string(),
             connection: None,
+            dictionary: None,
         })
     }
 
     pub async fn initialize(&mut self) -> Result<bool, SQLiteClientError> {
         let conn = Connection::open(&self.db_path)?;
 
-        // Check if tables exist
-        {
-            let mut check_stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='packages'")?;
-            let table_exists: Option<String> = check_stmt.query_row([], |row| row.get(0)).ok();
-            
-            if table_exists.is_none() {
-                error!("packages table not found in SQLite database at {}", self.db_path);
-                return Err(SQLiteClientError::DatabaseError("packages table not found".to_string()));
+        // Verify minified schema exists
+        let minified_tables_exist = {
+            let mut check_stmt = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('packages_kv', 'packages_fts')")?;
+            let mut tables = Vec::new();
+            let mut rows = check_stmt.query_map([], |row| row.get::<_, String>(0))?;
+            while let Some(table_result) = rows.next() {
+                if let Ok(table) = table_result {
+                    tables.push(table);
+                }
             }
+            tables.contains(&"packages_kv".to_string()) && 
+            tables.contains(&"packages_fts".to_string())
+        };
+        
+        if !minified_tables_exist {
+            error!("Minified schema not found in SQLite database at {}", self.db_path);
+            return Err(SQLiteClientError::DatabaseError("Minified schema required but not found".to_string()));
         }
-
-        info!("SQLite client initialized successfully");
+        
+        // Load compression dictionary
+        self.dictionary = self._load_dictionary().await?;
+        if self.dictionary.is_none() {
+            error!("Failed to load compression dictionary from {}", self.dict_path);
+            return Err(SQLiteClientError::DatabaseError("Failed to load compression dictionary".to_string()));
+        }
+        
+        info!("SQLite client initialized successfully with minified schema and dictionary");
 
         self.connection = Some(conn);
         Ok(true)
@@ -98,7 +125,7 @@ impl SQLiteClient {
             packages: Vec::new(),
             total_count: 0,
             query_time_ms: 0.0,
-            search_type: "fts".to_string(),
+            search_type: "fts-minified".to_string(),
         };
 
         let conn = self.connection.as_ref()
@@ -108,31 +135,28 @@ impl SQLiteClient {
             return Ok(results);
         }
 
-        // Build base FTS query format for SQLite
-        
+        self._fts_search_minified(conn, params, &mut results)?;
+
+        results.query_time_ms = start_time.elapsed().as_millis() as f64;
+        Ok(results)
+    }
+
+    fn _fts_search_minified(
+        &self,
+        conn: &Connection,
+        params: &SearchParams,
+        results: &mut SearchResults,
+    ) -> Result<(), SQLiteClientError> {
         // Build WHERE clause for filters
         let mut where_clauses = Vec::new();
-        let mut query_params = Vec::new();
-
-        if let Some(license_filter) = &params.license_filter {
-            where_clauses.push("license LIKE ?".to_string());
-            query_params.push(format!("%{}%", license_filter));
-        }
-
-        if let Some(category_filter) = &params.category_filter {
-            where_clauses.push("category LIKE ?".to_string());
-            query_params.push(format!("%{}%", category_filter));
-        }
 
         if !params.include_broken {
-            where_clauses.push("broken = 0".to_string());
+            where_clauses.push("json_extract(data, '$.broken') = 0".to_string());
         }
 
         if !params.include_unfree {
-            where_clauses.push("unfree = 0".to_string());
+            where_clauses.push("json_extract(data, '$.unfree') = 0".to_string());
         }
-
-        // Note: 'available' field removed from SearchParams structure
 
         let where_clause = if where_clauses.is_empty() {
             String::new()
@@ -140,44 +164,90 @@ impl SQLiteClient {
             format!(" AND {}", where_clauses.join(" AND "))
         };
 
-        // Build full query - assuming packages_fts already has all the needed columns
-        let base_query = if where_clause.is_empty() {
-            format!("SELECT package_id, package_name, version, description, homepage, license, attribute_path, category, broken, unfree, available, bm25(packages_fts) as relevance_score FROM packages_fts WHERE packages_fts MATCH ? ORDER BY relevance_score DESC LIMIT ? OFFSET ?")
+        // First, search FTS table to get matching IDs
+        let fts_query = if where_clause.is_empty() {
+            format!("SELECT id, name, description, bm25(packages_fts) as relevance_score FROM packages_fts WHERE packages_fts MATCH ? ORDER BY relevance_score DESC LIMIT ? OFFSET ?")
         } else {
-            format!("SELECT package_id, package_name, version, description, homepage, license, attribute_path, category, broken, unfree, available, bm25(packages_fts) as relevance_score FROM packages_fts WHERE packages_fts MATCH ? {} ORDER BY relevance_score DESC LIMIT ? OFFSET ?", where_clause)
+            format!("SELECT id, name, description, bm25(packages_fts) as relevance_score FROM packages_fts WHERE packages_fts MATCH ? {} ORDER BY relevance_score DESC LIMIT ? OFFSET ?", where_clause)
         };
 
-        // Execute query with parameters
-        let mut stmt = conn.prepare(&base_query)?;
-        let mut rows = stmt.query_map(
+        let mut fts_stmt = conn.prepare(&fts_query)?;
+        let fts_rows = fts_stmt.query_map(
             rusqlite::params![params.query, params.limit, params.offset],
-            |row| self.row_to_package(row, true)
+            |row| {
+                Ok((
+                    row.get::<_, String>("id")?,
+                    row.get::<_, String>("name")?,
+                    row.get::<_, String>("description")?,
+                    row.get::<_, f64>("relevance_score")?,
+                ))
+            }
         )?;
 
-        while let Some(package_result) = rows.next() {
-            if let Ok(package) = package_result {
-                results.packages.push(package);
+        // Collect package IDs and fetch full data
+        let package_ids: Vec<(String, String, String, f64)> = fts_rows
+            .filter_map(|r| r.ok())
+            .collect();
+        
+        // Initialize results with basic info from FTS
+        results.packages = package_ids.iter().map(|(id, name, desc, score)| Package {
+            package_id: id.clone(),
+            package_name: name.clone(),
+            version: String::new(),
+            description: desc.clone(),
+            homepage: String::new(),
+            license: String::new(),
+            attribute_path: String::new(),
+            category: String::new(),
+            broken: false,
+            unfree: false,
+            available: true,
+            relevance_score: *score,
+            maintainers: None,
+            platforms: None,
+            long_description: None,
+            main_program: None,
+            position: None,
+            outputs_to_install: None,
+            last_updated: None,
+        }).collect();
+
+        // Get full compressed data for each package
+        for (i, package_id_tuple) in package_ids.iter().enumerate() {
+            let package_id = &package_id_tuple.0;
+            match conn.query_row(
+                "SELECT data FROM packages_kv WHERE id = ?",
+                [package_id],
+                |row| row.get::<_, Vec<u8>>(0)
+            ) {
+                Ok(compressed_data) => {
+                    match self._decompress_package_data(&compressed_data) {
+                        Ok(full_package) => {
+                            results.packages[i] = full_package;
+                        }
+                        Err(e) => {
+                            error!("Failed to decompress package {}: {}", package_id, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to fetch compressed data for package {}: {}", package_id, e);
+                }
             }
         }
 
-        // Get total count for pagination
-        let count_query = if where_clause.is_empty() {
-            format!("SELECT COUNT(*) FROM packages_fts WHERE packages_fts MATCH ?")
-        } else {
-            format!("SELECT COUNT(*) FROM packages_fts CROSS JOIN packages USING(package_id) WHERE packages_fts MATCH ? {}", where_clause)
-        };
-        let mut count_stmt = conn.prepare(&count_query)?;
-        let count: i32 = count_stmt.query_row(
+        // Get total count
+        let count_query = "SELECT COUNT(*) FROM packages_fts WHERE packages_fts MATCH ?";
+        let mut count_stmt = conn.prepare(count_query)?;
+        results.total_count = count_stmt.query_row(
             rusqlite::params![params.query],
             |row| row.get(0)
         )?;
-        
-        results.total_count = count;
-        results.query_time_ms = start_time.elapsed().as_millis() as f64;
 
-        Ok(results)
+        Ok(())
     }
 
+    
     pub async fn health_check(&self) -> bool {
         match &self.connection {
             Some(conn) => {
@@ -193,26 +263,130 @@ impl SQLiteClient {
         }
     }
 
-    fn row_to_package(&self, row: &Row, has_score: bool) -> Result<Package, rusqlite::Error> {
-        let relevance_score = if has_score {
-            row.get::<_, f64>("relevance_score")?
+    
+    fn _decompress_package_data(&self, compressed_data: &[u8]) -> Result<Package, SQLiteClientError> {
+        // Estimate decompressed size (10x compression ratio as estimate)
+        let estimated_size = compressed_data.len() * 10;
+        
+        // Use dictionary-based decompression if dictionary is available
+        if let Some(ref dictionary) = self.dictionary {
+            match zstd::bulk::decompress_with_dict(compressed_data, dictionary.as_bytes(), estimated_size) {
+                Ok(decompressed) => {
+                    self._parse_package_json(&decompressed)
+                }
+                Err(e) => {
+                    error!("Dictionary-based decompression failed: {}", e);
+                    Err(SQLiteClientError::DatabaseError(format!("Dictionary-based decompression failed: {}", e)))
+                }
+            }
         } else {
-            1.0 - (row.get::<_, i64>("rowid")? as f64 * 0.001)
-        };
+            // Fallback to regular decompression (shouldn't happen with minified schema)
+            match zstd::bulk::decompress(compressed_data, estimated_size) {
+                Ok(decompressed) => {
+                    self._parse_package_json(&decompressed)
+                }
+                Err(e) => {
+                    error!("Decompression failed: {}", e);
+                    Err(SQLiteClientError::DatabaseError(format!("Decompression failed: {}", e)))
+                }
+            }
+        }
+    }
 
+    async fn _load_dictionary(&self) -> Result<Option<zstd::dict::DecoderDictionary<'static>>, SQLiteClientError> {
+        use std::fs;
+        
+        if !std::path::Path::new(&self.dict_path).exists() {
+            error!("Dictionary file not found at: {}", self.dict_path);
+            return Ok(None);
+        }
+        
+        match fs::read(&self.dict_path) {
+            Ok(dict_bytes) => {
+                match zstd::dict::DecoderDictionary::copy(&dict_bytes) {
+                    Ok(dictionary) => {
+                        info!("Loaded compression dictionary: {} bytes", dict_bytes.len());
+                        Ok(Some(dictionary))
+                    }
+                    Err(e) => {
+                        error!("Failed to create decoder dictionary: {}", e);
+                        Err(SQLiteClientError::DatabaseError(format!("Failed to create decoder dictionary: {}", e)))
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Failed to read dictionary file {}: {}", self.dict_path, e);
+                Err(SQLiteClientError::DatabaseError(format!("Failed to read dictionary file: {}", e)))
+            }
+        }
+    }
+
+    fn _parse_package_json(&self, decompressed_data: &[u8]) -> Result<Package, SQLiteClientError> {
+        let json_str = std::str::from_utf8(decompressed_data)
+            .map_err(|e| SQLiteClientError::DatabaseError(format!("Invalid UTF-8: {}", e)))?;
+        
+        let pkg_value: serde_json::Value = serde_json::from_str(json_str)
+            .map_err(|e| SQLiteClientError::DatabaseError(format!("JSON parse error: {}", e)))?;
+        
         Ok(Package {
-            package_id: row.get("package_id")?,
-            package_name: row.get("package_name")?,
-            version: row.get("version")?,
-            description: row.get("description")?,
-            homepage: row.get("homepage")?,
-            license: row.get("license")?,
-            attribute_path: row.get("attribute_path")?,
-            category: row.get("category")?,
-            broken: row.get("broken")?,
-            unfree: row.get("unfree")?,
-            available: row.get("available")?,
-            relevance_score,
+            package_id: pkg_value.get("package_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string(),
+            package_name: pkg_value.get("package_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string(),
+            version: pkg_value.get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string(),
+            description: pkg_value.get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string(),
+            homepage: pkg_value.get("homepage")
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string(),
+            license: serde_json::to_string(&pkg_value.get("license").unwrap_or(&serde_json::Value::Null))
+                .unwrap_or_else(|_| "null".to_string()),
+            attribute_path: pkg_value.get("attribute_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string(),
+            category: pkg_value.get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("").to_string(),
+            broken: pkg_value.get("broken")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            unfree: pkg_value.get("unfree")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            available: pkg_value.get("available")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            relevance_score: 1.0, // Will be set by search function
+            maintainers: pkg_value.get("maintainers").and_then(|v| {
+                v.as_array().map(|arr| arr.to_vec())
+            }),
+            platforms: pkg_value.get("platforms").and_then(|v| {
+                v.as_array().map(|arr| arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect())
+            }),
+            long_description: pkg_value.get("long_description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            main_program: pkg_value.get("main_program")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            position: pkg_value.get("position")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            outputs_to_install: pkg_value.get("outputs_to_install").and_then(|v| {
+                v.as_array().map(|arr| arr.iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect())
+            }),
+            last_updated: pkg_value.get("last_updated")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         })
     }
 }

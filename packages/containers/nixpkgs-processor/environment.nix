@@ -22,5 +22,6 @@ in
     brotli
     pip
     graph-tool
+    zstandard
   ]))
 ]

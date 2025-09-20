@@ -114,7 +114,7 @@ class NodeS3Writer:
                 
                 # Create comprehensive node data
                 node_data = {
-                    # Core package metadata (all LanceDB fields)
+                    # Core package metadata (all SQLite fields)
                     "nodeId": node_id,
                     "packageName": package_name,
                     "version": version,

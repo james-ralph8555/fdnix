@@ -36,20 +36,16 @@ def validate_env() -> None:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing_basic)}")
     
     # Set default keys for outputs if not provided
-    has_data_key = bool(os.environ.get("SQLITE_DATA_KEY", os.environ.get("LANCEDB_DATA_KEY")))
-    has_minified_key = bool(os.environ.get("SQLITE_MINIFIED_KEY", os.environ.get("LANCEDB_MINIFIED_KEY")))
+    has_data_key = bool(os.environ.get("SQLITE_DATA_KEY"))
+    has_minified_key = bool(os.environ.get("SQLITE_MINIFIED_KEY"))
     
     if not has_data_key or not has_minified_key:
         import time
         timestamp = int(time.time())
         if not has_data_key:
             os.environ["SQLITE_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.db"
-            if not os.environ.get("LANCEDB_DATA_KEY"):
-                os.environ["LANCEDB_DATA_KEY"] = f"snapshots/fdnix-data-{timestamp}.db"
         if not has_minified_key:
             os.environ["SQLITE_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.db"
-            if not os.environ.get("LANCEDB_MINIFIED_KEY"):
-                os.environ["LANCEDB_MINIFIED_KEY"] = f"snapshots/fdnix-{timestamp}.db"
     
     # Set default stats key if not set
     if not os.environ.get("STATS_S3_KEY"):
@@ -64,8 +60,7 @@ def validate_env() -> None:
     # Optional publish layer: requires LAYER_ARN + S3 triplet with minified key
     if _truthy(os.environ.get("PUBLISH_LAYER")):
         required_keys = ["LAYER_ARN", "ARTIFACTS_BUCKET", "AWS_REGION", "SQLITE_MINIFIED_KEY"]
-        # Keep backward compatibility with old key names
-        if not os.environ.get("SQLITE_MINIFIED_KEY") and not os.environ.get("LANCEDB_MINIFIED_KEY"):
+        if not os.environ.get("SQLITE_MINIFIED_KEY"):
             missing = [k for k in required_keys if not os.environ.get(k)]
             if missing:
                 raise RuntimeError(
@@ -135,7 +130,7 @@ async def main() -> int:
             main_writer = SQLiteWriter(
                 output_path=main_db_path,
                 s3_bucket=artifacts_bucket,
-                s3_key=os.environ.get("SQLITE_DATA_KEY", os.environ.get("LANCEDB_DATA_KEY")),  # Keep old env var for now
+                s3_key=os.environ.get("SQLITE_DATA_KEY"),
                 region=region,
             )
 
@@ -170,7 +165,7 @@ async def main() -> int:
             minified_writer = SQLiteWriter(
                 output_path=minified_db_path,
                 s3_bucket=artifacts_bucket,
-                s3_key=os.environ.get("SQLITE_MINIFIED_KEY", os.environ.get("LANCEDB_MINIFIED_KEY")),  # Keep old env var for now
+                s3_key=os.environ.get("SQLITE_MINIFIED_KEY"),
                 region=region,
             )
             logger.info("Creating minified SQLite database from main database...")
@@ -220,9 +215,9 @@ async def main() -> int:
             layer_arn = os.environ.get("LAYER_ARN", "").strip()
             
             # Use minified key for layer publishing (from artifacts bucket)
-            key = os.environ.get("SQLITE_MINIFIED_KEY", os.environ.get("LANCEDB_MINIFIED_KEY", ""))
+            key = os.environ.get("SQLITE_MINIFIED_KEY", "")
             if not key:
-                raise RuntimeError("SQLITE_MINIFIED_KEY or LANCEDB_MINIFIED_KEY required for layer publishing")
+                raise RuntimeError("SQLITE_MINIFIED_KEY required for layer publishing")
 
             publisher = LayerPublisher(region=region)
             publisher.publish_from_s3(bucket=artifacts_bucket, key=key, layer_arn=layer_arn)

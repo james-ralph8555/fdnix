@@ -1,5 +1,5 @@
 # Stage 2 Container: nixpkgs-processor
-# Purpose: Read JSONL from S3, process into LanceDB, generate embeddings, publish layers
+# Purpose: Read JSONL from S3, process into SQLite database, publish layers
 FROM nixos/nix:2.31.0
 
 # Set working directory
@@ -8,13 +8,13 @@ WORKDIR /app
 # Copy the Nix environment definition
 COPY environment.nix /tmp/environment.nix
 
-# Install dependencies for data processing (LanceDB, embeddings, etc.)
+# Install dependencies for data processing (SQLite database, etc.)
 RUN nix-env -if /tmp/environment.nix && \
     rm -rf /tmp/environment.nix
 
 # OCI labels
 LABEL org.opencontainers.image.title="fdnix nixpkgs-processor"
-LABEL org.opencontainers.image.description="Stage 2: Processes JSONL data into LanceDB, generates embeddings, publishes layers"
+LABEL org.opencontainers.image.description="Stage 2: Processes JSONL data into SQLite database, publishes layers"
 
 # Copy application source code
 COPY src/ ./src/
@@ -40,9 +40,12 @@ ENV BEDROCK_MAX_RPM=600
 ENV BEDROCK_MAX_TOKENS_PER_MINUTE=300000
 ENV PROCESSING_BATCH_SIZE=100
 
-# Lance Core thread configuration to prevent CPU reservation warnings
-ENV LANCE_CPU_THREADS=1
-ENV LANCE_IO_THREADS=4
+# SQLite configuration
+
+# Zstd compression configuration for minified database
+ENV ZSTD_DICT_SIZE=65536
+ENV ZSTD_SAMPLE_COUNT=10000
+ENV ZSTD_COMPRESSION_LEVEL=3
 
 # Entry point - run the processor
 CMD ["python", "src/index.py"]

@@ -1,10 +1,10 @@
 # fdnix Search Lambda (Rust)
 
-Rust AWS Lambda for fdnix hybrid search over nixpkgs. Serves a simple HTTP API (API Gateway → Lambda) that performs:
+Rust AWS Lambda for fdnix search over nixpkgs using SQLite FTS with Zstandard dictionary-based compression. Serves a simple HTTP API (API Gateway → Lambda) that performs:
 
-- Hybrid ranking: LanceDB FTS (BM25) + semantic vectors (ANN)
-- Optional real-time query embeddings via AWS Bedrock Runtime
-- Reciprocal Rank Fusion (RRF) to combine FTS and vector results
+- Full-text search: SQLite FTS5 with BM25 ranking
+- High-compression storage: Zstandard dictionary-based decompression
+- Optimized for minified, normalized database schema
 
 This package was migrated from C++ to Rust. See MIGRATION.md for the full rationale and details.
 
@@ -18,8 +18,8 @@ This package was migrated from C++ to Rust. See MIGRATION.md for the full ration
 ## Package Structure
 
 - `src/main.rs`: Lambda runtime, routing, health check
-- `src/lancedb_client.rs`: LanceDB integration — vector search, full‑text search, hybrid (RRF), and fallbacks
-- `src/bedrock_client.rs`: Bedrock Runtime client for embeddings
+- `src/sqlite_client.rs`: SQLite FTS integration with Zstandard dictionary decompression
+- `src/lib.rs`: Path detection, client initialization, and request handling
 - `Cargo.toml`: Rust project config (AWS SDK, LanceDB, Arrow, Tokio)
 - `build.rs`: Simplified (no database‑specific build flags)
 - `flake.nix`: Reproducible build (optional) and Lambda package assembly
@@ -29,12 +29,12 @@ This package was migrated from C++ to Rust. See MIGRATION.md for the full ration
 ## Runtime Model
 
 - Runtime: `provided.al2023` (custom runtime), binary named `bootstrap`
-- Database: LanceDB database opened from a filesystem path or URI provided via env
-- Tables: `packages` (required). When embeddings are present, a `vector` column stores package embeddings
+- Database: SQLite database with FTS5 virtual tables, opened from Lambda layer
+- Schema: Minified schema with compressed package data and shared compression dictionary
 - Search Flow:
-  - FTS: BM25 via LanceDB FTS over package metadata
-  - Vector: ANN over the `vector` column
-  - Fusion: Reciprocal Rank Fusion (RRF) merges both lists when embeddings are enabled
+  - FTS: BM25 via SQLite FTS5 over searchable metadata
+  - Decompression: Zstandard dictionary-based decompression for full package data
+  - Filtering: Support for broken/unfree package filtering
 
 ## API
 
@@ -48,11 +48,9 @@ This package was migrated from C++ to Rust. See MIGRATION.md for the full ration
 
 ## Configuration (env)
 
-- `LANCEDB_PATH`: Path or URI to the LanceDB database (e.g., a directory under `/opt/fdnix/...`) [required]
-- `ENABLE_EMBEDDINGS`: `1`/`true`/`yes` to enable Bedrock embeddings (default: disabled)
-- `AWS_REGION`: Region for Bedrock (defaults to Lambda region or `us-east-1`)
-- `BEDROCK_MODEL_ID`: Embedding model id (default: `amazon.titan-embed-text-v2:0`)
-- `BEDROCK_OUTPUT_DIMENSIONS`: Embedding dimensions (default: `256`)
+- Database files: `/opt/fdnix/minified.db` (SQLite database) and `/opt/fdnix/shared.dict` (compression dictionary) [required]
+- `AWS_REGION`: AWS region for Lambda deployment
+- Both files must be present in the Lambda layer for proper initialization
 
 ## Build Options
 
@@ -114,10 +112,10 @@ The CDK stack looks for `bootstrap` at `packages/search-lambda/result/lambda-fil
 
 ## Troubleshooting
 
-- Embeddings disabled: Hybrid falls back to FTS; set `ENABLE_EMBEDDINGS=1`
-- FTS query errors: code falls back to a LIKE-based search
-- Verify database: `LANCEDB_PATH` must be set and the `packages` table should exist (with `vector` column for ANN)
-- Bedrock permissions: Lambda role must allow `bedrock:InvokeModel`
+- Lambda fails to start: Ensure both `minified.db` and `shared.dict` are present in `/opt/fdnix/`
+- Dictionary loading errors: Verify the compression dictionary file exists and is readable
+- FTS query errors: Check that the SQLite database contains the required `packages_kv` and `packages_fts` tables
+- Decompression failures: Verify the dictionary matches the database compression settings
 
 ## Notes
 
