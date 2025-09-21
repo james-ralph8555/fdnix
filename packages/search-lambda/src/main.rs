@@ -217,112 +217,21 @@ mod tests {
         assert_eq!(offset, expected_offset);
     }
 
-    #[test]
-    fn test_is_embeddings_enabled_various_values() {
-        // Test with no environment variable
-        std::env::remove_var("ENABLE_EMBEDDINGS");
-        assert!(!is_embeddings_enabled());
-
-        // Test with "1"
-        std::env::set_var("ENABLE_EMBEDDINGS", "1");
-        assert!(is_embeddings_enabled());
-
-        // Test with "true" (case insensitive)
-        std::env::set_var("ENABLE_EMBEDDINGS", "true");
-        assert!(is_embeddings_enabled());
-
-        std::env::set_var("ENABLE_EMBEDDINGS", "TRUE");
-        assert!(is_embeddings_enabled());
-
-        // Test with "yes" (case insensitive)
-        std::env::set_var("ENABLE_EMBEDDINGS", "yes");
-        assert!(is_embeddings_enabled());
-
-        std::env::set_var("ENABLE_EMBEDDINGS", "YES");
-        assert!(is_embeddings_enabled());
-
-        // Test with "false"
-        std::env::set_var("ENABLE_EMBEDDINGS", "false");
-        assert!(!is_embeddings_enabled());
-
-        // Test with "0"
-        std::env::set_var("ENABLE_EMBEDDINGS", "0");
-        assert!(!is_embeddings_enabled());
-
-        // Test with random value
-        std::env::set_var("ENABLE_EMBEDDINGS", "random");
-        assert!(!is_embeddings_enabled());
-
-        // Clean up
-        std::env::remove_var("ENABLE_EMBEDDINGS");
-    }
-
-    #[tokio::test]
-    async fn test_get_lancedb_path_with_env_var() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.lance");
-        std::fs::create_dir_all(&db_path).unwrap();
-        
-        // Create required directories for a valid LanceDB structure
-        std::fs::create_dir_all(db_path.join("data")).unwrap();
-        std::fs::create_dir_all(db_path.join("_versions")).unwrap();
-        
-        std::env::set_var("LANCEDB_PATH", db_path.to_str().unwrap());
-        
-        let result = get_lancedb_path().await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), db_path.to_str().unwrap());
-        
-        std::env::remove_var("LANCEDB_PATH");
-    }
-
-    #[tokio::test]
-    async fn test_get_lancedb_path_no_valid_path() {
-        std::env::remove_var("LANCEDB_PATH");
-        
-        let result = get_lancedb_path().await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("No valid LanceDB database found"));
-    }
-
-    #[tokio::test]
-    async fn test_get_lancedb_path_missing_structure() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let db_path = temp_dir.path().join("invalid.lance");
-        std::fs::create_dir_all(&db_path).unwrap();
-        // Don't create data/ and _versions/ directories
-        
-        std::env::set_var("LANCEDB_PATH", db_path.to_str().unwrap());
-        
-        let result = get_lancedb_path().await;
-        assert!(result.is_err());
-        
-        std::env::remove_var("LANCEDB_PATH");
-    }
-
+  
     #[tokio::test]
     async fn test_create_health_check_response() {
-        std::env::set_var("LANCEDB_PATH", "/test/path");
-        std::env::set_var("BEDROCK_MODEL_ID", "test-model");
         std::env::set_var("AWS_REGION", "us-west-2");
-        std::env::set_var("ENABLE_EMBEDDINGS", "true");
         
         let response = create_health_check_response("test query".to_string()).await;
         
-        assert_eq!(response.message, "fdnix search API (Rust) — stub active");
+        assert_eq!(response.message, "fdnix search API (Rust) — SQLite FTS active");
         assert_eq!(response.version, Some("0.1.0".to_string()));
         assert_eq!(response.runtime, Some("provided.al2023".to_string()));
         assert_eq!(response.query_received, Some("test query".to_string()));
-        assert_eq!(response.lancedb_path, Some("/test/path".to_string()));
-        assert_eq!(response.bedrock_model_id, Some("test-model".to_string()));
         assert_eq!(response.aws_region, Some("us-west-2".to_string()));
-        assert_eq!(response.enable_embeddings, Some("true".to_string()));
         
         // Clean up
-        std::env::remove_var("LANCEDB_PATH");
-        std::env::remove_var("BEDROCK_MODEL_ID");
         std::env::remove_var("AWS_REGION");
-        std::env::remove_var("ENABLE_EMBEDDINGS");
     }
 
     #[test]

@@ -1,7 +1,5 @@
 pub mod sqlite_client;
 
-pub use sqlite_client::*;
-
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -10,7 +8,7 @@ use std::sync::OnceLock;
 use tracing::{info};
 
 // Global client (initialized once)
-static SQLITE_CLIENT: OnceLock<Option<SQLiteClient>> = OnceLock::new();
+static SQLITE_CLIENT: OnceLock<Option<sqlite_client::SQLiteClient>> = OnceLock::new();
 
 pub async fn handle_search_request(
     query: String, 
@@ -28,7 +26,7 @@ pub async fn handle_search_request(
         .ok_or("SQLite client failed to initialize during startup - check Lambda layer and database configuration")?;
 
     // Prepare search parameters
-    let search_params = SearchParams {
+    let search_params = sqlite_client::SearchParams {
         query: query.clone(),
         limit,
         offset,
@@ -127,7 +125,7 @@ pub async fn initialize_clients() -> Result<(), Box<dyn std::error::Error + Send
         Ok((sqlite_path, dict_path)) => {
             info!("Initializing SQLite client with database: {}, dictionary: {}", sqlite_path, dict_path);
             let start_time = std::time::Instant::now();
-            match SQLiteClient::new(&sqlite_path, &dict_path) {
+            match sqlite_client::SQLiteClient::new(&sqlite_path, &dict_path) {
                 Ok(mut client) => {
                     match client.initialize().await {
                         Ok(_) => {
@@ -288,10 +286,9 @@ pub async fn create_health_check_response(query_param: String) -> SearchResponse
         
         if is_healthy {
             // Determine schema type from client state
-            {
-                response.message = "fdnix search API (Rust) — SQLite FTS with minified data active".to_string();
-                response.note = Some("This is a Rust Lambda with SQLite FTS search using Zstandard-compressed data.".to_string());
-          }
+            response.message = "fdnix search API (Rust) — SQLite FTS with minified data active".to_string();
+            response.note = Some("This is a Rust Lambda with SQLite FTS search using Zstandard-compressed data.".to_string());
+        }
     }
 
     response

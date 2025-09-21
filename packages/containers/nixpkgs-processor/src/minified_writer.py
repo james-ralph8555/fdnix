@@ -25,7 +25,8 @@ class MinifiedWriter:
         compression_level: int = 3,
     ) -> None:
         self.output_path = Path(output_path)
-        self.dict_output_path = Path(str(output_path).replace('.db', '.dict'))
+        # Always write a sibling dictionary file with `.dict` suffix
+        self.dict_output_path = self.output_path.with_suffix('.dict')
         self.s3_bucket = s3_bucket
         self.s3_key = s3_key
         self.region = region
@@ -48,9 +49,12 @@ class MinifiedWriter:
         
         # Save dictionary to file
         with open(self.dict_output_path, 'wb') as f:
-            f.write(dictionary)
-        logger.info("Compression dictionary saved to %s (size: %d bytes)", 
-                   self.dict_output_path, len(dictionary))
+            f.write(dictionary.as_bytes())
+        logger.info(
+            "Compression dictionary saved to %s (size: %d bytes)",
+            self.dict_output_path,
+            len(dictionary.as_bytes()),
+        )
 
         # Phase 2: Build compressed SQLite database
         logger.info("Phase 2: Building compressed SQLite database...")
@@ -62,7 +66,7 @@ class MinifiedWriter:
         if self.s3_bucket and self.s3_key:
             self._upload_to_s3()
 
-    def _train_dictionary(self, packages: List[Dict[str, Any]]) -> bytes:
+    def _train_dictionary(self, packages: List[Dict[str, Any]]) -> zstd.ZstdCompressionDict:
         """Train zstd compression dictionary from sample data."""
         logger.info("Sampling %d packages for dictionary training...", self.sample_count)
         
@@ -84,16 +88,14 @@ class MinifiedWriter:
         
         logger.info("Training dictionary from %d samples...", len(samples))
         
-        # Train the dictionary using zstd module
-        dictionary = zstd.train_dictionary(
-            dict_size=self.dict_size,
-            samples_list=samples
-        )
+        # Train the dictionary using zstandard. The function expects the
+        # samples as a sequence of bytes-like objects.
+        dictionary = zstd.train_dictionary(self.dict_size, samples)
         
         logger.info("Dictionary trained successfully (size: %d bytes)", len(dictionary))
         return dictionary
 
-    def _build_compressed_database(self, packages: List[Dict[str, Any]], dictionary: bytes) -> None:
+    def _build_compressed_database(self, packages: List[Dict[str, Any]], dictionary: zstd.ZstdCompressionDict) -> None:
         """Build SQLite database with compressed data using the trained dictionary."""
         # Initialize database
         conn = sqlite3.connect(str(self.output_path))
@@ -103,10 +105,7 @@ class MinifiedWriter:
         self._create_schema(cursor)
         
         # Prepare compressor with dictionary
-        compressor = zstd.ZstdCompressor(
-            level=self.compression_level,
-            dict_data=dictionary
-        )
+        compressor = zstd.ZstdCompressor(level=self.compression_level, dict_data=dictionary)
         
         # Prepare decompressor with dictionary (for verification)
         decompressor = zstd.ZstdDecompressor(dict_data=dictionary)
@@ -217,11 +216,17 @@ class MinifiedWriter:
         }
 
     def _package_id(self, p: Dict[str, Any]) -> str:
-        """Generate package ID."""
-        # Prefer attributePath, fallback to name@version
-        attr = (p.get("attributePath") or "").strip()
-        if attr:
-            return attr
+        """Generate package ID without system suffix for deduplication."""
+        # Use attribute path but remove system part for uniqueness
+        attr_path = (p.get("attributePath") or "").strip()
+        if attr_path:
+            # Remove system suffix if present
+            parts = attr_path.split(".")
+            if len(parts) >= 2 and any(sys in parts[-1] for sys in ["linux", "darwin", "windows"]):
+                return ".".join(parts[:-1])
+            return attr_path
+        
+        # Fallback to name@version
         name = (p.get("packageName") or "").strip()
         ver = (p.get("version") or "").strip()
         return f"{name}@{ver}" if name or ver else "unknown"
@@ -249,7 +254,9 @@ class MinifiedWriter:
         s3.upload_file(str(self.output_path), self.s3_bucket, self.s3_key)
         
         # Upload dictionary
-        dict_key = self.s3_key.replace('.db', '.dict')
+        # Ensure dictionary key uses `.dict` suffix regardless of original
+        from pathlib import Path as _Path
+        dict_key = str(_Path(self.s3_key).with_suffix('.dict'))
         logger.info("Uploading compression dictionary to s3://%s/%s", self.s3_bucket, dict_key)
         s3.upload_file(str(self.dict_output_path), self.s3_bucket, dict_key)
         

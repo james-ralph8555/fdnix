@@ -8,13 +8,6 @@ Rust AWS Lambda for fdnix search over nixpkgs using SQLite FTS with Zstandard di
 
 This package was migrated from C++ to Rust. See MIGRATION.md for the full rationale and details.
 
-## What Changed (C++ → Rust)
-
-- Simplified builds: single `cargo build` replaces CMake + vcpkg
-- Portable binaries: musl-static `bootstrap` runs in scratch/al2023
-- Better DX: `cargo test`, `cargo fmt`, `cargo clippy`
-- Same behavior: API, query flow, env config, and health checks preserved
-
 ## Package Structure
 
 - `src/main.rs`: Lambda runtime, routing, health check

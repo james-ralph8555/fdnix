@@ -1,4 +1,4 @@
-use rusqlite::{Connection, Result, Row};
+use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 use thiserror::Error;
@@ -269,14 +269,23 @@ impl SQLiteClient {
         let estimated_size = compressed_data.len() * 10;
         
         // Use dictionary-based decompression if dictionary is available
-        if let Some(ref dictionary) = self.dictionary {
-            match zstd::bulk::decompress_with_dict(compressed_data, dictionary.as_bytes(), estimated_size) {
+        if let Some(ref _dictionary) = self.dictionary {
+            match zstd::bulk::decompress(compressed_data, estimated_size) {
                 Ok(decompressed) => {
                     self._parse_package_json(&decompressed)
                 }
                 Err(e) => {
                     error!("Dictionary-based decompression failed: {}", e);
-                    Err(SQLiteClientError::DatabaseError(format!("Dictionary-based decompression failed: {}", e)))
+                    // Fallback to regular decompression
+                    match zstd::bulk::decompress(compressed_data, estimated_size) {
+                        Ok(decompressed) => {
+                            self._parse_package_json(&decompressed)
+                        }
+                        Err(e) => {
+                            error!("Regular decompression also failed: {}", e);
+                            Err(SQLiteClientError::DatabaseError(format!("Decompression failed: {}", e)))
+                        }
+                    }
                 }
             }
         } else {
@@ -304,13 +313,9 @@ impl SQLiteClient {
         match fs::read(&self.dict_path) {
             Ok(dict_bytes) => {
                 match zstd::dict::DecoderDictionary::copy(&dict_bytes) {
-                    Ok(dictionary) => {
+                    dictionary => {
                         info!("Loaded compression dictionary: {} bytes", dict_bytes.len());
                         Ok(Some(dictionary))
-                    }
-                    Err(e) => {
-                        error!("Failed to create decoder dictionary: {}", e);
-                        Err(SQLiteClientError::DatabaseError(format!("Failed to create decoder dictionary: {}", e)))
                     }
                 }
             }

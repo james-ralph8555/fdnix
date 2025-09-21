@@ -9,6 +9,7 @@ from typing import List, Dict, Any
 from s3_jsonl_reader import S3JsonlReader
 from data_processor import DataProcessor
 from sqlite_writer import SQLiteWriter
+from minified_writer import MinifiedWriter
 from s3_stats_writer import S3StatsWriter
 from layer_publisher import LayerPublisher
 from node_s3_writer import NodeS3Writer
@@ -162,14 +163,16 @@ async def main() -> int:
         # Phase 4: Minified Database Generation (if requested)
         if processing_mode in ("minified", "both"):
             logger.info("=== MINIFIED DATABASE GENERATION PHASE ===")
-            minified_writer = SQLiteWriter(
+            # Use SQLiteWriter's normalized reader to reconstruct licenses/maintainers
+            # from lookup + junction tables and emit the minified artifact.
+            logger.info("Creating minified SQLite database from main database...")
+            minified_builder = SQLiteWriter(
                 output_path=minified_db_path,
                 s3_bucket=artifacts_bucket,
                 s3_key=os.environ.get("SQLITE_MINIFIED_KEY"),
                 region=region,
             )
-            logger.info("Creating minified SQLite database from main database...")
-            minified_writer.create_minified_db_from_main(main_db_path)
+            minified_builder.create_minified_db_from_main(main_db_path)
             logger.info("Minified SQLite database generation completed successfully!")
         
         # Phase 5: Individual Node S3 Writing (if requested and graph data available)

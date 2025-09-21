@@ -18,7 +18,7 @@ except Exception:  # pragma: no cover - boto3 may be absent in local-only runs
     boto3 = None  # type: ignore
 
 try:
-    from .minified_writer import MinifiedWriter
+    from minified_writer import MinifiedWriter
 except ImportError:
     MinifiedWriter = None
 
@@ -305,7 +305,7 @@ class SQLiteWriter:
             
         cursor = self._db_connection.cursor()
         
-        # Extract unique values for normalization
+        # Extract unique values for normalization (from all packages before deduplication)
         licenses_data = self._extract_licenses(packages)
         architectures_data = self._extract_architectures(packages)
         maintainers_data = self._extract_maintainers(packages)
@@ -313,10 +313,107 @@ class SQLiteWriter:
         # Insert lookup table data
         self._insert_lookup_data(cursor, licenses_data, architectures_data, maintainers_data)
         
-        # Process and insert packages and relationships
-        self._insert_packages_and_relationships(cursor, packages)
+        # Deduplicate packages by merging variants
+        deduplicated_packages = self._deduplicate_packages(packages)
         
-        logger.info("Normalized %d packages with lookup tables", len(packages))
+        # Process and insert packages and relationships
+        self._insert_packages_and_relationships(cursor, deduplicated_packages)
+        
+        logger.info("Normalized %d packages (deduplicated from %d) with lookup tables", 
+                   len(deduplicated_packages), len(packages))
+
+    def _deduplicate_packages(self, packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Deduplicate packages by merging variants with different architectures."""
+        if not packages:
+            return []
+            
+        # Group packages by their base package ID
+        package_groups = {}
+        
+        for p in packages:
+            pkg_id = self._package_id(p)
+            if pkg_id not in package_groups:
+                package_groups[pkg_id] = []
+            package_groups[pkg_id].append(p)
+        
+        deduplicated_packages = []
+        
+        for pkg_id, variants in package_groups.items():
+            if len(variants) == 1:
+                # No deduplication needed
+                deduplicated_packages.append(variants[0])
+                continue
+            
+            # Merge variants
+            merged_pkg = self._merge_package_variants(variants)
+            deduplicated_packages.append(merged_pkg)
+        
+        return deduplicated_packages
+    
+    def _merge_package_variants(self, variants: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge multiple package variants into one unified package."""
+        if not variants:
+            return {}
+        if len(variants) == 1:
+            return variants[0]
+        
+        # Use first variant as base
+        merged = variants[0].copy()
+        
+        # Merge architectures (union of all)
+        all_architectures = set()
+        for variant in variants:
+            platforms = variant.get("platforms", [])
+            if isinstance(platforms, list):
+                for platform in platforms:
+                    if isinstance(platform, str):
+                        all_architectures.add(platform)
+        merged["platforms"] = list(all_architectures) if all_architectures else None
+        
+        # Merge maintainers (union of all, unique by key)
+        all_maintainers = {}
+        for variant in variants:
+            maintainers = variant.get("maintainers", [])
+            if isinstance(maintainers, list):
+                for maintainer in maintainers:
+                    if isinstance(maintainer, dict):
+                        key = (
+                            maintainer.get("name", ""),
+                            maintainer.get("email", ""),
+                            maintainer.get("github", "")
+                        )
+                        if any(key):
+                            all_maintainers[key] = maintainer
+        merged["maintainers"] = list(all_maintainers.values()) if all_maintainers else None
+        
+        # License should be the same across variants, use first non-null
+        for variant in variants:
+            if variant.get("license"):
+                merged["license"] = variant["license"]
+                break
+        
+        # Merge other appropriate fields
+        # Use first non-null value for most fields
+        fields_to_merge = ["description", "longDescription", "homepage", "category", "mainProgram"]
+        for field in fields_to_merge:
+            if not merged.get(field):
+                for variant in variants:
+                    if variant.get(field):
+                        merged[field] = variant[field]
+                        break
+        
+        # Boolean fields: logical OR (if any variant is broken, package is broken)
+        bool_fields = ["broken", "unfree", "insecure", "unsupported"]
+        for field in bool_fields:
+            for variant in variants:
+                if variant.get(field, False):
+                    merged[field] = True
+                    break
+        
+        # Available field: logical AND (if all variants are available, package is available)
+        merged["available"] = all(variant.get("available", True) for variant in variants)
+        
+        return merged
 
     def _extract_licenses(self, packages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Extract unique license information from all packages."""
@@ -591,12 +688,11 @@ class SQLiteWriter:
         self._ensure_parent_dir()
         
         if MinifiedWriter is None:
-            logger.error("MinifiedWriter not available, falling back to legacy minification")
-            self._create_legacy_minified_db(main_db_path)
-            return
+            raise ImportError("MinifiedWriter is required for minified database creation but is not available")
         
         logger.info("Creating zstd-compressed minified database at %s from main DB at %s", 
                    self.output_path, main_db_path)
+        logger.info("Using MinifiedWriter with zstd compression (this preserves all metadata)")
 
         # Get zstd configuration from environment
         dict_size = int(os.environ.get("ZSTD_DICT_SIZE", "65536"))
@@ -616,78 +712,28 @@ class SQLiteWriter:
         )
         
         # Extract package data from main database
+        logger.info("Extracting package metadata from main database...")
         packages = self._extract_packages_from_main_db(main_db_path)
         
         # Create minified database with zstd compression
+        logger.info("Writing compressed minified database with %d packages...", len(packages))
         minified_writer.write_artifact(packages)
         
         logger.info("Zstd-compressed minified database created: %s", self.output_path)
 
-    def _create_legacy_minified_db(self, main_db_path: str) -> None:
-        """Legacy minification method for fallback."""
-        logger.info("Creating legacy minified SQLite database at %s from main DB at %s", 
-                   self.output_path, main_db_path)
-
-        # Connect to main database
-        main_connection = sqlite3.connect(main_db_path)
-        
-        # Connect to minified database
-        self._db_connection = sqlite3.connect(str(self.output_path))
-        cursor = self._db_connection.cursor()
-        
-        # Create tables in minified database
-        self._create_tables(cursor)
-        
-        # Copy only essential columns from main database
-        essential_columns = [
-            "package_id", "package_name", "version", "attribute_path", "description", 
-            "search_text", "homepage", "license", "maintainers", "broken", "unfree", "available", 
-            "insecure", "unsupported", "main_program", "content_hash"
-        ]
-        
-        # Build query with only essential columns
-        columns_str = ", ".join(essential_columns)
-        query = f"SELECT {columns_str} FROM packages"
-        
-        # Copy data
-        main_cursor = main_connection.cursor()
-        main_cursor.execute(query)
-        
-        # Insert into minified database
-        if essential_columns:
-            placeholders = ", ".join(["?" for _ in essential_columns])
-            cursor.executemany(
-                f"INSERT OR REPLACE INTO packages ({columns_str}) VALUES ({placeholders})",
-                main_cursor.fetchall()
-            )
-        
-        main_connection.close()
-        
-        # Create indexes on minified table
-        self._create_indexes(cursor)
-        self._create_fts_table(cursor)
-        
-        # Commit and close
-        self._db_connection.commit()
-        self._db_connection.close()
-        self._db_connection = None
-
-        logger.info("Legacy minified SQLite artifact written: %s", self.output_path)
-
-        if self.s3_bucket and self.s3_key:
-            self._upload_to_s3()
-
+    
     def _extract_packages_from_main_db(self, main_db_path: str) -> List[Dict[str, Any]]:
         """Extract package data from main database for zstd compression."""
         main_conn = sqlite3.connect(main_db_path)
         main_cursor = main_conn.cursor()
         
-        # Extract package data
+        # Extract package data from main packages table
+        logger.info("Extracting package data from main database...")
         main_cursor.execute("""
             SELECT package_id, package_name, version, attribute_path, description, 
-                   long_description, homepage, license, platforms, maintainers, 
-                   category, broken, unfree, available, insecure, unsupported, 
-                   main_program, position, outputs_to_install, last_updated, content_hash
+                   long_description, homepage, category, broken, unfree, available, 
+                   insecure, unsupported, main_program, position, outputs_to_install, 
+                   last_updated, content_hash
             FROM packages
         """)
         
@@ -696,28 +742,100 @@ class SQLiteWriter:
         
         for row in main_cursor.fetchall():
             pkg = dict(zip(columns, row))
-            # Convert JSON strings back to objects
-            for field in ['license', 'platforms', 'maintainers', 'outputs_to_install']:
-                if pkg[field]:
-                    try:
-                        pkg[field] = json.loads(pkg[field])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
+            package_id = pkg['package_id']
+            
+            # Convert outputs_to_install back to object if it exists
+            if pkg.get('outputs_to_install'):
+                try:
+                    pkg['outputs_to_install'] = json.loads(pkg['outputs_to_install'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            
+            # Extract licenses from junction table
+            main_cursor.execute("""
+                SELECT l.short_name, l.full_name, l.spdx_id, l.url, l.is_free, l.is_redistributable, l.is_deprecated
+                FROM licenses l
+                JOIN package_licenses pl ON l.license_id = pl.license_id
+                WHERE pl.package_id = ?
+            """, (package_id,))
+            
+            licenses = []
+            for lic_row in main_cursor.fetchall():
+                licenses.append({
+                    'shortName': lic_row[0],
+                    'fullName': lic_row[1],
+                    'spdxId': lic_row[2],
+                    'url': lic_row[3],
+                    'free': lic_row[4],
+                    'redistributable': lic_row[5],
+                    'deprecated': lic_row[6]
+                })
+            
+            if len(licenses) == 1:
+                pkg['license'] = licenses[0]
+            elif len(licenses) > 1:
+                pkg['license'] = {
+                    'type': 'array',
+                    'licenses': licenses
+                }
+            else:
+                pkg['license'] = None
+            
+            # Extract maintainers from junction table
+            main_cursor.execute("""
+                SELECT m.name, m.email, m.github, m.github_id
+                FROM maintainers m
+                JOIN package_maintainers pm ON m.maintainer_id = pm.maintainer_id
+                WHERE pm.package_id = ?
+            """, (package_id,))
+            
+            maintainers = []
+            for maint_row in main_cursor.fetchall():
+                maintainer = {}
+                # Only add fields that have values
+                if maint_row[0]:  # name
+                    maintainer['name'] = maint_row[0]
+                if maint_row[1]:  # email
+                    maintainer['email'] = maint_row[1]
+                if maint_row[2]:  # github
+                    maintainer['github'] = maint_row[2]
+                if maint_row[3] is not None:  # github_id (can be 0)
+                    maintainer['githubId'] = maint_row[3]
+                
+                # Add maintainer if it has any data (githubId alone is valid)
+                if maintainer:
+                    maintainers.append(maintainer)
+            
+            pkg['maintainers'] = maintainers if maintainers else None
+            
+            # Extract platforms (architectures) from junction table
+            main_cursor.execute("""
+                SELECT a.name
+                FROM architectures a
+                JOIN package_architectures pa ON a.arch_id = pa.arch_id
+                WHERE pa.package_id = ?
+            """, (package_id,))
+            
+            platforms = [row[0] for row in main_cursor.fetchall()]
+            pkg['platforms'] = platforms if platforms else None
+            
             packages.append(pkg)
         
         main_conn.close()
+        
+        # Log statistics about extracted data
+        packages_with_licenses = sum(1 for p in packages if p.get('license'))
+        packages_with_maintainers = sum(1 for p in packages if p.get('maintainers'))
+        packages_with_platforms = sum(1 for p in packages if p.get('platforms'))
+        
         logger.info("Extracted %d packages from main database", len(packages))
+        logger.info("  - Packages with licenses: %d", packages_with_licenses)
+        logger.info("  - Packages with maintainers: %d", packages_with_maintainers)
+        logger.info("  - Packages with platforms: %d", packages_with_platforms)
+        
         return packages
 
-    def _package_id(self, p: Dict[str, Any]) -> str:
-        # Prefer attributePath, fallback to name@version
-        attr = (p.get("attributePath") or "").strip()
-        if attr:
-            return attr
-        name = (p.get("packageName") or "").strip()
-        ver = (p.get("version") or "").strip()
-        return f"{name}@{ver}" if name or ver else "unknown"
-
+  
     def _delete_s3_objects(self, bucket: str, prefix: str) -> None:
         """Delete all objects with given prefix from S3 bucket."""
         if boto3 is None:
